@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import Markdown from 'react-native-markdown-display';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing, Fonts } from '@/constants/theme';
 
@@ -8,99 +7,130 @@ interface AssistantMessageProps {
   text: string;
 }
 
+type MessageSegment =
+  | { type: 'text'; value: string }
+  | { type: 'code'; value: string };
+
+function parseMessageSegments(input: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const fenceRegex = /```[^\n]*\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = fenceRegex.exec(input)) !== null) {
+    const [fullMatch, codeContent] = match;
+    const matchStart = match.index;
+
+    if (matchStart > lastIndex) {
+      segments.push({ type: 'text', value: input.slice(lastIndex, matchStart) });
+    }
+
+    const normalizedCode = codeContent.replace(/\n$/, '');
+    segments.push({ type: 'code', value: normalizedCode });
+    lastIndex = matchStart + fullMatch.length;
+  }
+
+  if (lastIndex < input.length) {
+    segments.push({ type: 'text', value: input.slice(lastIndex) });
+  }
+
+  return segments;
+}
+
+function renderInlineCode(text: string, colorText: string, colorBg: string, colorCode: string) {
+  const inlineCodeRegex = /`([^`]+)`/g;
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = inlineCodeRegex.exec(text)) !== null) {
+    const [fullMatch, codeValue] = match;
+    const matchStart = match.index;
+
+    if (matchStart > lastIndex) {
+      nodes.push(
+        <Text key={`txt-${lastIndex}`} style={{ color: colorText }}>
+          {text.slice(lastIndex, matchStart)}
+        </Text>
+      );
+    }
+
+    nodes.push(
+      <Text
+        key={`code-${matchStart}`}
+        style={[
+          styles.inlineCode,
+          {
+            backgroundColor: colorBg,
+            color: colorCode,
+          },
+        ]}
+      >
+        {codeValue}
+      </Text>
+    );
+
+    lastIndex = matchStart + fullMatch.length;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(
+      <Text key={`tail-${lastIndex}`} style={{ color: colorText }}>
+        {text.slice(lastIndex)}
+      </Text>
+    );
+  }
+
+  return nodes;
+}
+
 export function AssistantMessage({ text }: AssistantMessageProps) {
   const colors = useTheme();
 
   if (!text.trim()) return null;
-
-  const markdownStyles = {
-    body: {
-      color: colors.assistantBubbleText,
-      fontSize: FontSize.md,
-      lineHeight: 22,
-    },
-    paragraph: {
-      marginTop: 0,
-      marginBottom: 8,
-    },
-    code_inline: {
-      backgroundColor: colors.backgroundElement,
-      color: colors.text,
-      fontFamily: Fonts?.mono ?? 'monospace',
-      fontSize: FontSize.sm,
-      paddingHorizontal: 4,
-      paddingVertical: 1,
-      borderRadius: 4,
-    },
-    fence: {
-      backgroundColor: colors.backgroundElement,
-      color: colors.text,
-      fontFamily: Fonts?.mono ?? 'monospace',
-      fontSize: FontSize.sm,
-      padding: 12,
-      borderRadius: 8,
-      marginVertical: 8,
-    },
-    code_block: {
-      backgroundColor: colors.backgroundElement,
-      color: colors.text,
-      fontFamily: Fonts?.mono ?? 'monospace',
-      fontSize: FontSize.sm,
-      padding: 12,
-      borderRadius: 8,
-    },
-    heading1: {
-      color: colors.text,
-      fontSize: 24,
-      fontWeight: '700' as const,
-      marginBottom: 8,
-      marginTop: 16,
-    },
-    heading2: {
-      color: colors.text,
-      fontSize: 20,
-      fontWeight: '600' as const,
-      marginBottom: 6,
-      marginTop: 12,
-    },
-    heading3: {
-      color: colors.text,
-      fontSize: 17,
-      fontWeight: '600' as const,
-      marginBottom: 4,
-      marginTop: 10,
-    },
-    link: {
-      color: colors.tint,
-    },
-    blockquote: {
-      backgroundColor: colors.backgroundElement,
-      borderLeftColor: colors.tint,
-      borderLeftWidth: 3,
-      paddingLeft: 12,
-      paddingVertical: 4,
-      marginVertical: 8,
-    },
-    list_item: {
-      marginBottom: 4,
-    },
-    strong: {
-      fontWeight: '700' as const,
-    },
-    em: {
-      fontStyle: 'italic' as const,
-    },
-    hr: {
-      backgroundColor: colors.border,
-      height: 1,
-      marginVertical: 12,
-    },
-  };
+  const segments = parseMessageSegments(text);
 
   return (
     <View style={styles.container}>
       <View style={[styles.bubble, { backgroundColor: colors.assistantBubble }]}>
-        <Markdown style={markdownStyles}>{text}</Markdown>
+        {segments.map((segment, segmentIndex) => {
+          if (segment.type === 'code') {
+            return (
+              <View
+                key={`code-${segmentIndex}`}
+                style={[
+                  styles.codeBlock,
+                  {
+                    backgroundColor: colors.backgroundElement,
+                  },
+                ]}
+              >
+                <Text style={[styles.codeText, { color: colors.text }]}>
+                  {segment.value}
+                </Text>
+              </View>
+            );
+          }
+
+          const paragraphs = segment.value
+            .split(/\n{2,}/)
+            .map((p) => p.trim())
+            .filter(Boolean);
+
+          return paragraphs.map((paragraph, paragraphIndex) => (
+            <Text
+              key={`text-${segmentIndex}-${paragraphIndex}`}
+              style={[styles.paragraph, { color: colors.assistantBubbleText }]}
+            >
+              {renderInlineCode(
+                paragraph,
+                colors.assistantBubbleText,
+                colors.backgroundElement,
+                colors.text
+              )}
+            </Text>
+          ));
+        })}
       </View>
     </View>
   );
@@ -118,5 +148,26 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.md,
     borderRadius: 18,
     borderBottomLeftRadius: 4,
+  },
+  paragraph: {
+    fontSize: FontSize.md,
+    lineHeight: 22,
+    marginBottom: 8,
+  },
+  inlineCode: {
+    fontFamily: Fonts?.mono ?? 'monospace',
+    fontSize: FontSize.sm,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  codeBlock: {
+    padding: 12,
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+  codeText: {
+    fontFamily: Fonts?.mono ?? 'monospace',
+    fontSize: FontSize.sm,
   },
 });
