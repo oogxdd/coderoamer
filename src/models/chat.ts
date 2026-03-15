@@ -1,6 +1,7 @@
 import { JSONValue, jsonGet, jsonString, jsonPretty } from './claude-events';
 
 export type ChatRole = 'user' | 'assistant' | 'system';
+export type AgentProvider = 'claude' | 'codex';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
 
@@ -147,4 +148,8 @@ export function toolResultDisplayContent(card: ToolResultCard): string {
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+export function providerDisplayName(provider: AgentProvider): string {
+  return provider === 'codex' ? 'Codex' : 'Claude';
 }

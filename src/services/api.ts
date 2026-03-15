@@ -12,6 +12,29 @@ class AppError extends Error {
   }
 }
 
+function parseServiceEventLine(line: string): ServiceLogEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  if (
+    trimmed.startsWith('event:') ||
+    trimmed.startsWith('id:') ||
+    trimmed.startsWith('retry:') ||
+    trimmed.startsWith(':')
+  ) {
+    return null;
+  }
+
+  const payload = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+  if (!payload || payload === '[DONE]') return null;
+
+  try {
+    return JSON.parse(payload) as ServiceLogEvent;
+  } catch {
+    return null;
+  }
+}
+
 async function getToken(): Promise<string> {
   const token = await loadToken('spritesToken');
   if (!token) throw new AppError('noToken', 'No Sprites API token');
@@ -206,38 +229,35 @@ export async function streamService(
   }
 
   const reader = response.body?.getReader();
-  if (!reader) return;
-
   const decoder = new TextDecoder();
   let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
+  const consumeChunk = (chunk: string) => {
+    buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
 
     for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event: ServiceLogEvent = JSON.parse(line);
-        onEvent(event);
-      } catch {
-        // Skip unparseable lines
-      }
+      const event = parseServiceEventLine(line);
+      if (event) onEvent(event);
     }
+  };
+
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      consumeChunk(decoder.decode(value, { stream: true }));
+    }
+  } else {
+    // Some RN runtimes don't expose a streaming reader; fall back to full text parse.
+    const text = await response.text();
+    if (text) consumeChunk(text.endsWith('\n') ? text : `${text}\n`);
   }
 
   // Process remaining buffer
   if (buffer.trim()) {
-    try {
-      const event: ServiceLogEvent = JSON.parse(buffer);
-      onEvent(event);
-    } catch {
-      // Skip
-    }
+    const event = parseServiceEventLine(buffer);
+    if (event) onEvent(event);
   }
 }
 
@@ -266,37 +286,33 @@ export async function streamServiceLogs(
   }
 
   const reader = response.body?.getReader();
-  if (!reader) return;
-
   const decoder = new TextDecoder();
   let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
+  const consumeChunk = (chunk: string) => {
+    buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
 
     for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event: ServiceLogEvent = JSON.parse(line);
-        onEvent(event);
-      } catch {
-        // Skip
-      }
+      const event = parseServiceEventLine(line);
+      if (event) onEvent(event);
     }
+  };
+
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      consumeChunk(decoder.decode(value, { stream: true }));
+    }
+  } else {
+    const text = await response.text();
+    if (text) consumeChunk(text.endsWith('\n') ? text : `${text}\n`);
   }
 
   if (buffer.trim()) {
-    try {
-      const event: ServiceLogEvent = JSON.parse(buffer);
-      onEvent(event);
-    } catch {
-      // Skip
-    }
+    const event = parseServiceEventLine(buffer);
+    if (event) onEvent(event);
   }
 }
 

@@ -11,6 +11,7 @@ import {
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
 import { PersistedChat, loadChatList, saveChatList, deleteChatMessages } from '@/services/storage';
+import { providerDisplayName } from '@/models/chat';
 
 interface ChatListSheetProps {
   spriteName: string;
@@ -36,8 +37,8 @@ export function ChatListSheet({
 
   const handleDelete = (chat: PersistedChat) => {
     Alert.alert(
-      'Delete Chat',
-      `Delete "${chat.customName ?? `Chat ${chat.chatNumber}`}"? This cannot be undone.`,
+      'Delete Session',
+      `Delete "${chat.customName ?? `Session ${chat.chatNumber}`}"? This cannot be undone.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -76,7 +77,7 @@ export function ChatListSheet({
           <Pressable onPress={onClose} hitSlop={12}>
             <Text style={[styles.closeButton, { color: colors.tint }]}>Close</Text>
           </Pressable>
-          <Text style={[styles.title, { color: colors.text }]}>Chats</Text>
+          <Text style={[styles.title, { color: colors.text }]}>Sessions</Text>
           <Pressable onPress={onNewChat} hitSlop={12}>
             <Text style={[styles.newButton, { color: colors.tint }]}>+ New</Text>
           </Pressable>
@@ -88,7 +89,7 @@ export function ChatListSheet({
           contentContainerStyle={styles.listContent}
           renderItem={({ item }) => {
             const isActive = item.id === currentChatId;
-            const chatName = item.customName ?? `Chat ${item.chatNumber}`;
+            const chatName = item.customName ?? `Session ${item.chatNumber}`;
 
             return (
               <Pressable
@@ -132,6 +133,9 @@ export function ChatListSheet({
                       No messages
                     </Text>
                   )}
+                  <Text style={[styles.chatProvider, { color: colors.textSecondary }]}>
+                    {providerDisplayName(item.provider)}
+                  </Text>
                 </View>
                 {isActive && (
                   <View style={[styles.activeDot, { backgroundColor: colors.tint }]} />
@@ -142,7 +146,7 @@ export function ChatListSheet({
           ListEmptyComponent={
             <View style={styles.emptyView}>
               <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-                No chats yet. Tap "+ New" to start one.
+                No sessions yet. Tap "+ New" to start one.
               </Text>
             </View>
           }
@@ -207,6 +211,12 @@ const styles = StyleSheet.create({
   chatPreview: {
     fontSize: FontSize.sm,
     lineHeight: 18,
+  },
+  chatProvider: {
+    fontSize: FontSize.xs,
+    marginTop: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
   activeDot: {
     width: 8,

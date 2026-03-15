@@ -10,13 +10,21 @@ import {
   Alert,
   ActivityIndicator,
 } from 'react-native';
+import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
+import { AgentProvider } from '@/models/chat';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
 type MaxTurns = 0 | 5 | 10 | 25 | 50;
+type ProviderOption = { label: string; value: AgentProvider };
+
+const PROVIDER_OPTIONS: ProviderOption[] = [
+  { label: 'Claude', value: 'claude' },
+  { label: 'Codex', value: 'codex' },
+];
 
 const MODEL_OPTIONS: { label: string; value: ClaudeModel }[] = [
   { label: 'Sonnet', value: 'sonnet' },
@@ -39,6 +47,7 @@ export default function SettingsScreen() {
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
 
   // Claude Configuration
+  const [defaultProvider, setDefaultProvider] = useState<AgentProvider>('claude');
   const [claudeModel, setClaudeModel] = useState<ClaudeModel>('sonnet');
   const [maxTurns, setMaxTurns] = useState<MaxTurns>(0);
   const [customInstructions, setCustomInstructions] = useState('');
@@ -54,15 +63,20 @@ export default function SettingsScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const [model, turns, instructions, name, email, checkpoint] = await Promise.all([
-          getSetting('claudeModel'),
-          getSetting('maxTurns'),
-          getSetting('customInstructions'),
-          getSetting('gitName'),
-          getSetting('gitEmail'),
-          getSettingBool('autoCheckpoint'),
-        ]);
+        const [providerSetting, model, turns, instructions, name, email, checkpoint] =
+          await Promise.all([
+            getSetting('defaultProvider'),
+            getSetting('claudeModel'),
+            getSetting('maxTurns'),
+            getSetting('customInstructions'),
+            getSetting('gitName'),
+            getSetting('gitEmail'),
+            getSettingBool('autoCheckpoint'),
+          ]);
 
+        if (providerSetting === 'claude' || providerSetting === 'codex') {
+          setDefaultProvider(providerSetting as AgentProvider);
+        }
         if (model && ['sonnet', 'opus', 'haiku'].includes(model)) {
           setClaudeModel(model as ClaudeModel);
         }
@@ -87,6 +101,11 @@ export default function SettingsScreen() {
   const handleModelChange = useCallback(async (model: ClaudeModel) => {
     setClaudeModel(model);
     await setSetting('claudeModel', model);
+  }, []);
+
+  const handleDefaultProviderChange = useCallback(async (nextProvider: AgentProvider) => {
+    setDefaultProvider(nextProvider);
+    await setSetting('defaultProvider', nextProvider);
   }, []);
 
   const handleMaxTurnsChange = useCallback(async (turns: MaxTurns) => {
@@ -186,6 +205,40 @@ export default function SettingsScreen() {
       >
         <Text style={[styles.signOutText, { color: colors.destructive }]}>Sign Out</Text>
       </Pressable>
+
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>DEFAULT AGENT</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={styles.pickerRow}>
+          <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
+            {PROVIDER_OPTIONS.map((option) => (
+              <Pressable
+                key={option.value}
+                style={[
+                  styles.segmentButton,
+                  defaultProvider === option.value && {
+                    backgroundColor: colors.card,
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: 0.15,
+                    shadowRadius: 2,
+                    elevation: 2,
+                  },
+                ]}
+                onPress={() => handleDefaultProviderChange(option.value)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: defaultProvider === option.value ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      </View>
 
       {/* Claude Configuration Section */}
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>
@@ -328,6 +381,32 @@ export default function SettingsScreen() {
             autoCorrect={false}
           />
         </View>
+      </View>
+
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>EXPERIMENTS</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            styles.rowWithBorder,
+            { borderBottomColor: colors.border, opacity: pressed ? 0.7 : 1 },
+          ]}
+          onPress={() => router.push('/(app)/ttyd-terminal')}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>TTYD Terminal</Text>
+          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            { opacity: pressed ? 0.7 : 1 },
+          ]}
+          onPress={() => router.push('/(app)/exec-poc')}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Exec WebSocket POC</Text>
+          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
+        </Pressable>
       </View>
 
       {/* Preferences Section */}
