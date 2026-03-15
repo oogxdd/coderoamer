@@ -14,7 +14,7 @@ import {
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
-import { ChatMessage, toolUseActivityLabel } from '@/models/chat';
+import { AgentProvider, ChatMessage, providerDisplayName, toolUseActivityLabel } from '@/models/chat';
 import * as api from '@/services/api';
 import { useChat } from '@/hooks/useChat';
 import { useTheme } from '@/hooks/use-theme';
@@ -23,10 +23,14 @@ import { ChatInputBar } from '@/components/chat/ChatInputBar';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { PersistedChat, loadChatList, saveChatList } from '@/services/storage';
+import { PersistedChat, getSetting, loadChatList, saveChatList } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
 
 type Tab = 'overview' | 'chat' | 'checkpoints';
+
+function normalizeProvider(provider: unknown): AgentProvider {
+  return provider === 'codex' ? 'codex' : 'claude';
+}
 
 /** Find the active tool label from the last assistant message's content */
 function getActiveToolLabel(
@@ -57,7 +61,10 @@ export default function SpriteDetailScreen() {
 
   // Multi-chat state
   const [chatId, setChatId] = useState<string>('');
-  const [chatName, setChatName] = useState<string>('Chat 1');
+  const [chatName, setChatName] = useState<string>('Session 1');
+  const [chatProvider, setChatProvider] = useState<AgentProvider>('claude');
+  const [claudeSessionId, setClaudeSessionId] = useState<string | undefined>();
+  const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
   const chatListRef = useRef<PersistedChat[]>([]);
@@ -69,7 +76,27 @@ export default function SpriteDetailScreen() {
     spriteName,
     chatId,
     workingDirectory,
+    provider: chatProvider,
+    initialClaudeSessionId: claudeSessionId,
+    initialCodexSessionId: codexSessionId,
+    onSessionIdsChange: (sessionIds) => {
+      setClaudeSessionId(sessionIds.claudeSessionId);
+      setCodexSessionId(sessionIds.codexSessionId);
+      if (!chatId) return;
+      const updated = chatListRef.current.map((chatMeta) =>
+        chatMeta.id === chatId
+          ? {
+              ...chatMeta,
+              claudeSessionId: sessionIds.claudeSessionId,
+              codexSessionId: sessionIds.codexSessionId,
+            }
+          : chatMeta
+      );
+      chatListRef.current = updated;
+      saveChatList(spriteName, updated);
+    },
   });
+  const isProviderLocked = chat.messages.some((message) => message.role === 'user');
 
   // Initialize chat list and current chat on mount
   useEffect(() => {
@@ -84,13 +111,18 @@ export default function SpriteDetailScreen() {
         const sorted = [...chats].sort((a, b) => b.lastUsed - a.lastUsed);
         const current = sorted[0];
         setChatId(current.id);
-        setChatName(current.customName ?? `Chat ${current.chatNumber}`);
+        setChatName(current.customName ?? `Session ${current.chatNumber}`);
+        setChatProvider(normalizeProvider(current.provider));
+        setClaudeSessionId(current.claudeSessionId);
+        setCodexSessionId(current.codexSessionId);
       } else {
+        const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
         // Create the first chat
         const firstChat: PersistedChat = {
           id: `${spriteName}-chat-1`,
           spriteName,
           chatNumber: 1,
+          provider: defaultProvider,
           workingDirectory,
           createdAt: Date.now(),
           lastUsed: Date.now(),
@@ -101,8 +133,12 @@ export default function SpriteDetailScreen() {
         chatListRef.current = [firstChat];
         await saveChatList(spriteName, [firstChat]);
         setChatId(firstChat.id);
-        setChatName('Chat 1');
+        setChatName('Session 1');
+        setChatProvider(defaultProvider);
+        setClaudeSessionId(undefined);
+        setCodexSessionId(undefined);
       }
+      setChatListVisible(true);
     })();
     return () => { mounted = false; };
   }, [spriteName]);
@@ -162,14 +198,20 @@ export default function SpriteDetailScreen() {
     chat.sendMessage();
   };
 
-  const handleNewChat = useCallback(async () => {
+  const handleNewChat = useCallback(async (providerOverride?: unknown) => {
     const chats = chatListRef.current;
     const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
     const newNumber = maxNumber + 1;
+    const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
+    const nextProvider =
+      providerOverride === 'claude' || providerOverride === 'codex'
+        ? providerOverride
+        : defaultProvider;
     const newChat: PersistedChat = {
       id: `${spriteName}-chat-${newNumber}`,
       spriteName,
       chatNumber: newNumber,
+      provider: nextProvider,
       workingDirectory,
       createdAt: Date.now(),
       lastUsed: Date.now(),
@@ -181,13 +223,19 @@ export default function SpriteDetailScreen() {
     chatListRef.current = updated;
     await saveChatList(spriteName, updated);
     setChatId(newChat.id);
-    setChatName(`Chat ${newNumber}`);
+    setChatName(`Session ${newNumber}`);
+    setChatProvider(nextProvider);
+    setClaudeSessionId(undefined);
+    setCodexSessionId(undefined);
     setChatListVisible(false);
   }, [spriteName, workingDirectory]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
     setChatId(selectedChat.id);
-    setChatName(selectedChat.customName ?? `Chat ${selectedChat.chatNumber}`);
+    setChatName(selectedChat.customName ?? `Session ${selectedChat.chatNumber}`);
+    setChatProvider(normalizeProvider(selectedChat.provider));
+    setClaudeSessionId(selectedChat.claudeSessionId);
+    setCodexSessionId(selectedChat.codexSessionId);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
       c.id === selectedChat.id ? { ...c, lastUsed: Date.now() } : c
@@ -197,9 +245,48 @@ export default function SpriteDetailScreen() {
     setChatListVisible(false);
   }, [spriteName]);
 
+  const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
+    if (!chatId || chat.isStreaming || isProviderLocked) return;
+    setChatProvider(nextProvider);
+    const updated = chatListRef.current.map((c) =>
+      c.id === chatId ? { ...c, provider: nextProvider } : c
+    );
+    chatListRef.current = updated;
+    saveChatList(spriteName, updated);
+  }, [chat.isStreaming, chatId, isProviderLocked, spriteName]);
+
+  useEffect(() => {
+    if (!chat.codexAuthIssue) return;
+    const isLocked = isProviderLocked;
+    Alert.alert(
+      'Codex Authentication Required',
+      isLocked
+        ? `${chat.codexAuthIssue}\n\nThis session is locked to Codex. Start a new Claude session now?`
+        : `${chat.codexAuthIssue}\n\nSwitch this session to Claude now?`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => chat.clearCodexAuthIssue(),
+        },
+        {
+          text: isLocked ? 'New Claude Session' : 'Switch to Claude',
+          onPress: () => {
+            if (isLocked) {
+              handleNewChat('claude');
+            } else {
+              handleProviderChange('claude');
+            }
+            chat.clearCodexAuthIssue();
+          },
+        },
+      ]
+    );
+  }, [chat.codexAuthIssue, chat.clearCodexAuthIssue, handleNewChat, handleProviderChange, isProviderLocked]);
+
   const handleInsertBashOutput = useCallback((text: string) => {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
-  }, [chat]);
+  }, [chat.setInputText]);
 
   // Active tool label for the chat tab
   const activeToolLabel = chat.isStreaming
@@ -238,7 +325,7 @@ export default function SpriteDetailScreen() {
           )}
           {tab === 'chat' && (
             <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-              {chatName}
+              {chatName} - {providerDisplayName(chatProvider)}
             </Text>
           )}
         </View>
@@ -334,7 +421,7 @@ export default function SpriteDetailScreen() {
               ) : (
                 <View style={styles.emptyChatView}>
                   <Text style={[styles.emptyChatTitle, { color: colors.text }]}>
-                    Chat with Claude
+                    Chat with {providerDisplayName(chatProvider)}
                   </Text>
                   <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
                     Send a message to start coding on this sprite.
@@ -347,7 +434,7 @@ export default function SpriteDetailScreen() {
             <View style={styles.connectingBar}>
               <ActivityIndicator size="small" color={colors.tint} />
               <Text style={[styles.connectingText, { color: colors.textSecondary }]}>
-                Connecting to Claude...
+                Connecting to {providerDisplayName(chatProvider)}...
               </Text>
             </View>
           )}
@@ -364,6 +451,9 @@ export default function SpriteDetailScreen() {
             onSend={handleSend}
             onInterrupt={chat.interrupt}
             isStreaming={chat.isStreaming}
+            provider={chatProvider}
+            providerLocked={isProviderLocked}
+            onProviderChange={handleProviderChange}
           />
         </KeyboardAvoidingView>
       )}
@@ -376,7 +466,9 @@ export default function SpriteDetailScreen() {
           spriteName={spriteName}
           currentChatId={chatId}
           onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
+          onNewChat={() => {
+            void handleNewChat();
+          }}
           onClose={() => setChatListVisible(false)}
         />
       )}

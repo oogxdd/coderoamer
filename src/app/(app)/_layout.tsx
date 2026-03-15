@@ -13,7 +13,7 @@ export default function AppLayout() {
     <Stack>
       <Stack.Screen
         name="index"
-        options={{ title: 'Sprites', headerLargeTitle: true }}
+        options={{ title: 'Sprites', headerLargeTitle: false }}
       />
       <Stack.Screen
         name="sprite/[name]"
@@ -22,6 +22,14 @@ export default function AppLayout() {
       <Stack.Screen
         name="settings"
         options={{ title: 'Settings' }}
+      />
+      <Stack.Screen
+        name="exec-poc"
+        options={{ title: 'Exec POC' }}
+      />
+      <Stack.Screen
+        name="ttyd-terminal"
+        options={{ title: 'TTYD Terminal' }}
       />
     </Stack>
   );
