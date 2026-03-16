@@ -1,4 +1,7 @@
+import SkiaWebWrapper from '@/components/web/WithSkiaWeb';
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+
+// ... other imports stay the same
 import {
   Alert,
   KeyboardAvoidingView,
@@ -305,27 +308,53 @@ export default function ExecPocScreen() {
         ) : null}
 
         <View style={[styles.logContainer, { backgroundColor: '#0d1117', borderColor: colors.border }]}>
-          <SkiaTerminal
-            ref={termRef}
-            onData={(data) => client.send(data, false)}
-            onResize={(cols, rows) => client.resize(cols, rows)}
-            fontSize={13}
-            cursorBlinkInterval={600}
-            theme={{
-              background: '#0d1117',
-              foreground: '#c9d1d9',
-              cursor: '#58a6ff',
-              cursorAccent: '#0d1117',
-              selectionBackground: '#264f78',
-              selectionForeground: '#ffffff',
-              ansiColors: [
-                '#484f58', '#ff7b72', '#3fb950', '#d29922',
-                '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
-                '#6e7681', '#ffa198', '#56d364', '#e3b341',
-                '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
-              ],
-            }}
-          />
+          {Platform.OS === 'web' ? (
+            <SkiaWebWrapper>
+              <SkiaTerminal
+                ref={termRef}
+                onData={(data) => client.send(data, false)}
+                onResize={(cols, rows) => client.resize(cols, rows)}
+                fontSize={13}
+                cursorBlinkInterval={600}
+                theme={{
+                  background: '#0d1117',
+                  foreground: '#c9d1d9',
+                  cursor: '#58a6ff',
+                  cursorAccent: '#0d1117',
+                  selectionBackground: '#264f78',
+                  selectionForeground: '#ffffff',
+                  ansiColors: [
+                    '#484f58', '#ff7b72', '#3fb950', '#d29922',
+                    '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
+                    '#6e7681', '#ffa198', '#56d364', '#e3b341',
+                    '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
+                  ],
+                }}
+              />
+            </SkiaWebWrapper>
+          ) : (
+            <SkiaTerminal
+              ref={termRef}
+              onData={(data) => client.send(data, false)}
+              onResize={(cols, rows) => client.resize(cols, rows)}
+              fontSize={13}
+              cursorBlinkInterval={600}
+              theme={{
+                background: '#0d1117',
+                foreground: '#c9d1d9',
+                cursor: '#58a6ff',
+                cursorAccent: '#0d1117',
+                selectionBackground: '#264f78',
+                selectionForeground: '#ffffff',
+                ansiColors: [
+                  '#484f58', '#ff7b72', '#3fb950', '#d29922',
+                  '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
+                  '#6e7681', '#ffa198', '#56d364', '#e3b341',
+                  '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
+                ],
+              }}
+            />
+          )}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
