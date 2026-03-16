@@ -21,8 +21,7 @@ import {
 import { FontSize, Spacing } from '@/constants/theme';
 import type { SkiaTerminalHandle } from '@/components/terminal';
 
-// On native, we can statically import SkiaTerminal.
-// On web, we must defer it until CanvasKit is loaded via WithSkiaWeb.
+// On native, statically import. On web, defer until CanvasKit loads.
 const SkiaTerminalNative =
   Platform.OS !== 'web'
     ? require('@/components/terminal').SkiaTerminal
@@ -45,25 +44,26 @@ const TERMINAL_THEME = {
 
 const DEFAULT_CLAUDE_COMMAND = 'claude';
 
-type QuickControl = {
-  label: string;
-  payload: string;
-};
-
-const QUICK_CONTROLS: QuickControl[] = [
-  { label: '1+Enter', payload: '1\r' },
+const QUICK_CONTROLS = [
   { label: 'Enter', payload: '\r' },
   { label: 'Esc', payload: '\u001b' },
   { label: 'Tab', payload: '\t' },
+  { label: '1', payload: '1\r' },
   { label: 'Up', payload: '\u001b[A' },
   { label: 'Down', payload: '\u001b[B' },
-  { label: 'Left', payload: '\u001b[D' },
-  { label: 'Right', payload: '\u001b[C' },
   { label: 'Ctrl+C', payload: '\u0003' },
   { label: 'Ctrl+D', payload: '\u0004' },
 ];
 
-// Lazy web terminal: loads CanvasKit wasm, then dynamically imports SkiaTerminal
+const STATE_COLORS: Record<ExecConnectionState, string> = {
+  idle: '#6e7681',
+  connecting: '#d29922',
+  open: '#3fb950',
+  closed: '#6e7681',
+  error: '#ff7b72',
+};
+
+// ── Web Terminal (deferred Skia loading) ────────────────────────────────
 function WebTerminal({
   termRef,
   onData,
@@ -79,19 +79,15 @@ function WebTerminal({
 
   useEffect(() => {
     let cancelled = false;
-    console.log('[WebTerminal] Starting LoadSkiaWeb...');
     const { LoadSkiaWeb } = require('@shopify/react-native-skia/lib/module/web');
     LoadSkiaWeb()
       .then(async () => {
-        console.log('[WebTerminal] CanvasKit loaded, importing SkiaTerminalView...');
         if (cancelled) return;
         setSkiaReady(true);
         const mod = await import('@/components/terminal/SkiaTerminalView');
-        console.log('[WebTerminal] SkiaTerminalView imported, default export:', typeof mod.default);
         if (!cancelled) setTerminal(() => mod.default);
       })
       .catch((err: Error) => {
-        console.error('[WebTerminal] Error:', err);
         if (!cancelled) setError(err.message);
       });
     return () => { cancelled = true; };
@@ -99,23 +95,22 @@ function WebTerminal({
 
   if (error) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <Text style={{ color: '#ff6b6b' }}>Skia error: {error}</Text>
+      <View style={styles.terminalPlaceholder}>
+        <Text style={{ color: '#ff7b72', fontSize: 13 }}>Failed to load: {error}</Text>
       </View>
     );
   }
 
   if (!Terminal) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <Text style={{ color: '#c9d1d9' }}>
-          {skiaReady ? 'Loading terminal...' : 'Loading Skia...'}
+      <View style={styles.terminalPlaceholder}>
+        <View style={styles.loadingDot} />
+        <Text style={{ color: '#6e7681', fontSize: 13, marginTop: 8 }}>
+          {skiaReady ? 'Initializing terminal...' : 'Loading CanvasKit...'}
         </Text>
       </View>
     );
   }
-
-  console.log('[WebTerminal] Rendering Terminal component, termRef.current:', termRef.current);
 
   return (
     <Terminal
@@ -129,6 +124,7 @@ function WebTerminal({
   );
 }
 
+// ── Main Screen ─────────────────────────────────────────────────────────
 export default function ExecPocScreen() {
   const colors = useTheme();
   const [spriteName, setSpriteName] = useState('');
@@ -136,21 +132,15 @@ export default function ExecPocScreen() {
   const [attachSessionId, setAttachSessionId] = useState('');
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
-  const [showSetup, setShowSetup] = useState(false);
+  const [showSetup, setShowSetup] = useState(true);
   const [showKeys, setShowKeys] = useState(false);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
 
   const appendLog = useCallback((entry: ExecEventLog) => {
     if (!termRef.current) return;
-
     if (entry.source === 'ws') {
       termRef.current.write(entry.text);
-    } else if (entry.source === 'event') {
-      // Commented out to reduce noise, since session_info etc. events come often
-      // termRef.current.write(`\r\n\x1b[33m[EVENT]\x1b[0m ${entry.text}\r\n`);
-    } else if (entry.source === 'local') {
-      // termRef.current.write(`\r\n\x1b[34m[LOCAL]\x1b[0m ${entry.text}\r\n`);
     } else if (entry.source === 'error') {
       termRef.current.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
     }
@@ -166,22 +156,13 @@ export default function ExecPocScreen() {
     [appendLog]
   );
 
-  useEffect(() => {
-    return () => {
-      client.close();
-    };
-  }, [client]);
-
-  const sendControl = (label: string, payload: string) => {
-    client.send(payload, false);
-  };
+  useEffect(() => () => client.close(), [client]);
 
   const connect = async () => {
     if (!spriteName.trim()) {
       Alert.alert('Missing sprite name', 'Enter a sprite name first.');
       return;
     }
-
     try {
       await client.connect({
         spriteName: spriteName.trim(),
@@ -191,23 +172,7 @@ export default function ExecPocScreen() {
       setShowSetup(false);
       termRef.current?.focus();
     } catch (error) {
-      appendLog({
-        timestamp: Date.now(),
-        source: 'error',
-        text: `Connect failed: ${(error as Error).message}`,
-      });
-    }
-  };
-
-  const sendKill = async () => {
-    try {
-      await client.kill();
-    } catch (error) {
-      appendLog({
-        timestamp: Date.now(),
-        source: 'error',
-        text: `Kill failed: ${(error as Error).message}`,
-      });
+      appendLog({ timestamp: Date.now(), source: 'error', text: `Connect failed: ${(error as Error).message}` });
     }
   };
 
@@ -216,204 +181,107 @@ export default function ExecPocScreen() {
     setState('closed');
   };
 
-  const testTerminal = () => {
-    if (!termRef.current) {
-      console.warn('termRef.current is null');
-      return;
-    }
-    const sample =
-      '\x1b[?2026h' +
-      '\r\n────────────────────────────────────────────────────────────────────────────────\r\n\r\n' +
-      '\x1b[1C Accessing workspace:\r\n\r\n' +
-      '\x1b[1C /home/sprite\r\n\r\n' +
-      '\x1b[1C Quick safety check: Is this a project you created or one you trust?\r\n' +
-      '\x1b[1C (Like your own code, a well-known open source project, or work from your team).\r\n\r\n' +
-      '\x1b[32mHello \x1b[1;33mWorld\x1b[0m - Terminal is working!\r\n\r\n' +
-      '\x1b[1C \x1b[36m❯\x1b[0m 1. Yes, I trust this folder\r\n' +
-      '\x1b[3C 2. No, exit\r\n';
-    termRef.current.write(sample);
-  };
+  const isConnected = state === 'open';
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: colors.backgroundSecondary }]} edges={['top']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: '#010409' }]} edges={['top']}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <View style={styles.headerRow}>
-          <Pressable onPress={() => router.back()}>
-            <Text style={[styles.backButton, { color: colors.tint }]}>Back</Text>
+        {/* Header */}
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} hitSlop={8}>
+            <Text style={styles.headerLink}>Back</Text>
           </Pressable>
-          <Text style={[styles.title, { color: colors.text }]}>Terminal</Text>
+          <View style={styles.headerCenter}>
+            <View style={[styles.statusDot, { backgroundColor: STATE_COLORS[state] }]} />
+            <Text style={styles.headerTitle}>
+              {sessionId ? `Session ${sessionId}` : 'Terminal'}
+            </Text>
+          </View>
           <View style={styles.headerActions}>
-            <Pressable onPress={testTerminal}>
-              <Text style={[styles.clearButton, { color: colors.destructive || '#ff6b6b' }]}>Test</Text>
-            </Pressable>
-            <Pressable onPress={() => termRef.current?.focus()}>
-              <Text style={[styles.clearButton, { color: colors.tint }]}>Focus</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <View
-          style={[
-            styles.compactBar,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[styles.compactStatus, { color: colors.text }]}>State: {state}</Text>
-          <Text style={[styles.compactStatus, { color: colors.text }]}>
-            Session: {sessionId ?? 'n/a'}
-          </Text>
-          <View style={styles.compactActions}>
-            <Pressable
-              style={({ pressed }) => [
-                styles.compactButton,
-                { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-              ]}
-              onPress={() => setShowKeys((prev) => !prev)}
-            >
-              <Text style={[styles.compactButtonText, { color: colors.text }]}>
-                {showKeys ? 'Hide Keys' : 'Keys'}
-              </Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [
-                styles.compactButton,
-                { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-              ]}
-              onPress={() => setShowSetup((prev) => !prev)}
-            >
-              <Text style={[styles.compactButtonText, { color: colors.text }]}>
-                {showSetup ? 'Hide Setup' : 'Setup'}
+            <Pressable onPress={() => setShowSetup((v) => !v)} hitSlop={8}>
+              <Text style={[styles.headerLink, showSetup && { color: '#58a6ff' }]}>
+                {showSetup ? 'Hide' : 'Setup'}
               </Text>
             </Pressable>
           </View>
         </View>
 
-        {showSetup ? (
-          <View style={[styles.card, { backgroundColor: colors.card }]}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Sprite Name</Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder="my-sprite"
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={spriteName}
-              onChangeText={setSpriteName}
-            />
-
-            <Text style={[styles.label, { color: colors.textSecondary }]}>
-              Command (new session)
-            </Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder={DEFAULT_CLAUDE_COMMAND}
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={command}
-              onChangeText={setCommand}
-            />
-
-            <Text style={[styles.label, { color: colors.textSecondary }]}>
-              Attach Session ID (optional)
-            </Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder="Existing session ID"
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={attachSessionId}
-              onChangeText={setAttachSessionId}
-            />
-
-            <View style={styles.buttonRow}>
+        {/* Setup panel */}
+        {showSetup && (
+          <View style={styles.setupPanel}>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={styles.setupInput}
+                placeholder="sprite-name"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={spriteName}
+                onChangeText={setSpriteName}
+              />
+              <TextInput
+                style={[styles.setupInput, { flex: 0.6 }]}
+                placeholder="command"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={command}
+                onChangeText={setCommand}
+              />
+            </View>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={[styles.setupInput, { flex: 1 }]}
+                placeholder="attach session ID (optional)"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={attachSessionId}
+                onChangeText={setAttachSessionId}
+              />
               <Pressable
                 style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.tint, opacity: pressed ? 0.7 : 1 },
+                  styles.connectButton,
+                  isConnected
+                    ? { backgroundColor: '#21262d', borderColor: '#30363d' }
+                    : { backgroundColor: '#238636', borderColor: '#2ea043' },
+                  pressed && { opacity: 0.7 },
                 ]}
-                onPress={connect}
+                onPress={isConnected ? disconnect : connect}
               >
-                <Text style={styles.buttonText}>Connect</Text>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.destructive, opacity: pressed ? 0.7 : 1 },
-                ]}
-                onPress={sendKill}
-              >
-                <Text style={styles.buttonText}>Kill</Text>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-                ]}
-                onPress={disconnect}
-              >
-                <Text style={[styles.buttonText, { color: colors.text }]}>Disconnect</Text>
+                <Text style={[styles.connectButtonText, isConnected && { color: '#f0f6fc' }]}>
+                  {isConnected ? 'Disconnect' : state === 'connecting' ? 'Connecting...' : 'Connect'}
+                </Text>
               </Pressable>
             </View>
           </View>
-        ) : null}
+        )}
 
-        {showKeys ? (
+        {/* Quick keys */}
+        {isConnected && (
           <ScrollView
             horizontal
-            style={styles.quickControlsScroll}
-            contentContainerStyle={styles.quickControlsRow}
+            style={styles.keysScroll}
+            contentContainerStyle={styles.keysRow}
             showsHorizontalScrollIndicator={false}
           >
-            {QUICK_CONTROLS.map((control) => (
+            {QUICK_CONTROLS.map((c) => (
               <Pressable
-                key={control.label}
-                style={({ pressed }) => [
-                  styles.quickControlButton,
-                  {
-                    backgroundColor: colors.backgroundElement,
-                    borderColor: colors.border,
-                    opacity: pressed ? 0.7 : 1,
-                  },
-                ]}
-                onPress={() => sendControl(control.label, control.payload)}
+                key={c.label}
+                style={({ pressed }) => [styles.keyButton, pressed && { opacity: 0.6 }]}
+                onPress={() => client.send(c.payload, false)}
               >
-                <Text style={[styles.quickControlLabel, { color: colors.text }]}>
-                  {control.label}
-                </Text>
+                <Text style={styles.keyLabel}>{c.label}</Text>
               </Pressable>
             ))}
           </ScrollView>
-        ) : null}
+        )}
 
-        <View style={[styles.logContainer, { backgroundColor: '#0d1117', borderColor: colors.border }]}>
+        {/* Terminal */}
+        <View style={styles.terminalContainer}>
           {Platform.OS === 'web' ? (
             <WebTerminal
               termRef={termRef}
@@ -440,125 +308,118 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  headerRow: {
+  // ── Header ──
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.sm,
-    paddingBottom: Spacing.md,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
   },
-  backButton: {
-    fontSize: FontSize.md,
-    fontWeight: '500',
+  headerCenter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  title: {
-    fontSize: FontSize.lg,
+  headerTitle: {
+    color: '#c9d1d9',
+    fontSize: 14,
     fontWeight: '600',
   },
-  clearButton: {
-    fontSize: FontSize.md,
+  headerLink: {
+    color: '#8b949e',
+    fontSize: 14,
     fontWeight: '500',
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.md,
+    gap: 16,
   },
-  card: {
-    marginHorizontal: Spacing.lg,
-    borderRadius: 12,
-    padding: Spacing.md,
-    gap: Spacing.sm,
-    marginBottom: Spacing.sm,
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
-  compactBar: {
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.sm,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.sm,
+  // ── Setup panel ──
+  setupPanel: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
+  },
+  setupRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
+    gap: 8,
   },
-  compactStatus: {
-    fontSize: FontSize.xs,
-    fontWeight: '600',
-  },
-  compactActions: {
-    marginLeft: 'auto',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-  },
-  compactButton: {
-    borderRadius: 8,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-  },
-  compactButtonText: {
-    fontSize: FontSize.sm,
-    fontWeight: '600',
-  },
-  label: {
-    fontSize: FontSize.sm,
-    fontWeight: '500',
-  },
-  input: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    fontSize: FontSize.md,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginTop: Spacing.sm,
-  },
-  button: {
-    borderRadius: 8,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    minWidth: 98,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#FFFFFF',
-    fontSize: FontSize.sm,
-    fontWeight: '600',
-  },
-  quickControlsRow: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-    paddingHorizontal: Spacing.lg,
-    paddingBottom: Spacing.sm,
-  },
-  quickControlsScroll: {
-    marginBottom: Spacing.sm,
-    flexGrow: 0,
-  },
-  quickControlButton: {
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    minWidth: 78,
-    alignItems: 'center',
-  },
-  quickControlLabel: {
-    fontSize: FontSize.sm,
-    fontWeight: '500',
-  },
-  logContainer: {
+  setupInput: {
     flex: 1,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.lg,
-    borderRadius: 12,
-    overflow: 'hidden',
+    backgroundColor: '#0d1117',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    color: '#c9d1d9',
+    fontSize: 13,
+  },
+  connectButton: {
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  connectButtonText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  // ── Quick keys ──
+  keysScroll: {
+    flexGrow: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
+  },
+  keysRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  keyButton: {
+    backgroundColor: '#21262d',
+    borderRadius: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  keyLabel: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '500',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // ── Terminal ──
+  terminalContainer: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+  },
+  terminalPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0d1117',
+  },
+  loadingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#484f58',
   },
 });
