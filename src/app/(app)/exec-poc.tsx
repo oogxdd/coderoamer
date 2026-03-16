@@ -1,7 +1,4 @@
-import SkiaWebWrapper from '@/components/web/WithSkiaWeb';
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-
-// ... other imports stay the same
 import {
   Alert,
   KeyboardAvoidingView,
@@ -22,7 +19,29 @@ import {
   ExecEventLog,
 } from '@/services/exec-poc';
 import { FontSize, Spacing } from '@/constants/theme';
-import { SkiaTerminal, SkiaTerminalHandle } from '@/components/terminal';
+import type { SkiaTerminalHandle } from '@/components/terminal';
+
+// On native, we can statically import SkiaTerminal.
+// On web, we must defer it until CanvasKit is loaded via WithSkiaWeb.
+const SkiaTerminalNative =
+  Platform.OS !== 'web'
+    ? require('@/components/terminal').SkiaTerminal
+    : null;
+
+const TERMINAL_THEME = {
+  background: '#0d1117',
+  foreground: '#c9d1d9',
+  cursor: '#58a6ff',
+  cursorAccent: '#0d1117',
+  selectionBackground: '#264f78',
+  selectionForeground: '#ffffff',
+  ansiColors: [
+    '#484f58', '#ff7b72', '#3fb950', '#d29922',
+    '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
+    '#6e7681', '#ffa198', '#56d364', '#e3b341',
+    '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
+  ],
+};
 
 const DEFAULT_CLAUDE_COMMAND = 'claude';
 
@@ -44,6 +63,72 @@ const QUICK_CONTROLS: QuickControl[] = [
   { label: 'Ctrl+D', payload: '\u0004' },
 ];
 
+// Lazy web terminal: loads CanvasKit wasm, then dynamically imports SkiaTerminal
+function WebTerminal({
+  termRef,
+  onData,
+  onResize,
+}: {
+  termRef: React.RefObject<SkiaTerminalHandle | null>;
+  onData: (data: string) => void;
+  onResize: (cols: number, rows: number) => void;
+}) {
+  const [skiaReady, setSkiaReady] = useState(false);
+  const [Terminal, setTerminal] = useState<React.ComponentType<any> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    console.log('[WebTerminal] Starting LoadSkiaWeb...');
+    const { LoadSkiaWeb } = require('@shopify/react-native-skia/lib/module/web');
+    LoadSkiaWeb()
+      .then(async () => {
+        console.log('[WebTerminal] CanvasKit loaded, importing SkiaTerminalView...');
+        if (cancelled) return;
+        setSkiaReady(true);
+        const mod = await import('@/components/terminal/SkiaTerminalView');
+        console.log('[WebTerminal] SkiaTerminalView imported, default export:', typeof mod.default);
+        if (!cancelled) setTerminal(() => mod.default);
+      })
+      .catch((err: Error) => {
+        console.error('[WebTerminal] Error:', err);
+        if (!cancelled) setError(err.message);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (error) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <Text style={{ color: '#ff6b6b' }}>Skia error: {error}</Text>
+      </View>
+    );
+  }
+
+  if (!Terminal) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <Text style={{ color: '#c9d1d9' }}>
+          {skiaReady ? 'Loading terminal...' : 'Loading Skia...'}
+        </Text>
+      </View>
+    );
+  }
+
+  console.log('[WebTerminal] Rendering Terminal component, termRef.current:', termRef.current);
+
+  return (
+    <Terminal
+      ref={termRef}
+      onData={onData}
+      onResize={onResize}
+      fontSize={13}
+      cursorBlinkInterval={600}
+      theme={TERMINAL_THEME}
+    />
+  );
+}
+
 export default function ExecPocScreen() {
   const colors = useTheme();
   const [spriteName, setSpriteName] = useState('');
@@ -53,12 +138,12 @@ export default function ExecPocScreen() {
   const [state, setState] = useState<ExecConnectionState>('idle');
   const [showSetup, setShowSetup] = useState(false);
   const [showKeys, setShowKeys] = useState(false);
-  
+
   const termRef = useRef<SkiaTerminalHandle>(null);
 
   const appendLog = useCallback((entry: ExecEventLog) => {
     if (!termRef.current) return;
-    
+
     if (entry.source === 'ws') {
       termRef.current.write(entry.text);
     } else if (entry.source === 'event') {
@@ -131,6 +216,24 @@ export default function ExecPocScreen() {
     setState('closed');
   };
 
+  const testTerminal = () => {
+    if (!termRef.current) {
+      console.warn('termRef.current is null');
+      return;
+    }
+    const sample =
+      '\x1b[?2026h' +
+      '\r\n────────────────────────────────────────────────────────────────────────────────\r\n\r\n' +
+      '\x1b[1C Accessing workspace:\r\n\r\n' +
+      '\x1b[1C /home/sprite\r\n\r\n' +
+      '\x1b[1C Quick safety check: Is this a project you created or one you trust?\r\n' +
+      '\x1b[1C (Like your own code, a well-known open source project, or work from your team).\r\n\r\n' +
+      '\x1b[32mHello \x1b[1;33mWorld\x1b[0m - Terminal is working!\r\n\r\n' +
+      '\x1b[1C \x1b[36m❯\x1b[0m 1. Yes, I trust this folder\r\n' +
+      '\x1b[3C 2. No, exit\r\n';
+    termRef.current.write(sample);
+  };
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.backgroundSecondary }]} edges={['top']}>
       <KeyboardAvoidingView
@@ -143,6 +246,9 @@ export default function ExecPocScreen() {
           </Pressable>
           <Text style={[styles.title, { color: colors.text }]}>Terminal</Text>
           <View style={styles.headerActions}>
+            <Pressable onPress={testTerminal}>
+              <Text style={[styles.clearButton, { color: colors.destructive || '#ff6b6b' }]}>Test</Text>
+            </Pressable>
             <Pressable onPress={() => termRef.current?.focus()}>
               <Text style={[styles.clearButton, { color: colors.tint }]}>Focus</Text>
             </Pressable>
@@ -309,50 +415,19 @@ export default function ExecPocScreen() {
 
         <View style={[styles.logContainer, { backgroundColor: '#0d1117', borderColor: colors.border }]}>
           {Platform.OS === 'web' ? (
-            <SkiaWebWrapper>
-              <SkiaTerminal
-                ref={termRef}
-                onData={(data) => client.send(data, false)}
-                onResize={(cols, rows) => client.resize(cols, rows)}
-                fontSize={13}
-                cursorBlinkInterval={600}
-                theme={{
-                  background: '#0d1117',
-                  foreground: '#c9d1d9',
-                  cursor: '#58a6ff',
-                  cursorAccent: '#0d1117',
-                  selectionBackground: '#264f78',
-                  selectionForeground: '#ffffff',
-                  ansiColors: [
-                    '#484f58', '#ff7b72', '#3fb950', '#d29922',
-                    '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
-                    '#6e7681', '#ffa198', '#56d364', '#e3b341',
-                    '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
-                  ],
-                }}
-              />
-            </SkiaWebWrapper>
-          ) : (
-            <SkiaTerminal
-              ref={termRef}
+            <WebTerminal
+              termRef={termRef}
               onData={(data) => client.send(data, false)}
               onResize={(cols, rows) => client.resize(cols, rows)}
+            />
+          ) : (
+            <SkiaTerminalNative
+              ref={termRef}
+              onData={(data: string) => client.send(data, false)}
+              onResize={(cols: number, rows: number) => client.resize(cols, rows)}
               fontSize={13}
               cursorBlinkInterval={600}
-              theme={{
-                background: '#0d1117',
-                foreground: '#c9d1d9',
-                cursor: '#58a6ff',
-                cursorAccent: '#0d1117',
-                selectionBackground: '#264f78',
-                selectionForeground: '#ffffff',
-                ansiColors: [
-                  '#484f58', '#ff7b72', '#3fb950', '#d29922',
-                  '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
-                  '#6e7681', '#ffa198', '#56d364', '#e3b341',
-                  '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
-                ],
-              }}
+              theme={TERMINAL_THEME}
             />
           )}
         </View>

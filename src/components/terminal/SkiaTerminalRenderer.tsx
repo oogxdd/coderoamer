@@ -12,7 +12,8 @@
  *   - Proper Line decorations for underline/strikethrough
  */
 
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import {
   Canvas,
   Rect,
@@ -146,31 +147,69 @@ interface LoadedFonts {
   boldItalic: SkFont;
 }
 
+// On web, fetch a font file and create a Skia typeface from its data
+function useWebTypeface() {
+  const [typeface, setTypeface] = useState<any>(null);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    // Try CanvasKit's built-in default first
+    try {
+      const def = (Skia.Typeface as any).GetDefault?.() ?? (Skia.Typeface as any).MakeDefault?.();
+      if (def) { setTypeface(def); return; }
+    } catch {}
+
+    // Fetch monospace font from public directory
+    fetch('/GoogleSansCode-Regular.ttf')
+      .then(res => res.arrayBuffer())
+      .then(buf => {
+        const data = Skia.Data.fromBytes(new Uint8Array(buf));
+        const tf = Skia.Typeface.MakeFreeTypeFaceFromData(data);
+        if (tf) setTypeface(tf);
+      })
+      .catch(err => console.error('[useWebTypeface] Font fetch failed:', err));
+  }, []);
+
+  return typeface;
+}
+
 function useTerminalFonts(fontSize: number, fontConfig?: FontConfig): LoadedFonts | null {
   const customRegular = useFont((fontConfig?.regular as any) ?? null, fontSize);
   const customBold = useFont((fontConfig?.bold as any) ?? null, fontSize);
   const customItalic = useFont((fontConfig?.italic as any) ?? null, fontSize);
   const customBoldItalic = useFont((fontConfig?.boldItalic as any) ?? null, fontSize);
 
+  const webTypeface = useWebTypeface();
+  const webFont = useMemo(() => {
+    if (!webTypeface) return null;
+    try { return Skia.Font(webTypeface, fontSize); }
+    catch { return null; }
+  }, [webTypeface, fontSize]);
+
   const sysRegular = useMemo(() => {
+    if (Platform.OS === 'web') return null;
     try { return matchFont({ fontFamily: 'monospace', fontSize, fontWeight: 'normal', fontStyle: 'normal' }); }
     catch { return null; }
   }, [fontSize]);
   const sysBold = useMemo(() => {
+    if (Platform.OS === 'web') return null;
     try { return matchFont({ fontFamily: 'monospace', fontSize, fontWeight: 'bold', fontStyle: 'normal' }); }
     catch { return null; }
   }, [fontSize]);
   const sysItalic = useMemo(() => {
+    if (Platform.OS === 'web') return null;
     try { return matchFont({ fontFamily: 'monospace', fontSize, fontWeight: 'normal', fontStyle: 'italic' }); }
     catch { return null; }
   }, [fontSize]);
   const sysBoldItalic = useMemo(() => {
+    if (Platform.OS === 'web') return null;
     try { return matchFont({ fontFamily: 'monospace', fontSize, fontWeight: 'bold', fontStyle: 'italic' }); }
     catch { return null; }
   }, [fontSize]);
 
   return useMemo(() => {
-    const regular = customRegular || sysRegular;
+    const regular = customRegular || sysRegular || webFont;
     if (!regular) return null;
     return {
       regular,
@@ -179,7 +218,7 @@ function useTerminalFonts(fontSize: number, fontConfig?: FontConfig): LoadedFont
       boldItalic: customBoldItalic || sysBoldItalic || regular,
     };
   }, [customRegular, customBold, customItalic, customBoldItalic,
-      sysRegular, sysBold, sysItalic, sysBoldItalic]);
+      sysRegular, sysBold, sysItalic, sysBoldItalic, webFont]);
 }
 
 function selectFont(fonts: LoadedFonts, flags: number): SkFont {

@@ -7,7 +7,7 @@
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web",
+    "web": "node scripts/ws-proxy.js & expo start --web",
     "lint": "expo lint"
   },
   "dependencies": {
@@ -46,7 +46,8 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "ws": "^8.19.0"
   },
   "private": true
 }

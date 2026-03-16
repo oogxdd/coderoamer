@@ -1,7 +1,9 @@
+import { Platform } from 'react-native';
 import { loadToken } from '@/services/auth';
 
-const EXEC_HTTP_BASE = 'https://api.sprites.dev/v1';
-const EXEC_WS_BASE = 'wss://api.sprites.dev/v1';
+const EXEC_HTTP_BASE = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
+const EXEC_WS_BASE =
+  Platform.OS === 'web' ? 'ws://localhost:8082/v1' : 'wss://api.sprites.dev/v1';
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 40;
 
@@ -115,8 +117,12 @@ function extractOutput(payload: unknown): string | undefined {
   return undefined;
 }
 
-function decodeMessageData(data: unknown): string {
+async function decodeMessageData(data: unknown): Promise<string> {
   if (typeof data === 'string') return data;
+
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return data.text();
+  }
 
   if (data instanceof ArrayBuffer) {
     return new TextDecoder().decode(data);
@@ -182,19 +188,24 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     options.onSessionId(currentSessionId);
 
     const encodedSprite = encodeURIComponent(spriteName);
+    const isWeb = Platform.OS === 'web';
     const wsUrl = attachSessionId
-      ? `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec/${encodeURIComponent(attachSessionId)}`
-      : `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec?cmd=${encodeURIComponent(command)}&tty=true&stdin=true&cols=${DEFAULT_COLS}&rows=${DEFAULT_ROWS}`;
+      ? `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec/${encodeURIComponent(attachSessionId)}${isWeb ? `?token=${encodeURIComponent(token)}` : ''}`
+      : `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec?cmd=${encodeURIComponent(command)}&tty=true&stdin=true&cols=${DEFAULT_COLS}&rows=${DEFAULT_ROWS}${isWeb ? `&token=${encodeURIComponent(token)}` : ''}`;
 
     setState('connecting');
     options.onLog(makeLog('local', `Connecting: ${wsUrl}`));
 
-    const RNWebSocket = WebSocket as unknown as RNWebSocketCtor;
-    socket = new RNWebSocket(wsUrl, undefined, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
+    if (isWeb) {
+      socket = new WebSocket(wsUrl);
+    } else {
+      const RNWebSocket = WebSocket as unknown as RNWebSocketCtor;
+      socket = new RNWebSocket(wsUrl, undefined, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    }
 
     socket.onopen = () => {
       setState('open');
@@ -205,8 +216,8 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       }
     };
 
-    socket.onmessage = (event) => {
-      const raw = decodeMessageData(event.data);
+    socket.onmessage = async (event) => {
+      const raw = await decodeMessageData(event.data);
 
       let parsed: unknown;
       try {

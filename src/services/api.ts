@@ -1,9 +1,10 @@
 import { Sprite, SpritesListResponse } from '@/models/sprite';
 import { Checkpoint, CheckpointStreamEvent } from '@/models/checkpoint';
 import { ServiceRequest, ServiceLogEvent, ServiceInfo } from '@/models/service';
+import { Platform } from 'react-native';
 import { loadToken } from './auth';
 
-const BASE_URL = 'https://api.sprites.dev/v1';
+const BASE_URL = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
 
 class AppError extends Error {
   constructor(public code: string, message: string, public statusCode?: number) {
