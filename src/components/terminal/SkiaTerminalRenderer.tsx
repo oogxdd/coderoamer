@@ -277,8 +277,8 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
     // Hold visible for blinkInterval, then hidden for blinkInterval, repeat
     cursorOpacity.value = withRepeat(
       withSequence(
-        withTiming(1, { duration: cursorBlinkInterval, easing: Easing.step0 }),
-        withTiming(0, { duration: cursorBlinkInterval, easing: Easing.step0 }),
+        withTiming(1, { duration: cursorBlinkInterval, easing: Easing.steps(1) }),
+        withTiming(0, { duration: cursorBlinkInterval, easing: Easing.steps(1) }),
       ),
       -1, false,
     );

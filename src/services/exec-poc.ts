@@ -30,6 +30,7 @@ export interface ExecPocClient {
   sendCtrlC: () => void;
   close: () => void;
   kill: () => Promise<void>;
+  resize: (cols: number, rows: number) => void;
   getState: () => ExecConnectionState;
   getSessionId: () => string | undefined;
 }
@@ -311,6 +312,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     sendCtrlC,
     close,
     kill,
+    resize: sendResize,
     getState: () => state,
     getSessionId: () => currentSessionId,
   };

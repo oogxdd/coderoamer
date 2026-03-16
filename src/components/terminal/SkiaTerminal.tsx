@@ -69,6 +69,8 @@ export interface SkiaTerminalProps {
   onConnectionChange?: (status: ConnectionStatus) => void;
   /** Called when selection changes */
   onSelectionChange?: (text: string | null) => void;
+  /** Called when terminal resizes */
+  onResize?: (cols: number, rows: number) => void;
   width?: number;
   height?: number;
 }
@@ -133,6 +135,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   onBell,
   onConnectionChange,
   onSelectionChange,
+  onResize,
   width: propWidth,
   height: propHeight,
   cols: propCols,
@@ -433,6 +436,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     if (newCols !== buffer.cols || newRows !== buffer.rows) {
       buffer.resize(newCols, newRows);
       scheduleRender();
+      onResize?.(newCols, newRows);
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         try {
@@ -442,7 +446,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
         } catch {}
       }
     }
-  }, [containerWidth, containerHeight, cellWidth, cellHeight, propCols, propRows, buffer, scheduleRender]);
+  }, [containerWidth, containerHeight, cellWidth, cellHeight, propCols, propRows, buffer, scheduleRender, onResize]);
 
   // ── Layout callback ───────────────────────────────────────────────
   const onLayout = useCallback((e: LayoutChangeEvent) => {
