@@ -147,10 +147,10 @@ interface LoadedFonts {
 }
 
 function useTerminalFonts(fontSize: number, fontConfig?: FontConfig): LoadedFonts | null {
-  const customRegular = useFont(fontConfig?.regular ?? null, fontSize);
-  const customBold = useFont(fontConfig?.bold ?? null, fontSize);
-  const customItalic = useFont(fontConfig?.italic ?? null, fontSize);
-  const customBoldItalic = useFont(fontConfig?.boldItalic ?? null, fontSize);
+  const customRegular = useFont((fontConfig?.regular as any) ?? null, fontSize);
+  const customBold = useFont((fontConfig?.bold as any) ?? null, fontSize);
+  const customItalic = useFont((fontConfig?.italic as any) ?? null, fontSize);
+  const customBoldItalic = useFont((fontConfig?.boldItalic as any) ?? null, fontSize);
 
   const sysRegular = useMemo(() => {
     try { return matchFont({ fontFamily: 'monospace', fontSize, fontWeight: 'normal', fontStyle: 'normal' }); }
