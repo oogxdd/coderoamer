@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 const KEYS = {
@@ -9,15 +10,26 @@ const KEYS = {
 export type TokenKey = keyof typeof KEYS;
 
 export async function saveToken(key: TokenKey, value: string): Promise<void> {
-  await SecureStore.setItemAsync(KEYS[key], value);
+  if (Platform.OS === 'web') {
+    localStorage.setItem(KEYS[key], value);
+  } else {
+    await SecureStore.setItemAsync(KEYS[key], value);
+  }
 }
 
 export async function loadToken(key: TokenKey): Promise<string | null> {
+  if (Platform.OS === 'web') {
+    return localStorage.getItem(KEYS[key]);
+  }
   return SecureStore.getItemAsync(KEYS[key]);
 }
 
 export async function deleteToken(key: TokenKey): Promise<void> {
-  await SecureStore.deleteItemAsync(KEYS[key]);
+  if (Platform.OS === 'web') {
+    localStorage.removeItem(KEYS[key]);
+  } else {
+    await SecureStore.deleteItemAsync(KEYS[key]);
+  }
 }
 
 export async function hasToken(key: TokenKey): Promise<boolean> {
