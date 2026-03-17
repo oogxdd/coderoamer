@@ -43,6 +43,7 @@ const TERMINAL_THEME = {
 };
 
 const DEFAULT_CLAUDE_COMMAND = 'bash';
+const INIT_COMMANDS = ['export COLORTERM=truecolor CLICOLOR=1 && exec claude --dangerously-skip-permissions'];
 
 const QUICK_CONTROLS = [
   { label: 'Enter', payload: '\r' },
@@ -134,8 +135,9 @@ export default function ExecPocScreen() {
   const [attachSessionId, setAttachSessionId] = useState('');
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
-  const [showSetup, setShowSetup] = useState(true);
+  const [showSetup, setShowSetup] = useState(false);
   const [showKeys, setShowKeys] = useState(false);
+  const autoConnected = useRef(false);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
 
@@ -160,6 +162,19 @@ export default function ExecPocScreen() {
 
   useEffect(() => () => client.close(), [client]);
 
+  // Auto-connect on mount
+  useEffect(() => {
+    if (autoConnected.current || !spriteName.trim()) return;
+    autoConnected.current = true;
+    client.connect({
+      spriteName: spriteName.trim(),
+      command: DEFAULT_CLAUDE_COMMAND,
+      initCommands: INIT_COMMANDS,
+    }).then(() => {
+      termRef.current?.focus();
+    }).catch(() => {});
+  }, [client, spriteName]);
+
   const connect = async () => {
     if (!spriteName.trim()) {
       Alert.alert('Missing sprite name', 'Enter a sprite name first.');
@@ -170,7 +185,7 @@ export default function ExecPocScreen() {
         spriteName: spriteName.trim(),
         command: command.trim() || DEFAULT_CLAUDE_COMMAND,
         attachSessionId: attachSessionId.trim() || undefined,
-        initCommands: ['export COLORTERM=truecolor CLICOLOR=1'],
+        initCommands: INIT_COMMANDS,
       });
       setShowSetup(false);
       termRef.current?.focus();
