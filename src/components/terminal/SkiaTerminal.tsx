@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
   View,
   TextInput,
+  Pressable,
   Keyboard,
   Dimensions,
   StyleSheet,
@@ -174,6 +175,14 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     bufferRef.current = new TerminalBuffer(cols, rows, scrollback);
   }
   const buffer = bufferRef.current;
+
+  // Wire up terminal response callback (DA, DSR replies sent back to host)
+  useEffect(() => {
+    buffer.onResponse = (data: string) => {
+      onData?.(data);
+    };
+    return () => { buffer.onResponse = null; };
+  }, [buffer, onData]);
 
   // ── Render trigger (rAF-based) ────────────────────────────────────
   const [renderVersion, setRenderVersion] = useState(0);
@@ -476,11 +485,19 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   const termWidth = Math.max(1, containerWidth);
   const termHeight = Math.max(1, containerHeight);
 
+  const handleTerminalPress = useCallback(() => {
+    textInputRef.current?.focus();
+    if (selection) {
+      setSelection(null);
+      onSelectionChange?.(null);
+    }
+  }, [selection, onSelectionChange]);
+
   return (
     <GestureHandlerRootView style={[styles.container, { width: propWidth, height: propHeight }]}>
       <View style={styles.fill} onLayout={onLayout}>
         <GestureDetector gesture={composedGestures}>
-          <View style={styles.fill}>
+          <Pressable style={styles.fill} onPress={handleTerminalPress}>
             <SkiaTerminalRenderer
               buffer={buffer}
               fontSize={fontSize}
@@ -493,7 +510,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
               focused={focused}
               cursorBlinkInterval={cursorBlinkInterval}
             />
-          </View>
+          </Pressable>
         </GestureDetector>
 
         <TextInput

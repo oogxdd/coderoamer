@@ -308,12 +308,12 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
   const cursorOpacity = useSharedValue(1);
 
   useEffect(() => {
+    // Only blink when the app says cursor is visible AND we're focused
     if (!focused || cursorBlinkInterval <= 0 || !buffer.cursor.visible) {
       cancelAnimation(cursorOpacity);
       cursorOpacity.value = 1;
       return;
     }
-    // Hold visible for blinkInterval, then hidden for blinkInterval, repeat
     cursorOpacity.value = withRepeat(
       withSequence(
         withTiming(1, { duration: cursorBlinkInterval, easing: Easing.steps(1) }),
@@ -459,12 +459,17 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
   // ── Cursor ────────────────────────────────────────────────────────
 
   const renderCursor = (): React.ReactNode | null => {
-    if (!cursor.visible || buffer.ydisp !== 0) return null;
+    if (buffer.ydisp !== 0) return null;
     const cx = cursor.x * cellWidth;
     const cy = cursor.y * cellHeight;
 
+    // If the app hid the cursor (e.g. Claude Code TUI), show a thin bar
+    // so the user still sees where input goes. Use the full cursor style
+    // only when the app says cursor is visible.
+    const style = cursor.visible ? cursor.style : 'bar';
+
     const inner = (() => {
-      switch (cursor.style) {
+      switch (style) {
         case 'block': {
           const line = viewportLines[cursor.y];
           const cell = line?.[cursor.x];
@@ -485,8 +490,13 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
       }
     })();
 
+    // Blink when cursor is visible; steady dim bar when app hid cursor
+    const opacity = cursor.visible
+      ? (focused ? cursorOpacity : 0.4)
+      : (focused ? 0.6 : 0.3);
+
     return (
-      <Group key="cursor" opacity={focused ? cursorOpacity : 0.4}>
+      <Group key="cursor" opacity={opacity}>
         {inner}
       </Group>
     );

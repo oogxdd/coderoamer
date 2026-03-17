@@ -42,7 +42,7 @@ const TERMINAL_THEME = {
   ],
 };
 
-const DEFAULT_CLAUDE_COMMAND = 'claude';
+const DEFAULT_CLAUDE_COMMAND = 'bash';
 
 const QUICK_CONTROLS = [
   { label: 'Enter', payload: '\r' },
@@ -127,7 +127,9 @@ function WebTerminal({
 // ── Main Screen ─────────────────────────────────────────────────────────
 export default function ExecPocScreen() {
   const colors = useTheme();
-  const [spriteName, setSpriteName] = useState('');
+  // TODO
+  // const [spriteName, setSpriteName] = useState('');
+  const [spriteName, setSpriteName] = useState('first-sprite');
   const [command, setCommand] = useState(DEFAULT_CLAUDE_COMMAND);
   const [attachSessionId, setAttachSessionId] = useState('');
   const [sessionId, setSessionId] = useState<string | undefined>();
