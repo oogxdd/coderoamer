@@ -170,6 +170,7 @@ export default function ExecPocScreen() {
         spriteName: spriteName.trim(),
         command: command.trim() || DEFAULT_CLAUDE_COMMAND,
         attachSessionId: attachSessionId.trim() || undefined,
+        initCommands: ['export COLORTERM=truecolor CLICOLOR=1'],
       });
       setShowSetup(false);
       termRef.current?.focus();

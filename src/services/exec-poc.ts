@@ -18,6 +18,7 @@ export interface ExecConnectOptions {
   spriteName: string;
   command: string;
   attachSessionId?: string;
+  initCommands?: string[];
 }
 
 export interface ExecEventLog {
@@ -176,7 +177,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     options.onLog(makeLog('local', `Requested resize: ${cols}x${rows}`));
   };
 
-  const connect = async ({ spriteName, command, attachSessionId }: ExecConnectOptions) => {
+  const connect = async ({ spriteName, command, attachSessionId, initCommands }: ExecConnectOptions) => {
     const token = await loadToken('spritesToken');
     if (!token) {
       throw new Error('No Sprites API token found. Add it in Auth first.');
@@ -242,6 +243,14 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
           const rows = asNumber(obj.rows) ?? 0;
           if (cols <= 0 || rows <= 0) {
             sendResize();
+          }
+          // Send init commands once the session is established
+          if (!attachSessionId && initCommands?.length) {
+            setTimeout(() => {
+              for (const cmd of initCommands) {
+                send(cmd, true);
+              }
+            }, 200);
           }
         }
 
