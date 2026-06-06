@@ -9,6 +9,7 @@ import {
   Switch,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
@@ -16,6 +17,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
 import { AgentProvider } from '@/models/chat';
+import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
 type MaxTurns = 0 | 5 | 10 | 25 | 50;
@@ -51,6 +53,7 @@ export default function SettingsScreen() {
   const [claudeModel, setClaudeModel] = useState<ClaudeModel>('sonnet');
   const [maxTurns, setMaxTurns] = useState<MaxTurns>(0);
   const [customInstructions, setCustomInstructions] = useState('');
+  const [defaultWorkingDirectory, setDefaultWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
 
   // Git Identity
   const [gitName, setGitName] = useState('');
@@ -63,7 +66,7 @@ export default function SettingsScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const [providerSetting, model, turns, instructions, name, email, checkpoint] =
+        const [providerSetting, model, turns, instructions, name, email, checkpoint, workdir] =
           await Promise.all([
             getSetting('defaultProvider'),
             getSetting('claudeModel'),
@@ -72,6 +75,7 @@ export default function SettingsScreen() {
             getSetting('gitName'),
             getSetting('gitEmail'),
             getSettingBool('autoCheckpoint'),
+            getSetting('defaultWorkingDirectory'),
           ]);
 
         if (providerSetting === 'claude' || providerSetting === 'codex') {
@@ -89,6 +93,7 @@ export default function SettingsScreen() {
         if (instructions !== null) setCustomInstructions(instructions);
         if (name !== null) setGitName(name);
         if (email !== null) setGitEmail(email);
+        if (workdir) setDefaultWorkingDirectory(workdir);
         setAutoCheckpoint(checkpoint);
       } catch {
         // Settings load failed silently
@@ -117,6 +122,16 @@ export default function SettingsScreen() {
     setCustomInstructions(text);
     await setSetting('customInstructions', text);
   }, []);
+
+  const handleDefaultWorkingDirectoryChange = useCallback((text: string) => {
+    setDefaultWorkingDirectory(text);
+  }, []);
+
+  const handleDefaultWorkingDirectoryBlur = useCallback(async () => {
+    const normalized = normalizeWorkingDirectory(defaultWorkingDirectory);
+    setDefaultWorkingDirectory(normalized);
+    await setSetting('defaultWorkingDirectory', normalized);
+  }, [defaultWorkingDirectory]);
 
   const handleGitNameChange = useCallback(async (text: string) => {
     setGitName(text);
@@ -237,6 +252,37 @@ export default function SettingsScreen() {
               </Pressable>
             ))}
           </View>
+        </View>
+      </View>
+
+      {/* Session Defaults Section */}
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>SESSION DEFAULTS</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={styles.row}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Working Directory</Text>
+        </View>
+        <View style={styles.textAreaContainer}>
+          <TextInput
+            style={[
+              styles.pathInput,
+              {
+                backgroundColor: colors.inputBackground,
+                color: colors.text,
+                borderColor: colors.border,
+              },
+            ]}
+            value={defaultWorkingDirectory}
+            onChangeText={handleDefaultWorkingDirectoryChange}
+            onBlur={handleDefaultWorkingDirectoryBlur}
+            placeholder={DEFAULT_WORKING_DIRECTORY}
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            New chats `cd` here before launching Claude. Point it at the folder where you cloned
+            your repo (e.g. /home/sprite/my-repo).
+          </Text>
         </View>
       </View>
 
@@ -524,6 +570,19 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.md,
     paddingBottom: Spacing.md,
     minHeight: 100,
+  },
+  pathInput: {
+    fontSize: FontSize.md,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  fieldHint: {
+    fontSize: FontSize.xs,
+    lineHeight: 17,
+    marginTop: Spacing.sm,
   },
   inputRow: {
     flexDirection: 'row',

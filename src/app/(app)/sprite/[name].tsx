@@ -21,10 +21,12 @@ import { useTheme } from '@/hooks/use-theme';
 import { ChatMessageView } from '@/components/chat/ChatMessageView';
 import { ChatInputBar } from '@/components/chat/ChatInputBar';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
+import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { PersistedChat, getSetting, loadChatList, saveChatList } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
+import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
 type Tab = 'overview' | 'chat' | 'checkpoints';
 
@@ -67,10 +69,13 @@ export default function SpriteDetailScreen() {
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
+  // null = closed. 'new' creates a fresh session; 'edit' changes the current session's directory.
+  const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'edit' | null>(null);
   const chatListRef = useRef<PersistedChat[]>([]);
 
   const spriteName = name ?? '';
-  const workingDirectory = '/home/sprite/project';
+  const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
+  const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
 
   const chat = useChat({
     spriteName,
@@ -102,12 +107,20 @@ export default function SpriteDetailScreen() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const chats = await loadChatList(spriteName);
+      const [chats, savedDefaultDir] = await Promise.all([
+        loadChatList(spriteName),
+        getSetting('defaultWorkingDirectory'),
+      ]);
       if (!mounted) return;
+
+      const fallbackDir = savedDefaultDir
+        ? normalizeWorkingDirectory(savedDefaultDir)
+        : DEFAULT_WORKING_DIRECTORY;
+      setDefaultDirectory(fallbackDir);
 
       if (chats.length > 0) {
         chatListRef.current = chats;
-        // Use most recently used chat
+        // Resume the most recently used session so reopening lands you right back in it.
         const sorted = [...chats].sort((a, b) => b.lastUsed - a.lastUsed);
         const current = sorted[0];
         setChatId(current.id);
@@ -115,6 +128,7 @@ export default function SpriteDetailScreen() {
         setChatProvider(normalizeProvider(current.provider));
         setClaudeSessionId(current.claudeSessionId);
         setCodexSessionId(current.codexSessionId);
+        setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
         const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
         // Create the first chat
@@ -123,7 +137,7 @@ export default function SpriteDetailScreen() {
           spriteName,
           chatNumber: 1,
           provider: defaultProvider,
-          workingDirectory,
+          workingDirectory: fallbackDir,
           createdAt: Date.now(),
           lastUsed: Date.now(),
           isClosed: false,
@@ -137,8 +151,8 @@ export default function SpriteDetailScreen() {
         setChatProvider(defaultProvider);
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
+        setWorkingDirectory(fallbackDir);
       }
-      setChatListVisible(true);
     })();
     return () => { mounted = false; };
   }, [spriteName]);
@@ -198,21 +212,17 @@ export default function SpriteDetailScreen() {
     chat.sendMessage();
   };
 
-  const handleNewChat = useCallback(async (providerOverride?: unknown) => {
+  const createChat = useCallback(async (config: NewSessionConfig) => {
     const chats = chatListRef.current;
     const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
     const newNumber = maxNumber + 1;
-    const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
-    const nextProvider =
-      providerOverride === 'claude' || providerOverride === 'codex'
-        ? providerOverride
-        : defaultProvider;
+    const dir = normalizeWorkingDirectory(config.workingDirectory);
     const newChat: PersistedChat = {
       id: `${spriteName}-chat-${newNumber}`,
       spriteName,
       chatNumber: newNumber,
-      provider: nextProvider,
-      workingDirectory,
+      provider: config.provider,
+      workingDirectory: dir,
       createdAt: Date.now(),
       lastUsed: Date.now(),
       isClosed: false,
@@ -224,11 +234,25 @@ export default function SpriteDetailScreen() {
     await saveChatList(spriteName, updated);
     setChatId(newChat.id);
     setChatName(`Session ${newNumber}`);
-    setChatProvider(nextProvider);
+    setChatProvider(config.provider);
+    setWorkingDirectory(dir);
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
     setChatListVisible(false);
-  }, [spriteName, workingDirectory]);
+    setSessionSheetMode(null);
+  }, [spriteName]);
+
+  // Change the directory of the *current* session (only allowed before its first message).
+  const updateCurrentDirectory = useCallback(async (config: NewSessionConfig) => {
+    const dir = normalizeWorkingDirectory(config.workingDirectory);
+    setWorkingDirectory(dir);
+    const updated = chatListRef.current.map((c) =>
+      c.id === chatId ? { ...c, workingDirectory: dir } : c
+    );
+    chatListRef.current = updated;
+    await saveChatList(spriteName, updated);
+    setSessionSheetMode(null);
+  }, [chatId, spriteName]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
     setChatId(selectedChat.id);
@@ -236,6 +260,7 @@ export default function SpriteDetailScreen() {
     setChatProvider(normalizeProvider(selectedChat.provider));
     setClaudeSessionId(selectedChat.claudeSessionId);
     setCodexSessionId(selectedChat.codexSessionId);
+    setWorkingDirectory(selectedChat.workingDirectory || defaultDirectory);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
       c.id === selectedChat.id ? { ...c, lastUsed: Date.now() } : c
@@ -243,7 +268,7 @@ export default function SpriteDetailScreen() {
     chatListRef.current = updated;
     saveChatList(spriteName, updated);
     setChatListVisible(false);
-  }, [spriteName]);
+  }, [spriteName, defaultDirectory]);
 
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
@@ -273,7 +298,7 @@ export default function SpriteDetailScreen() {
           text: isLocked ? 'New Claude Session' : 'Switch to Claude',
           onPress: () => {
             if (isLocked) {
-              handleNewChat('claude');
+              createChat({ workingDirectory, provider: 'claude' });
             } else {
               handleProviderChange('claude');
             }
@@ -282,7 +307,7 @@ export default function SpriteDetailScreen() {
         },
       ]
     );
-  }, [chat.codexAuthIssue, chat.clearCodexAuthIssue, handleNewChat, handleProviderChange, isProviderLocked]);
+  }, [chat.codexAuthIssue, chat.clearCodexAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
 
   const handleInsertBashOutput = useCallback((text: string) => {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
@@ -325,7 +350,7 @@ export default function SpriteDetailScreen() {
           )}
           {tab === 'chat' && (
             <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-              {chatName} - {providerDisplayName(chatProvider)}
+              {chatName} · {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}
             </Text>
           )}
         </View>
@@ -424,8 +449,22 @@ export default function SpriteDetailScreen() {
                     Chat with {providerDisplayName(chatProvider)}
                   </Text>
                   <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
-                    Send a message to start coding on this sprite.
+                    Send a message to start a Claude Code session on this sprite.
                   </Text>
+                  <Pressable
+                    style={[
+                      styles.cwdChip,
+                      { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                    ]}
+                    onPress={() => setSessionSheetMode('edit')}
+                  >
+                    <Text
+                      style={[styles.cwdChipText, { color: colors.textSecondary }]}
+                      numberOfLines={1}
+                    >
+                      📁 {workingDirectory}  ✎
+                    </Text>
+                  </Pressable>
                 </View>
               )
             }
@@ -467,9 +506,23 @@ export default function SpriteDetailScreen() {
           currentChatId={chatId}
           onSelectChat={handleSelectChat}
           onNewChat={() => {
-            void handleNewChat();
+            setChatListVisible(false);
+            setSessionSheetMode('new');
           }}
           onClose={() => setChatListVisible(false)}
+        />
+      )}
+
+      {/* New Session / Edit Directory Sheet */}
+      {sessionSheetMode && (
+        <NewSessionSheet
+          title={sessionSheetMode === 'edit' ? 'Session Directory' : 'New Session'}
+          confirmLabel={sessionSheetMode === 'edit' ? 'Update Directory' : 'Start Session'}
+          defaultDirectory={sessionSheetMode === 'edit' ? workingDirectory : defaultDirectory}
+          defaultProvider={chatProvider}
+          showProviderPicker={sessionSheetMode === 'new'}
+          onClose={() => setSessionSheetMode(null)}
+          onCreate={sessionSheetMode === 'edit' ? updateCurrentDirectory : createChat}
         />
       )}
 
@@ -708,6 +761,17 @@ const styles = StyleSheet.create({
     fontSize: FontSize.md,
     textAlign: 'center',
     lineHeight: 22,
+  },
+  cwdChip: {
+    marginTop: Spacing.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    maxWidth: '90%',
+  },
+  cwdChipText: {
+    fontSize: FontSize.sm,
   },
   connectingBar: {
     flexDirection: 'row',
