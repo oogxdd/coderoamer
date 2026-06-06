@@ -54,9 +54,11 @@ twice over:
   The working directory is therefore locked once a conversation starts — begin a new session to
   switch folders.
 
-To start a ttyd server in a sprite for the third approach:
+For the third approach, **"Start ttyd in this sprite"** does it for you: it sets the sprite URL to
+`public`, starts ttyd on port 8080 (the public URL proxies to port 8080 / the first HTTP port), and
+connects — `ttyd` just needs to be installed in the sprite. To run it by hand instead:
 ```bash
-ttyd -W -c user:pass -p 7681 claude     # exposed on the sprite's public URL
+ttyd -W -c user:pass -p 8080 claude      # reachable at the sprite's public URL
 ```
 
 ---
@@ -157,5 +159,5 @@ src/
 ## Roadmap
 
 - Full support for additional agents (the chat layer already abstracts a `provider`).
-- One-tap ttyd bootstrap inside the sprite.
+- Auto-install ttyd when it's missing (the bootstrap currently assumes it's present).
 - Pushing/observing long-running sessions in the background.

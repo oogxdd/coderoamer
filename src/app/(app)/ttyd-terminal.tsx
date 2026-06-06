@@ -126,16 +126,19 @@ function buildAuthenticatedUrl(rawUrl: string, username: string, password: strin
 }
 
 export default function TtydTerminalScreen() {
-  const params = useLocalSearchParams<{ name?: string }>();
+  const params = useLocalSearchParams<{ name?: string; cwd?: string }>();
   const spriteName = typeof params.name === 'string' ? params.name : '';
+  const cwd = typeof params.cwd === 'string' && params.cwd ? params.cwd : '/home/sprite';
   const webViewRef = useRef<any>(null);
   const progressBucketRef = useRef(-1);
+  const serviceAbortRef = useRef<AbortController | null>(null);
   const [host, setHost] = useState(DEFAULT_HOST);
   const [username, setUsername] = useState(DEFAULT_USER);
   const [password, setPassword] = useState(DEFAULT_PASS);
 
   const [isConnected, setIsConnected] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<TtydLog[]>([]);
   const [showLogs, setShowLogs] = useState(true);
@@ -189,6 +192,13 @@ export default function TtydTerminalScreen() {
       mounted = false;
     };
   }, [spriteName, appendLog]);
+
+  // Stop streaming the ttyd service logs when leaving the screen.
+  useEffect(() => {
+    return () => {
+      serviceAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isConnected || !loading) return;
@@ -290,6 +300,68 @@ export default function TtydTerminalScreen() {
     setLoading(true);
     setIsConnected(true);
     appendLog(`connect: starting ${displayUrl}`);
+  };
+
+  // One-tap: open the sprite URL, start ttyd on :8080 in the working dir, then connect.
+  const handleBootstrap = async () => {
+    if (!spriteName) {
+      setError('Open this from a sprite to auto-start ttyd.');
+      return;
+    }
+    setBootstrapping(true);
+    setError(null);
+
+    const user = username.trim() || 'user';
+    const pass = password.trim() || Math.random().toString(36).slice(2, 10);
+    setUsername(user);
+    setPassword(pass);
+
+    try {
+      appendLog('bootstrap: fetching sprite URL');
+      const sprite = await api.getSprite(spriteName);
+      if (!sprite.url) throw new Error('sprite has no public URL');
+      setHost(sprite.url);
+
+      appendLog('bootstrap: setting URL auth=public');
+      await api.updateSpriteUrlAuth(spriteName, 'public');
+
+      appendLog(`bootstrap: starting ttyd on :8080 in ${cwd}`);
+      const safePass = pass.replace(/'/g, '');
+      const safeUser = user.replace(/'/g, '');
+      const inner =
+        `cd "${cwd}" 2>/dev/null; ` +
+        `command -v ttyd >/dev/null 2>&1 || { echo "ttyd is not installed in this sprite"; exit 127; }; ` +
+        `exec ttyd -W -p 8080 -c '${safeUser}:${safePass}' claude`;
+
+      serviceAbortRef.current?.abort();
+      const { controller, started } = api.startBackgroundService(
+        spriteName,
+        `wisp-ttyd-${Date.now().toString(36)}`,
+        { cmd: 'bash', args: ['-lc', inner], http_port: 8080 },
+        (event) => {
+          if (event.type === 'stdout' || event.type === 'stderr') {
+            appendLog(`ttyd: ${(event.data ?? '').trim()}`);
+          } else if (event.type === 'exit') {
+            appendLog(`ttyd exited (code ${event.exit_code ?? '?'})`);
+          } else if (event.type === 'error' && event.data) {
+            appendLog(`ttyd error: ${event.data}`);
+          }
+        }
+      );
+      serviceAbortRef.current = controller;
+      await started;
+
+      setBootstrapping(false);
+      progressBucketRef.current = -1;
+      setLoading(true);
+      setIsConnected(true);
+      appendLog(`connect: starting ${sprite.url}`);
+    } catch (err: any) {
+      setBootstrapping(false);
+      const message = err?.message ?? 'bootstrap failed';
+      setError(`Bootstrap failed: ${message}`);
+      appendLog(`bootstrap error: ${message}`);
+    }
   };
 
   const handleDisconnect = () => {
@@ -521,16 +593,35 @@ export default function TtydTerminalScreen() {
               secureTextEntry
             />
 
-            <Pressable style={styles.connectBtn} onPress={handleConnect}>
-              <Text style={styles.connectBtnText}>Connect</Text>
+            {spriteName ? (
+              <Pressable
+                style={[styles.connectBtn, bootstrapping && styles.btnDisabled]}
+                onPress={handleBootstrap}
+                disabled={bootstrapping}
+              >
+                {bootstrapping ? (
+                  <ActivityIndicator color="#1a1b26" />
+                ) : (
+                  <Text style={styles.connectBtnText}>Start ttyd in this sprite</Text>
+                )}
+              </Pressable>
+            ) : null}
+
+            <Pressable
+              style={[styles.connectBtn, spriteName ? styles.secondaryBtn : null]}
+              onPress={handleConnect}
+            >
+              <Text style={[styles.connectBtnText, spriteName ? styles.secondaryBtnText : null]}>
+                {spriteName ? 'Connect manually' : 'Connect'}
+              </Text>
             </Pressable>
 
             <Text style={styles.hint}>
-              Start a ttyd server inside the sprite, exposed on its public URL:
+              {spriteName
+                ? '“Start ttyd” opens the sprite URL (auth: public), runs ttyd on port 8080 in your working directory, then connects. ttyd must be installed in the sprite.'
+                : 'Start a ttyd server inside the sprite on port 8080 — the sprite URL proxies to it:'}
               {'\n'}
-              <Text style={styles.code}>ttyd -W -c user:pass -p 7681 claude</Text>
-              {'\n'}
-              then enter the matching user / pass above.
+              <Text style={styles.code}>ttyd -W -c user:pass -p 8080 claude</Text>
             </Text>
 
             <Pressable onPress={() => setShowLogs((value) => !value)} style={styles.loginLogsToggleBtn}>
@@ -650,6 +741,18 @@ const styles = StyleSheet.create({
     color: '#1a1b26',
     fontSize: 16,
     fontWeight: '700',
+  },
+  secondaryBtn: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#7aa2f7',
+    marginTop: 10,
+  },
+  secondaryBtnText: {
+    color: '#7aa2f7',
+  },
+  btnDisabled: {
+    opacity: 0.6,
   },
   hint: {
     color: '#565f89',

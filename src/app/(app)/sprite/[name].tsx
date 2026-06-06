@@ -684,13 +684,17 @@ function OverviewTab({
           { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
         ]}
         onPress={() =>
-          router.push({ pathname: '/(app)/ttyd-terminal', params: { name: spriteName } })
+          router.push({
+            pathname: '/(app)/ttyd-terminal',
+            params: { name: spriteName, cwd: workingDirectory },
+          })
         }
       >
         <View style={styles.connectRowText}>
           <Text style={[styles.connectTitle, { color: colors.text }]}>Web Terminal (ttyd)</Text>
           <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Embeds a ttyd server running inside the sprite. Experimental — requires ttyd.
+            One tap starts ttyd in the sprite and opens it in a web terminal. Experimental —
+            requires ttyd installed; makes the sprite URL public.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>

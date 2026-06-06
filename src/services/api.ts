@@ -106,6 +106,19 @@ export async function deleteSprite(name: string): Promise<void> {
   await apiRequest<{}>('DELETE', `/sprites/${name}`);
 }
 
+export type SpriteUrlAuth = 'public' | 'sprite';
+
+/**
+ * Set the sprite's public URL auth mode.
+ * `public` opens the URL to anyone (the URL proxies to port 8080 / first HTTP port);
+ * `sprite` requires org membership / a token. Needed before an embedded WebView
+ * (e.g. ttyd) can reach a service, since the WebView can't carry the API token on
+ * its in-page WebSocket/XHR requests.
+ */
+export async function updateSpriteUrlAuth(name: string, auth: SpriteUrlAuth): Promise<Sprite> {
+  return apiRequest<Sprite>('PUT', `/sprites/${name}`, { url_settings: { auth } });
+}
+
 // MARK: - Checkpoints
 
 export async function listCheckpoints(spriteName: string): Promise<Checkpoint[]> {
@@ -314,6 +327,54 @@ export async function streamServiceLogs(
     const event = parseServiceEventLine(buffer);
     if (event) onEvent(event);
   }
+}
+
+/**
+ * Start a long-running service and let it keep running in the background.
+ * `streamService` only resolves when the service exits, so this fires it without
+ * awaiting and resolves `started` once the first lifecycle event arrives (or after
+ * `settleMs`). Aborting the returned controller stops *streaming logs*; use
+ * `deleteService` to actually stop the service.
+ */
+export function startBackgroundService(
+  spriteName: string,
+  serviceName: string,
+  config: ServiceRequest,
+  onEvent?: (event: ServiceLogEvent) => void,
+  settleMs: number = 1500
+): { controller: AbortController; started: Promise<void> } {
+  const controller = new AbortController();
+  const started = new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(settle, settleMs);
+    streamService(
+      spriteName,
+      serviceName,
+      config,
+      (event) => {
+        onEvent?.(event);
+        if (event.type === 'started' || event.type === 'stdout' || event.type === 'stderr') {
+          settle();
+        }
+      },
+      controller.signal
+    )
+      .catch((err) => {
+        if ((err as Error)?.name !== 'AbortError') {
+          onEvent?.({ type: 'error', data: (err as Error).message });
+        }
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        settle();
+      });
+  });
+  return { controller, started };
 }
 
 export async function getServiceStatus(spriteName: string, serviceName: string): Promise<ServiceInfo> {
