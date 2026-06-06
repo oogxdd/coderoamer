@@ -333,7 +333,7 @@ export default function TtydTerminalScreen() {
       // Ensure ttyd exists (package manager, else a static binary), then run it in the repo.
       // No `set -e`: each step falls through to the final check. `sudo -n` never prompts.
       const inner = [
-        `cd "${cwd}" 2>/dev/null || true`,
+        `mkdir -p "${cwd}" 2>/dev/null; cd "${cwd}" 2>/dev/null || true`,
         `if ! command -v ttyd >/dev/null 2>&1; then`,
         `  echo "ttyd not found — trying package manager...";`,
         `  export DEBIAN_FRONTEND=noninteractive;`,

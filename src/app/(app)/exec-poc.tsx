@@ -63,7 +63,7 @@ export default function ExecPocScreen() {
 
   const termRef = useRef<SkiaTerminalHandle>(null);
   const initialInputRef = useRef<string | undefined>(
-    paramCwd ? `cd "${paramCwd}" && claude\r` : undefined
+    paramCwd ? `mkdir -p "${paramCwd}" && cd "${paramCwd}" && claude\r` : undefined
   );
   const didAutoConnectRef = useRef(false);
 

@@ -213,6 +213,8 @@ export default function SpriteDetailScreen() {
   };
 
   const createChat = useCallback(async (config: NewSessionConfig) => {
+    // Stop any in-flight stream before switching away (one shared useChat instance).
+    if (chat.isStreaming) chat.interrupt();
     const chats = chatListRef.current;
     const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
     const newNumber = maxNumber + 1;
@@ -240,7 +242,7 @@ export default function SpriteDetailScreen() {
     setCodexSessionId(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
-  }, [spriteName]);
+  }, [chat.isStreaming, chat.interrupt, spriteName]);
 
   // Change the directory of the *current* session (only allowed before its first message).
   const updateCurrentDirectory = useCallback(async (config: NewSessionConfig) => {
@@ -255,6 +257,13 @@ export default function SpriteDetailScreen() {
   }, [chatId, spriteName]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
+    if (selectedChat.id === chatId) {
+      setChatListVisible(false);
+      return;
+    }
+    // One useChat instance is shared across sessions, so stop any in-flight stream
+    // before switching — otherwise its messages would persist under the new chat id.
+    if (chat.isStreaming) chat.interrupt();
     setChatId(selectedChat.id);
     setChatName(selectedChat.customName ?? `Session ${selectedChat.chatNumber}`);
     setChatProvider(normalizeProvider(selectedChat.provider));
@@ -268,7 +277,7 @@ export default function SpriteDetailScreen() {
     chatListRef.current = updated;
     saveChatList(spriteName, updated);
     setChatListVisible(false);
-  }, [spriteName, defaultDirectory]);
+  }, [chat.isStreaming, chat.interrupt, chatId, spriteName, defaultDirectory]);
 
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
