@@ -13,10 +13,12 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLocalSearchParams } from 'expo-router';
+import * as api from '@/services/api';
 
-const DEFAULT_HOST = 'https://first-sprite-kbvf.sprites.app/';
+const DEFAULT_HOST = '';
 const DEFAULT_USER = 'user';
-const DEFAULT_PASS = 'MyPass123';
+const DEFAULT_PASS = '';
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
 const MAX_LOG_LINES = 250;
 
@@ -124,6 +126,8 @@ function buildAuthenticatedUrl(rawUrl: string, username: string, password: strin
 }
 
 export default function TtydTerminalScreen() {
+  const params = useLocalSearchParams<{ name?: string }>();
+  const spriteName = typeof params.name === 'string' ? params.name : '';
   const webViewRef = useRef<any>(null);
   const progressBucketRef = useRef(-1);
   const [host, setHost] = useState(DEFAULT_HOST);
@@ -162,6 +166,29 @@ export default function TtydTerminalScreen() {
     await Clipboard.setStringAsync(output);
     appendLog('logs: copied to clipboard');
   }, [appendLog, logs]);
+
+  // Prefill the host from the sprite's public URL when launched for a sprite.
+  useEffect(() => {
+    if (!spriteName) return;
+    let mounted = true;
+    (async () => {
+      try {
+        const sprite = await api.getSprite(spriteName);
+        if (!mounted) return;
+        if (sprite.url) {
+          setHost(sprite.url);
+          appendLog(`prefilled host from sprite: ${sprite.url}`);
+        } else {
+          appendLog('sprite has no public URL yet');
+        }
+      } catch (err: any) {
+        if (mounted) appendLog(`could not load sprite: ${err?.message ?? 'error'}`);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [spriteName, appendLog]);
 
   useEffect(() => {
     if (!isConnected || !loading) return;
@@ -451,7 +478,9 @@ export default function TtydTerminalScreen() {
         >
           <View style={styles.loginContainer}>
             <Text style={styles.logo}>ttyd</Text>
-            <Text style={styles.subtitle}>Terminal in your pocket</Text>
+            <Text style={styles.subtitle}>
+              {spriteName ? spriteName : 'Web terminal in your pocket'}
+            </Text>
 
             {error ? (
               <View style={styles.errorBox}>
@@ -497,9 +526,11 @@ export default function TtydTerminalScreen() {
             </Pressable>
 
             <Text style={styles.hint}>
-              Your ttyd server should be running with:
+              Start a ttyd server inside the sprite, exposed on its public URL:
               {'\n'}
-              <Text style={styles.code}>ttyd -c user:pass bash</Text>
+              <Text style={styles.code}>ttyd -W -c user:pass -p 7681 claude</Text>
+              {'\n'}
+              then enter the matching user / pass above.
             </Text>
 
             <Pressable onPress={() => setShowLogs((value) => !value)} style={styles.loginLogsToggleBtn}>

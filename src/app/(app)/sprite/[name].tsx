@@ -653,6 +653,49 @@ function OverviewTab({
         </View>
       ))}
 
+      {/* More ways to connect */}
+      <Text style={[styles.connectHeader, { color: colors.textSecondary }]}>
+        MORE WAYS TO CONNECT
+      </Text>
+      <Pressable
+        style={({ pressed }) => [
+          styles.connectRow,
+          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+        ]}
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/exec-poc',
+            params: { name: spriteName, cwd: workingDirectory },
+          })
+        }
+      >
+        <View style={styles.connectRowText}>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>Interactive Terminal</Text>
+          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
+            Real TTY over WebSocket — auto-runs claude in your repo. Best for answering prompts
+            and watching the live TUI.
+          </Text>
+        </View>
+        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [
+          styles.connectRow,
+          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+        ]}
+        onPress={() =>
+          router.push({ pathname: '/(app)/ttyd-terminal', params: { name: spriteName } })
+        }
+      >
+        <View style={styles.connectRowText}>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>Web Terminal (ttyd)</Text>
+          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
+            Embeds a ttyd server running inside the sprite. Experimental — requires ttyd.
+          </Text>
+        </View>
+        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
+      </Pressable>
+
       {/* Delete Sprite button */}
       <View style={styles.deleteButtonContainer}>
         <Pressable
@@ -831,6 +874,41 @@ const styles = StyleSheet.create({
     fontSize: FontSize.md,
     flex: 1,
     fontWeight: '500',
+  },
+  connectHeader: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    marginTop: Spacing.xxl,
+    marginBottom: Spacing.sm,
+    marginHorizontal: Spacing.lg,
+  },
+  connectRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: Spacing.lg,
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  connectRowText: {
+    flex: 1,
+    marginRight: Spacing.sm,
+  },
+  connectTitle: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  connectSubtitle: {
+    fontSize: FontSize.xs,
+    lineHeight: 16,
+  },
+  connectChevron: {
+    fontSize: FontSize.xl,
+    fontWeight: '400',
   },
   deleteButtonContainer: {
     paddingHorizontal: Spacing.lg,

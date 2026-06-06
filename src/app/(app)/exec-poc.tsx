@@ -14,7 +14,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/hooks/use-theme';
 import {
   createExecPocClient,
@@ -46,15 +46,26 @@ const QUICK_CONTROLS: QuickControl[] = [
 
 export default function ExecPocScreen() {
   const colors = useTheme();
-  const [spriteName, setSpriteName] = useState('');
-  const [command, setCommand] = useState(DEFAULT_CLAUDE_COMMAND);
+  const params = useLocalSearchParams<{ name?: string; cwd?: string; cmd?: string }>();
+  const paramName = typeof params.name === 'string' ? params.name : '';
+  const paramCwd = typeof params.cwd === 'string' ? params.cwd : '';
+  const paramCmd = typeof params.cmd === 'string' ? params.cmd : '';
+
+  const [spriteName, setSpriteName] = useState(paramName);
+  // With a working directory we launch a shell and type `cd <dir> && claude`, which
+  // works no matter how the exec endpoint tokenizes `cmd`. Otherwise run the command directly.
+  const [command, setCommand] = useState(paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND));
   const [attachSessionId, setAttachSessionId] = useState('');
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
   const [showSetup, setShowSetup] = useState(false);
   const [showKeys, setShowKeys] = useState(false);
-  
+
   const termRef = useRef<SkiaTerminalHandle>(null);
+  const initialInputRef = useRef<string | undefined>(
+    paramCwd ? `cd "${paramCwd}" && claude\r` : undefined
+  );
+  const didAutoConnectRef = useRef(false);
 
   const appendLog = useCallback((entry: ExecEventLog) => {
     if (!termRef.current) return;
@@ -86,6 +97,29 @@ export default function ExecPocScreen() {
       client.close();
     };
   }, [client]);
+
+  // Auto-connect when launched for a specific sprite (from the sprite screen).
+  useEffect(() => {
+    if (didAutoConnectRef.current || !paramName) return;
+    didAutoConnectRef.current = true;
+    (async () => {
+      try {
+        await client.connect({
+          spriteName: paramName,
+          command: paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND),
+          initialInput: initialInputRef.current,
+        });
+        setShowSetup(false);
+        termRef.current?.focus();
+      } catch (error) {
+        appendLog({
+          timestamp: Date.now(),
+          source: 'error',
+          text: `Connect failed: ${(error as Error).message}`,
+        });
+      }
+    })();
+  }, [paramName, paramCmd, paramCwd, client, appendLog]);
 
   const sendControl = (label: string, payload: string) => {
     client.send(payload, false);
@@ -141,7 +175,9 @@ export default function ExecPocScreen() {
           <Pressable onPress={() => router.back()}>
             <Text style={[styles.backButton, { color: colors.tint }]}>Back</Text>
           </Pressable>
-          <Text style={[styles.title, { color: colors.text }]}>Terminal</Text>
+          <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
+            {spriteName ? spriteName : 'Terminal'}
+          </Text>
           <View style={styles.headerActions}>
             <Pressable onPress={() => termRef.current?.focus()}>
               <Text style={[styles.clearButton, { color: colors.tint }]}>Focus</Text>

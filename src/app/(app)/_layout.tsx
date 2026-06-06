@@ -25,11 +25,11 @@ export default function AppLayout() {
       />
       <Stack.Screen
         name="exec-poc"
-        options={{ title: 'Exec POC' }}
+        options={{ title: 'Terminal', headerShown: false }}
       />
       <Stack.Screen
         name="ttyd-terminal"
-        options={{ title: 'TTYD Terminal' }}
+        options={{ title: 'Web Terminal (ttyd)' }}
       />
     </Stack>
   );

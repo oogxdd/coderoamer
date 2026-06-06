@@ -439,7 +439,7 @@ export default function SettingsScreen() {
           ]}
           onPress={() => router.push('/(app)/ttyd-terminal')}
         >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>TTYD Terminal</Text>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Web Terminal (ttyd)</Text>
           <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
         </Pressable>
 
@@ -450,7 +450,7 @@ export default function SettingsScreen() {
           ]}
           onPress={() => router.push('/(app)/exec-poc')}
         >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Exec WebSocket POC</Text>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Interactive Terminal</Text>
           <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
         </Pressable>
       </View>

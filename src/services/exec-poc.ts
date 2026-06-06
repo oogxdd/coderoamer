@@ -16,6 +16,11 @@ export interface ExecConnectOptions {
   spriteName: string;
   command: string;
   attachSessionId?: string;
+  /**
+   * Text typed into the session shortly after it opens (e.g. `cd /repo && claude\r`).
+   * Sent through the TTY so it works regardless of how the exec endpoint parses `cmd`.
+   */
+  initialInput?: string;
 }
 
 export interface ExecEventLog {
@@ -170,7 +175,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     options.onLog(makeLog('local', `Requested resize: ${cols}x${rows}`));
   };
 
-  const connect = async ({ spriteName, command, attachSessionId }: ExecConnectOptions) => {
+  const connect = async ({ spriteName, command, attachSessionId, initialInput }: ExecConnectOptions) => {
     const token = await loadToken('spritesToken');
     if (!token) {
       throw new Error('No Sprites API token found. Add it in Auth first.');
@@ -202,6 +207,15 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       sendResize();
       if (attachSessionId) {
         options.onSessionId(attachSessionId);
+      }
+      if (initialInput) {
+        // Give the shell a moment to print its prompt before typing into it.
+        setTimeout(() => {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(toArrayBuffer(initialInput));
+            options.onLog(makeLog('local', 'Sent initial command'));
+          }
+        }, 700);
       }
     };
 
