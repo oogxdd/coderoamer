@@ -12,6 +12,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
 import { PersistedChat, loadChatList, saveChatList, deleteChatMessages } from '@/services/storage';
 import { providerDisplayName } from '@/models/chat';
+import { shortWorkingDirectory } from '@/constants/session';
 
 interface ChatListSheetProps {
   spriteName: string;
@@ -133,8 +134,12 @@ export function ChatListSheet({
                       No messages
                     </Text>
                   )}
-                  <Text style={[styles.chatProvider, { color: colors.textSecondary }]}>
+                  <Text
+                    style={[styles.chatProvider, { color: colors.textSecondary }]}
+                    numberOfLines={1}
+                  >
                     {providerDisplayName(item.provider)}
+                    {item.workingDirectory ? ` · ${shortWorkingDirectory(item.workingDirectory)}` : ''}
                   </Text>
                 </View>
                 {isActive && (
@@ -215,8 +220,6 @@ const styles = StyleSheet.create({
   chatProvider: {
     fontSize: FontSize.xs,
     marginTop: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
   },
   activeDot: {
     width: 8,
