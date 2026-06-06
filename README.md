@@ -1,122 +1,161 @@
 # Sprites Manager
 
-A React Native (Expo) mobile app for managing [Fly.io Sprites](https://sprites.dev) VMs with integrated Claude Code chat. Create, monitor, and interact with cloud development environments directly from your phone.
+Run **Claude Code inside a [Fly.io Sprite](https://sprites.dev)** (a cloud dev VM) and
+drive it from your phone. Set up a sprite once on your computer, then start, watch, and guide
+coding sessions from anywhere — close the app and pick the same session back up later.
 
-## What It Does
+> Personal project against the new Sprites API. Focused on Claude Code today; other agents later.
 
-Sprites Manager connects to the Sprites API to let you:
+---
 
-- **Manage Sprites** -- Create, delete, and monitor VM status (running, cold, stopped) with automatic wake-on-access for cold sprites.
-- **Chat with Claude Code** -- Stream Claude Code sessions running inside your sprites. Send prompts, watch tool use in real-time, and resume previous sessions.
-- **Manage Checkpoints** -- Create and restore filesystem checkpoints for safe experimentation.
-- **Run Quick Commands** -- Execute arbitrary bash commands on sprites without leaving the chat.
-- **Configure Settings** -- Choose Claude model (Sonnet/Opus/Haiku), set max turns, provide custom instructions, and configure git identity.
+## Quick start (the workflow this app is built around)
 
-## How It Works
+The smoothest setup is to prepare a sprite on your computer, then connect from the phone:
 
-The app communicates with sprites through the Sprites REST API (`https://api.sprites.dev/v1`). Chat sessions work by:
+1. **Create a sprite** — tap **+** on the dashboard, or use the Sprites CLI on your computer.
+2. **Add an SSH key** so the sprite can reach GitHub. In a sprite shell:
+   ```bash
+   ssh-keygen -t ed25519 -C "you@example.com"
+   cat ~/.ssh/id_ed25519.pub        # add this to GitHub → Settings → SSH and GPG keys
+   ```
+3. **Clone your repo** into the sprite:
+   ```bash
+   git clone git@github.com:you/your-repo.git ~/your-repo
+   ```
+4. **Connect from the phone.** Open the sprite, set the session **working directory** to your
+   repo (e.g. `/home/sprite/your-repo`), type a prompt, and send. Claude starts working with no
+   approval prompts.
+5. **Come back anytime.** Reopen the app and you land in the same session — send another message
+   to continue the conversation.
 
-1. Creating a service on the sprite that runs `claude -p --verbose --output-format stream-json`
-2. Streaming the service's NDJSON output back to the app via HTTP
-3. Parsing the two-level NDJSON (service log events wrapping Claude stream events) to render messages, tool use cards, and results in real-time
+The same flow is available in-app under **Guides** (dashboard → Guides).
 
-Authentication is three-step: Sprites API token, Claude Code OAuth token, and optional GitHub device flow for git identity.
+---
 
-## Getting Started
+## Connecting: three approaches
 
-### Prerequisites
+The app deliberately ships three ways to reach Claude so you can find what feels best on a phone.
+The first is the default; the other two are launched from a sprite's **Overview → "More ways to
+connect"**.
 
-- Node.js 18+
-- iOS device/simulator or Android emulator
-- A [Sprites API token](https://sprites.dev)
+| | What it is | Best for |
+|---|---|---|
+| **Chat** (default) | Runs Claude non-interactively (`claude -p --output-format stream-json`) as a one-shot Sprites *service* and streams the result into a native chat with tool/plan/result cards. | Day-to-day prompting and reading results comfortably on a phone. |
+| **Interactive Terminal** | A real TTY over a WebSocket (`/v1/sprites/{name}/exec`) rendered in a Skia terminal. Auto-runs `cd <repo> && claude`. | Answering Claude's interactive prompts, watching the live TUI, full shell control. |
+| **Web Terminal (ttyd)** | Embeds a [`ttyd`](https://github.com/tsl0922/ttyd) web terminal running *inside* the sprite, via a WebView. Experimental. | Experimenting; a full xterm in a WebView. Requires starting ttyd in the sprite. |
 
-### Install and Run
+### Session working directory
+
+Claude is always launched after `cd`-ing into the session's **working directory**. This matters
+twice over:
+
+- It's where your cloned repo lives, so set it per session (or set a default in Settings).
+- Claude keys its **resumable history by directory**, so resuming only works from the same path.
+  The working directory is therefore locked once a conversation starts — begin a new session to
+  switch folders.
+
+To start a ttyd server in a sprite for the third approach:
+```bash
+ttyd -W -c user:pass -p 7681 claude     # exposed on the sprite's public URL
+```
+
+---
+
+## Authentication
+
+First launch walks you through three steps:
+
+1. **Sprites API token** — from your sprites.dev account or the Sprites CLI. Lets the app manage
+   your sprites.
+2. **Claude Code token** — run `claude setup-token` on your computer (requires a Claude
+   subscription) and paste the `sk-ant-oat01-…` value. The app injects it as
+   `CLAUDE_CODE_OAUTH_TOKEN` when it launches Claude in the sprite, so you never log in there.
+3. **GitHub** (optional) — device-flow login used to auto-fill your git commit name/email.
+
+Tokens are stored with `expo-secure-store`.
+
+---
+
+## No approvals — and safety
+
+Chat launches Claude with `--dangerously-skip-permissions`, so it never pauses to ask before
+running commands. That's the point — autonomous coding from your phone — but it means Claude can
+run anything in the sprite. The sprite is an isolated VM; still, use the **Checkpoints** tab to
+snapshot the filesystem before risky work and restore if needed.
+
+---
+
+## Running the app
 
 ```bash
-npm install
+npm install --legacy-peer-deps   # the web devDependency pins an older Expo; this avoids the conflict
 npx expo start
 ```
 
-Then press `i` for iOS simulator, `a` for Android emulator, or `w` for web.
+Then press `i` (iOS simulator), `a` (Android emulator), or `w` (web).
 
-### First Launch
+**Prerequisites:** Node.js 18+, a Sprites API token, and (for Claude) a Claude Code OAuth token.
 
-The app will walk you through entering:
-
-1. **Sprites API Token** -- from your Sprites account
-2. **Claude Code Token** -- OAuth token for Claude Code
-3. **GitHub Account** (optional) -- via device flow for git commit identity
+---
 
 ## Architecture
 
 ```
 src/
-  app/                          # Expo Router file-based routing
-    _layout.tsx                 # Root layout with AuthProvider
+  app/                          # Expo Router (file-based)
+    _layout.tsx                 # Root layout + AuthProvider
     index.tsx                   # Auth redirect
-    auth.tsx                    # 3-step authentication flow
+    auth.tsx                    # 3-step auth flow
     (app)/
-      _layout.tsx               # Authenticated stack navigator
-      index.tsx                 # Dashboard -- sprite list
-      settings.tsx              # Model, turns, instructions, git identity
-      sprite/[name].tsx         # Sprite detail with Overview/Chat/Checkpoints tabs
+      _layout.tsx               # Authenticated stack
+      index.tsx                 # Dashboard (sprite list) + Guides/Settings
+      guide.tsx                 # In-app guides & setup walkthrough
+      settings.tsx              # Defaults (working dir, model, turns, instructions, git id)
+      sprite/[name].tsx         # Overview / Chat / Checkpoints, + "more ways to connect"
+      exec-poc.tsx              # Interactive Terminal (WebSocket exec → Skia terminal)
+      ttyd-terminal.tsx         # Web Terminal (ttyd in a WebView)
 
   components/
-    chat/
-      ChatMessageView.tsx       # Routes messages to role-specific components
-      AssistantMessage.tsx      # Markdown-rendered assistant responses
-      UserBubble.tsx            # User message bubble
-      ToolUseCardView.tsx       # Collapsible tool use card (icon, name, elapsed time)
-      ToolDetailSheet.tsx       # Full tool input/output JSON modal
-      PlanCardView.tsx          # TodoWrite checklist with progress tracking
-      ChatInputBar.tsx          # Multi-line input with send/interrupt toggle
-      ChatListSheet.tsx         # Multi-chat switcher modal
-      QuickBashSheet.tsx        # Run bash commands, insert output into chat
-      ThinkingShimmer.tsx       # Animated pulsing indicator during streaming
-    checkpoints/
-      CheckpointsList.tsx       # List, create, restore checkpoints
-      CreateCheckpointSheet.tsx # Checkpoint creation modal
-    dashboard/
-      SpriteRow.tsx             # Sprite list item with status indicator
-      CreateSpriteSheet.tsx     # Sprite creation modal
+    chat/                       # Chat UI: messages, tool cards, plan, input bar,
+                                #   session list, new-session sheet, quick bash
+    checkpoints/                # Create / list / restore checkpoints
+    dashboard/                  # Sprite row + create sheet
+    terminal/                   # Skia-based terminal (ANSI parser, buffer, renderer)
 
-  hooks/
-    useChat.ts                  # Core chat hook -- streaming, event parsing, persistence
-    use-theme.ts                # Theme colors from color scheme
-
-  services/
-    api.ts                      # REST client -- sprites, checkpoints, services, exec
-    auth.ts                     # Secure token storage (expo-secure-store)
-    claude-stream.ts            # Line-buffered NDJSON parser for Claude events
-    github.ts                   # GitHub device flow OAuth
-    storage.ts                  # AsyncStorage persistence for chats and settings
-
-  models/
-    sprite.ts                   # Sprite type, status helpers
-    checkpoint.ts               # Checkpoint type, stream event type
-    claude-events.ts            # Claude stream event types, JSONValue, parser
-    chat.ts                     # ChatMessage, ToolUseCard, ToolResultCard types
-    service.ts                  # ServiceRequest, ServiceLogEvent types
-
-  contexts/
-    AuthContext.tsx              # Auth state provider with token management
-
-  constants/
-    theme.ts                    # Colors (light/dark), spacing, font sizes
+  hooks/        useChat.ts      # Streaming, two-level NDJSON parsing, persistence, resume
+  services/     api.ts          # REST client: sprites, checkpoints, services, exec
+                auth.ts          # Secure token storage
+                claude-stream.ts # NDJSON parser for Claude events
+                exec-poc.ts      # WebSocket exec client
+                storage.ts       # AsyncStorage: chats + settings
+  models/                        # sprite, chat, claude-events, service, checkpoint
+  constants/    session.ts      # Working-directory defaults/helpers; theme.ts
 ```
 
-### Key Design Decisions
+### How Chat streaming works
 
-- **Service-based streaming** rather than WebSocket exec -- avoids React Native WebSocket header limitations and provides cleaner NDJSON parsing.
-- **Refs alongside state** in `useChat` -- `statusRef`, `messagesRef`, etc. prevent stale closure bugs in streaming callbacks while still driving React re-renders.
-- **Two-level NDJSON parsing** -- Service log events contain a `data` field with Claude's NDJSON output. `ClaudeStreamParser` buffers and parses incomplete lines. Timestamps prefixing lines are stripped before parsing.
-- **Multi-chat per sprite** -- Each sprite can have multiple independent chat sessions persisted to AsyncStorage, with session resume via Claude's `--resume` flag.
+1. The app starts a Sprites **service** that runs Claude in your working directory:
+   `claude -p --verbose --output-format stream-json --dangerously-skip-permissions --model <model>
+   [--resume <session-id>] '<prompt>'`.
+2. The service's output streams back as NDJSON over HTTP.
+3. `ClaudeStreamParser` parses the two-level NDJSON (service log events whose `data` field carries
+   Claude's own NDJSON), and `useChat` renders text, tool-use cards, plans, and results live.
+4. Each chat persists Claude's session id and working directory, so the next message resumes the
+   same conversation — across app restarts.
 
-## Tech Stack
+---
 
-- **Expo 55** / React Native 0.83
-- **Expo Router** -- file-based navigation
-- **expo-secure-store** -- token storage
-- **@react-native-async-storage/async-storage** -- chat and settings persistence
-- **react-native-markdown-display** -- assistant message rendering
-- **expo-clipboard** -- GitHub device code copy
+## Tech stack
+
+- **Expo 55** / React Native 0.83, **Expo Router** (file-based navigation)
+- **@shopify/react-native-skia** — high-performance terminal rendering
+- **react-native-webview** — ttyd web terminal
+- **expo-secure-store** — token storage · **AsyncStorage** — chats & settings
+
+---
+
+## Roadmap
+
+- Full support for additional agents (the chat layer already abstracts a `provider`).
+- One-tap ttyd bootstrap inside the sprite.
+- Pushing/observing long-running sessions in the background.

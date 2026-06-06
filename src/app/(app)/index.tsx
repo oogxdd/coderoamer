@@ -134,13 +134,21 @@ export default function DashboardScreen() {
         <Text style={styles.fabText}>+</Text>
       </Pressable>
 
-      {/* Settings button */}
-      <Pressable
-        style={[styles.settingsButton, { backgroundColor: colors.card }]}
-        onPress={() => router.push('/(app)/settings')}
-      >
-        <Text style={[styles.settingsButtonText, { color: colors.text }]}>Settings</Text>
-      </Pressable>
+      {/* Bottom bar: Guides + Settings */}
+      <View style={styles.bottomBar}>
+        <Pressable
+          style={[styles.bottomButton, { backgroundColor: colors.card }]}
+          onPress={() => router.push('/(app)/guide')}
+        >
+          <Text style={[styles.settingsButtonText, { color: colors.text }]}>Guides</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.bottomButton, { backgroundColor: colors.card }]}
+          onPress={() => router.push('/(app)/settings')}
+        >
+          <Text style={[styles.settingsButtonText, { color: colors.text }]}>Settings</Text>
+        </Pressable>
+      </View>
 
       <Modal visible={showCreate} animationType="slide" transparent>
         <CreateSpriteSheet
@@ -205,11 +213,16 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     marginTop: -2,
   },
-  settingsButton: {
-    alignItems: 'center',
-    paddingVertical: Spacing.md,
+  bottomBar: {
+    flexDirection: 'row',
+    gap: Spacing.md,
     marginHorizontal: Spacing.xl,
     marginBottom: Spacing.xxl,
+  },
+  bottomButton: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: Spacing.md,
     borderRadius: 10,
   },
   settingsButtonText: {

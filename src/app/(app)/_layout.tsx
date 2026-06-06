@@ -24,6 +24,10 @@ export default function AppLayout() {
         options={{ title: 'Settings' }}
       />
       <Stack.Screen
+        name="guide"
+        options={{ title: 'Guides', headerShown: false }}
+      />
+      <Stack.Screen
         name="exec-poc"
         options={{ title: 'Terminal', headerShown: false }}
       />

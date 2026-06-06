@@ -221,6 +221,17 @@ export default function SettingsScreen() {
         <Text style={[styles.signOutText, { color: colors.destructive }]}>Sign Out</Text>
       </Pressable>
 
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>HELP</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <Pressable
+          style={({ pressed }) => [styles.row, { opacity: pressed ? 0.7 : 1 }]}
+          onPress={() => router.push('/(app)/guide')}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Guides &amp; Setup</Text>
+          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
+        </Pressable>
+      </View>
+
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>DEFAULT AGENT</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
         <View style={styles.pickerRow}>
