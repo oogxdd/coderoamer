@@ -136,9 +136,9 @@ export default function GuideScreen() {
           <P>
             <Text style={styles.b}>Web Terminal (ttyd)</Text> — embeds a{' '}
             <Text style={styles.mono}>ttyd</Text> web terminal running inside the sprite.
-            &quot;Start ttyd in this sprite&quot; opens the sprite URL (auth: public), runs ttyd on
-            port 8080 (the public URL proxies to it), and connects. Experimental, and requires{' '}
-            <Text style={styles.mono}>ttyd</Text> to be installed in the sprite.
+            &quot;Start ttyd in this sprite&quot; opens the sprite URL (auth: public), installs ttyd
+            if missing (apt/apk/dnf, else a static binary), runs it on port 8080 (the public URL
+            proxies to it), and connects. Experimental, and it makes the sprite URL public.
           </P>
           <P>Open the last two from a sprite&apos;s Overview tab → &quot;More ways to connect&quot;.</P>
         </Section>

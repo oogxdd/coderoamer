@@ -693,8 +693,8 @@ function OverviewTab({
         <View style={styles.connectRowText}>
           <Text style={[styles.connectTitle, { color: colors.text }]}>Web Terminal (ttyd)</Text>
           <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            One tap starts ttyd in the sprite and opens it in a web terminal. Experimental —
-            requires ttyd installed; makes the sprite URL public.
+            One tap installs &amp; starts ttyd in the sprite and opens it in a web terminal.
+            Experimental — makes the sprite URL public.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>

@@ -55,8 +55,9 @@ twice over:
   switch folders.
 
 For the third approach, **"Start ttyd in this sprite"** does it for you: it sets the sprite URL to
-`public`, starts ttyd on port 8080 (the public URL proxies to port 8080 / the first HTTP port), and
-connects — `ttyd` just needs to be installed in the sprite. To run it by hand instead:
+`public`, installs `ttyd` if it's missing (apt/apk/dnf, falling back to a static binary), starts it
+on port 8080 (the public URL proxies to port 8080 / the first HTTP port), and connects. To run it by
+hand instead:
 ```bash
 ttyd -W -c user:pass -p 8080 claude      # reachable at the sprite's public URL
 ```
@@ -90,13 +91,16 @@ snapshot the filesystem before risky work and restore if needed.
 ## Running the app
 
 ```bash
-npm install --legacy-peer-deps   # the web devDependency pins an older Expo; this avoids the conflict
-npx expo start
+npm install        # .npmrc sets legacy-peer-deps so the web devDependency conflict is handled
+npx expo run:ios   # builds & runs a dev build on the iOS simulator (needed: app uses native modules)
 ```
 
-Then press `i` (iOS simulator), `a` (Android emulator), or `w` (web).
+`npx expo start` then `w` works for web. The app uses custom native modules (Skia, WebView), so on
+iOS use a **dev build** (`expo run:ios`) rather than Expo Go.
 
 **Prerequisites:** Node.js 18+, a Sprites API token, and (for Claude) a Claude Code OAuth token.
+
+**Developing on a device and shipping to TestFlight:** see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
 
 ---
 
@@ -159,5 +163,5 @@ src/
 ## Roadmap
 
 - Full support for additional agents (the chat layer already abstracts a `provider`).
-- Auto-install ttyd when it's missing (the bootstrap currently assumes it's present).
 - Pushing/observing long-running sessions in the background.
+- Background push notifications when a session finishes or needs input.

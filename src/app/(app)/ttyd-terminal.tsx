@@ -19,6 +19,8 @@ import * as api from '@/services/api';
 const DEFAULT_HOST = '';
 const DEFAULT_USER = 'user';
 const DEFAULT_PASS = '';
+// Static-binary fallback version when no package manager has ttyd.
+const TTYD_VERSION = '1.7.7';
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
 const MAX_LOG_LINES = 250;
 
@@ -328,10 +330,30 @@ export default function TtydTerminalScreen() {
       appendLog(`bootstrap: starting ttyd on :8080 in ${cwd}`);
       const safePass = pass.replace(/'/g, '');
       const safeUser = user.replace(/'/g, '');
-      const inner =
-        `cd "${cwd}" 2>/dev/null; ` +
-        `command -v ttyd >/dev/null 2>&1 || { echo "ttyd is not installed in this sprite"; exit 127; }; ` +
-        `exec ttyd -W -p 8080 -c '${safeUser}:${safePass}' claude`;
+      // Ensure ttyd exists (package manager, else a static binary), then run it in the repo.
+      // No `set -e`: each step falls through to the final check. `sudo -n` never prompts.
+      const inner = [
+        `cd "${cwd}" 2>/dev/null || true`,
+        `if ! command -v ttyd >/dev/null 2>&1; then`,
+        `  echo "ttyd not found — trying package manager...";`,
+        `  export DEBIAN_FRONTEND=noninteractive;`,
+        `  if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo -n"; fi;`,
+        `  ( $SUDO apt-get update -y && $SUDO apt-get install -y ttyd ) >/dev/null 2>&1 || $SUDO apk add --no-cache ttyd >/dev/null 2>&1 || $SUDO dnf install -y ttyd >/dev/null 2>&1 || true;`,
+        `fi`,
+        `if ! command -v ttyd >/dev/null 2>&1; then`,
+        `  echo "downloading static ttyd ${TTYD_VERSION}...";`,
+        `  ARCH=$(uname -m);`,
+        `  case "$ARCH" in x86_64) TBIN=ttyd.x86_64;; aarch64|arm64) TBIN=ttyd.aarch64;; armv7l|armv6l) TBIN=ttyd.arm;; *) TBIN=ttyd.x86_64;; esac;`,
+        `  mkdir -p "$HOME/.local/bin";`,
+        `  URL="https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/$TBIN";`,
+        `  if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" -o "$HOME/.local/bin/ttyd"; elif command -v wget >/dev/null 2>&1; then wget -qO "$HOME/.local/bin/ttyd" "$URL"; fi;`,
+        `  chmod +x "$HOME/.local/bin/ttyd" 2>/dev/null || true;`,
+        `  export PATH="$HOME/.local/bin:$PATH";`,
+        `fi`,
+        `if ! command -v ttyd >/dev/null 2>&1; then echo "could not install ttyd automatically — install it manually and retry"; exit 127; fi`,
+        `echo "starting ttyd on :8080";`,
+        `exec ttyd -W -p 8080 -c '${safeUser}:${safePass}' claude`,
+      ].join('\n');
 
       serviceAbortRef.current?.abort();
       const { controller, started } = api.startBackgroundService(
@@ -618,7 +640,7 @@ export default function TtydTerminalScreen() {
 
             <Text style={styles.hint}>
               {spriteName
-                ? '“Start ttyd” opens the sprite URL (auth: public), runs ttyd on port 8080 in your working directory, then connects. ttyd must be installed in the sprite.'
+                ? '“Start ttyd” opens the sprite URL (auth: public), installs ttyd if missing, runs it on port 8080 in your working directory, then connects.'
                 : 'Start a ttyd server inside the sprite on port 8080 — the sprite URL proxies to it:'}
               {'\n'}
               <Text style={styles.code}>ttyd -W -c user:pass -p 8080 claude</Text>
