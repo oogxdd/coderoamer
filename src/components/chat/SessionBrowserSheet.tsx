@@ -1,0 +1,277 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  FlatList,
+  Modal,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
+import { useTheme } from '@/hooks/use-theme';
+import { FontSize, Spacing } from '@/constants/theme';
+import { ChatMessage } from '@/models/chat';
+import { shortWorkingDirectory } from '@/constants/session';
+import {
+  ClaudeSessionSummary,
+  listClaudeSessions,
+  readClaudeSessionMessages,
+} from '@/services/claude-sessions';
+import { ChatMessageView } from './ChatMessageView';
+
+interface SessionBrowserSheetProps {
+  spriteName: string;
+  /** Resume the chosen session: seeds a chat with its transcript + `--resume <id>`. */
+  onResume: (session: ClaudeSessionSummary, messages: ChatMessage[]) => void;
+  onClose: () => void;
+}
+
+function relativeTime(ms: number): string {
+  if (!ms) return '';
+  const diff = Date.now() - ms;
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBrowserSheetProps) {
+  const colors = useTheme();
+  const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  // Detail (history) view state
+  const [selected, setSelected] = useState<ClaudeSessionSummary | null>(null);
+  const [detailMessages, setDetailMessages] = useState<ChatMessage[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | undefined>();
+
+  const load = useCallback(async () => {
+    setError(undefined);
+    try {
+      const list = await listClaudeSessions(spriteName);
+      setSessions(list);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to load sessions');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [spriteName]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const openDetail = useCallback(
+    async (session: ClaudeSessionSummary) => {
+      setSelected(session);
+      setDetailMessages([]);
+      setDetailError(undefined);
+      setDetailLoading(true);
+      try {
+        const msgs = await readClaudeSessionMessages(spriteName, session.id);
+        setDetailMessages(msgs);
+      } catch (e: any) {
+        setDetailError(e?.message ?? 'Failed to load transcript');
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [spriteName]
+  );
+
+  const renderList = () => (
+    <FlatList
+      data={sessions}
+      keyExtractor={(item) => item.id}
+      contentContainerStyle={styles.listContent}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={() => {
+            setRefreshing(true);
+            load();
+          }}
+          tintColor={colors.tint}
+        />
+      }
+      renderItem={({ item }) => (
+        <Pressable
+          style={[styles.row, { borderBottomColor: colors.border }]}
+          onPress={() => openDetail(item)}
+        >
+          <View style={styles.rowContent}>
+            <Text style={[styles.rowPreview, { color: colors.text }]} numberOfLines={2}>
+              {item.preview || '(no prompt recorded)'}
+            </Text>
+            <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+              {item.cwd ? shortWorkingDirectory(item.cwd) : 'unknown dir'} · {item.messageCount} msgs ·{' '}
+              {relativeTime(item.modified)}
+            </Text>
+          </View>
+          <Text style={[styles.chevron, { color: colors.tint }]}>›</Text>
+        </Pressable>
+      )}
+      ListEmptyComponent={
+        loading ? (
+          <View style={styles.centerView}>
+            <ActivityIndicator size="small" color={colors.tint} />
+            <Text style={[styles.dimText, { color: colors.textSecondary }]}>
+              Scanning ~/.claude/projects on {spriteName}…
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.centerView}>
+            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+              {error
+                ? error
+                : 'No Claude sessions found on this sprite yet. Start one from Chat, or run claude in the terminal.'}
+            </Text>
+          </View>
+        )
+      }
+    />
+  );
+
+  return (
+    <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <View style={[styles.header, { borderBottomColor: colors.border }]}>
+          {selected ? (
+            <Pressable onPress={() => setSelected(null)} hitSlop={12}>
+              <Text style={[styles.headerButton, { color: colors.tint }]}>‹ Sessions</Text>
+            </Pressable>
+          ) : (
+            <Pressable onPress={onClose} hitSlop={12}>
+              <Text style={[styles.headerButton, { color: colors.tint }]}>Close</Text>
+            </Pressable>
+          )}
+          <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
+            {selected ? 'History' : 'Resume a session'}
+          </Text>
+          <View style={styles.headerButtonRight}>
+            {selected && !detailLoading && (
+              <Pressable onPress={() => onResume(selected, detailMessages)} hitSlop={12}>
+                <Text style={[styles.headerButton, { color: colors.tint }]}>Continue</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+
+        {!selected && renderList()}
+
+        {selected && (
+          <View style={styles.flex}>
+            {detailLoading ? (
+              <View style={styles.centerView}>
+                <ActivityIndicator size="small" color={colors.tint} />
+                <Text style={[styles.dimText, { color: colors.textSecondary }]}>
+                  Loading transcript…
+                </Text>
+              </View>
+            ) : detailError ? (
+              <View style={styles.centerView}>
+                <Text style={[styles.emptyText, { color: colors.destructive }]}>{detailError}</Text>
+              </View>
+            ) : (
+              <>
+                <FlatList
+                  data={detailMessages}
+                  keyExtractor={(item) => item.id}
+                  contentContainerStyle={styles.detailContent}
+                  renderItem={({ item }) => (
+                    <ChatMessageView message={item} workingDirectory={selected.cwd} />
+                  )}
+                  ListHeaderComponent={
+                    <View style={styles.detailHeader}>
+                      <Text style={[styles.detailMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                        {selected.cwd ?? 'unknown dir'}
+                      </Text>
+                      <Text style={[styles.detailId, { color: colors.textSecondary }]} numberOfLines={1}>
+                        {selected.id}
+                      </Text>
+                    </View>
+                  }
+                  ListEmptyComponent={
+                    <View style={styles.centerView}>
+                      <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                        Transcript is empty or could not be rendered.
+                      </Text>
+                    </View>
+                  }
+                />
+                <Pressable
+                  style={[styles.continueBar, { backgroundColor: colors.tint }]}
+                  onPress={() => onResume(selected, detailMessages)}
+                >
+                  <Text style={styles.continueText}>Continue this session</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  flex: { flex: 1 },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  title: { fontSize: FontSize.lg, fontWeight: '700', flex: 1, textAlign: 'center' },
+  headerButton: { fontSize: FontSize.md, fontWeight: '600' },
+  headerButtonRight: { minWidth: 70, alignItems: 'flex-end' },
+  listContent: { flexGrow: 1 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  rowContent: { flex: 1, marginRight: Spacing.sm },
+  rowPreview: { fontSize: FontSize.md, fontWeight: '500', lineHeight: 20 },
+  rowMeta: { fontSize: FontSize.xs, marginTop: 4 },
+  chevron: { fontSize: FontSize.xl, fontWeight: '400' },
+  centerView: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 80,
+    paddingHorizontal: Spacing.xxl,
+    gap: Spacing.sm,
+  },
+  dimText: { fontSize: FontSize.sm, textAlign: 'center' },
+  emptyText: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 22 },
+  detailContent: { paddingVertical: Spacing.sm, paddingBottom: 80 },
+  detailHeader: { paddingHorizontal: Spacing.lg, paddingBottom: Spacing.sm },
+  detailMeta: { fontSize: FontSize.xs },
+  detailId: { fontSize: FontSize.xs, marginTop: 2 },
+  continueBar: {
+    position: 'absolute',
+    bottom: Spacing.lg,
+    left: Spacing.lg,
+    right: Spacing.lg,
+    borderRadius: 12,
+    paddingVertical: Spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  continueText: { color: '#fff', fontSize: FontSize.md, fontWeight: '700' },
+});

@@ -23,8 +23,10 @@ import { ChatInputBar } from '@/components/chat/ChatInputBar';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
+import { SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { PersistedChat, getSetting, loadChatList, saveChatList } from '@/services/storage';
+import { ClaudeSessionSummary } from '@/services/claude-sessions';
+import { PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
@@ -69,6 +71,10 @@ export default function SpriteDetailScreen() {
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
+  const [sessionBrowserVisible, setSessionBrowserVisible] = useState(false);
+  // Bumped to force the current chat to reload its persisted messages (e.g. after
+  // seeding a resumed session's transcript) even when chatId is unchanged.
+  const [reloadNonce, setReloadNonce] = useState(0);
   // null = closed. 'new' creates a fresh session; 'edit' changes the current session's directory.
   const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'edit' | null>(null);
   const chatListRef = useRef<PersistedChat[]>([]);
@@ -170,12 +176,13 @@ export default function SpriteDetailScreen() {
     return () => { mounted = false; };
   }, [spriteName]);
 
-  // Load chat session when chatId changes
+  // Load chat session when chatId changes (or when forced via reloadNonce).
   useEffect(() => {
     if (chatId) {
       chat.loadSession();
     }
-  }, [chatId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId, reloadNonce]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -279,6 +286,64 @@ export default function SpriteDetailScreen() {
     setChatListVisible(false);
   }, [chat.isStreaming, chat.interrupt, chatId, spriteName, defaultDirectory]);
 
+  // Resume a Claude session discovered on the sprite (its on-disk transcript).
+  // Reuses an existing local chat bound to the same session id, or creates one,
+  // seeds it with the rendered transcript, and points the chat at `--resume <id>`
+  // with the session's original cwd (resume requires the matching directory).
+  const handleResumeSession = useCallback(
+    async (session: ClaudeSessionSummary, messages: ChatMessage[]) => {
+      if (chat.isStreaming) chat.interrupt();
+      const dir = normalizeWorkingDirectory(session.cwd || defaultDirectory);
+      const chats = chatListRef.current;
+      const existing = chats.find((c) => c.claudeSessionId === session.id);
+
+      let target: PersistedChat;
+      if (existing) {
+        target = {
+          ...existing,
+          provider: 'claude',
+          workingDirectory: dir,
+          lastUsed: Date.now(),
+        };
+      } else {
+        const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
+        target = {
+          id: `${spriteName}-chat-${maxNumber + 1}`,
+          spriteName,
+          chatNumber: maxNumber + 1,
+          provider: 'claude',
+          claudeSessionId: session.id,
+          workingDirectory: dir,
+          createdAt: Date.now(),
+          lastUsed: Date.now(),
+          isClosed: false,
+          lastSessionComplete: true,
+          processedEventUUIDs: [],
+          firstMessagePreview: session.preview ? session.preview.slice(0, 100) : undefined,
+        };
+      }
+
+      const updated = existing
+        ? chats.map((c) => (c.id === target.id ? target : c))
+        : [...chats, target];
+      chatListRef.current = updated;
+      await saveChatList(spriteName, updated);
+      await saveChatMessages(target.id, messages);
+
+      setChatProvider('claude');
+      setClaudeSessionId(session.id);
+      setCodexSessionId(undefined);
+      setWorkingDirectory(dir);
+      setChatName(target.customName ?? `Session ${target.chatNumber}`);
+      setChatId(target.id);
+      setSessionBrowserVisible(false);
+      setTab('chat');
+      // Force a reload even if chatId didn't change (resuming the open chat).
+      setReloadNonce((n) => n + 1);
+    },
+    [chat.isStreaming, chat.interrupt, defaultDirectory, spriteName]
+  );
+
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
     setChatProvider(nextProvider);
@@ -369,6 +434,9 @@ export default function SpriteDetailScreen() {
               <Pressable onPress={() => setQuickBashVisible(true)} hitSlop={8}>
                 <Text style={[styles.headerAction, { color: colors.tint }]}>&#x26A1;</Text>
               </Pressable>
+              <Pressable onPress={() => setSessionBrowserVisible(true)} hitSlop={8}>
+                <Text style={[styles.headerAction, { color: colors.tint }]}>&#x1F553;</Text>
+              </Pressable>
               <Pressable onPress={() => setChatListVisible(true)} hitSlop={8}>
                 <Text style={[styles.headerAction, { color: colors.tint }]}>&#x2630;</Text>
               </Pressable>
@@ -419,6 +487,7 @@ export default function SpriteDetailScreen() {
           isActive={tab === 'overview'}
           onSpriteUpdated={setSprite}
           workingDirectory={workingDirectory}
+          onBrowseSessions={() => setSessionBrowserVisible(true)}
         />
       )}
 
@@ -543,6 +612,15 @@ export default function SpriteDetailScreen() {
           onClose={() => setQuickBashVisible(false)}
         />
       )}
+
+      {/* Session Browser (resume Claude sessions from the sprite's transcripts) */}
+      {sessionBrowserVisible && (
+        <SessionBrowserSheet
+          spriteName={spriteName}
+          onResume={handleResumeSession}
+          onClose={() => setSessionBrowserVisible(false)}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -555,6 +633,7 @@ function OverviewTab({
   isActive,
   onSpriteUpdated,
   workingDirectory,
+  onBrowseSessions,
 }: {
   sprite: Sprite | null;
   isLoading: boolean;
@@ -562,6 +641,7 @@ function OverviewTab({
   isActive: boolean;
   onSpriteUpdated: (sprite: Sprite) => void;
   workingDirectory: string;
+  onBrowseSessions: () => void;
 }) {
   const colors = useTheme();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -664,8 +744,25 @@ function OverviewTab({
 
       {/* More ways to connect */}
       <Text style={[styles.connectHeader, { color: colors.textSecondary }]}>
-        MORE WAYS TO CONNECT
+        SESSIONS &amp; TERMINALS
       </Text>
+      <Pressable
+        style={({ pressed }) => [
+          styles.connectRow,
+          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+        ]}
+        onPress={onBrowseSessions}
+      >
+        <View style={styles.connectRowText}>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>Resume a Claude session</Text>
+          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
+            Browse every Claude session that ever ran on this sprite (read from
+            ~/.claude/projects), view its full history, and continue it — like
+            `claude --resume`, natively.
+          </Text>
+        </View>
+        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
+      </Pressable>
       <Pressable
         style={({ pressed }) => [
           styles.connectRow,
@@ -679,10 +776,10 @@ function OverviewTab({
         }
       >
         <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>Interactive Terminal</Text>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>Stream terminal</Text>
           <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Real TTY over WebSocket — auto-runs claude in your repo. Best for answering prompts
-            and watching the live TUI.
+            Real TTY over WebSocket. Run anything — including `claude --resume` — and
+            watch the live TUI. Best for answering interactive prompts.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
@@ -700,10 +797,12 @@ function OverviewTab({
         }
       >
         <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>Web Terminal (ttyd)</Text>
+          <Text style={[styles.connectTitle, { color: colors.textSecondary }]}>
+            Web Terminal (ttyd) · legacy
+          </Text>
           <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            One tap installs &amp; starts ttyd in the sprite and opens it in a web terminal.
-            Experimental — makes the sprite URL public.
+            Installs &amp; starts ttyd in the sprite and opens it in a WebView. Makes the
+            sprite URL public — superseded by the options above.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
