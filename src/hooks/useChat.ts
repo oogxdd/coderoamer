@@ -19,6 +19,7 @@ import { CodexStreamEvent } from '@/models/codex-events';
 import { ServiceLogEvent, ServiceRequest } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
+import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import * as api from '@/services/api';
 import { loadToken } from '@/services/auth';
 import { getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
@@ -98,6 +99,10 @@ function buildFallbackPrompt(history: ChatMessage[], prompt: string): string {
     `User: ${prompt}`,
     'Assistant:',
   ].join('\n\n');
+}
+
+function countUserMessages(messages: ChatMessage[]): number {
+  return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
 }
 
 function nextAssistantAfterUser(messages: ChatMessage[], userIndex: number): number {
@@ -222,7 +227,35 @@ export function useChat(options: UseChatOptions) {
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
     }
-  }, [chatId, options.initialClaudeSessionId, options.initialCodexSessionId, setClaudeSessionId, setCodexSessionId]);
+
+    // Source-of-truth sync: if this chat resumes a known Claude session, pull its
+    // on-disk transcript from the sprite. Catches turns that finished (or were
+    // started from a terminal / another device) while the app was away — the same
+    // history `claude --resume` would show. Runs in the background; guarded so it
+    // never clobbers a fresh local send.
+    const resumeId = options.initialClaudeSessionId;
+    if (provider === 'claude' && resumeId) {
+      (async () => {
+        try {
+          const transcript = await readClaudeSessionMessages(spriteName, resumeId);
+          if (loadRequest !== loadRequestRef.current) return;
+          if (statusRef.current !== 'idle') return;
+          const local = messagesRef.current;
+          const transcriptTurns = countUserMessages(transcript);
+          const localTurns = countUserMessages(local);
+          // Only adopt the transcript when it clearly has more conversation than
+          // we have locally (or local is empty), to avoid churn on every open.
+          if (transcript.length > 0 && (local.length === 0 || transcriptTurns > localTurns)) {
+            messagesRef.current = transcript;
+            setMessages(transcript);
+            await saveChatMessages(chatId, transcript);
+          }
+        } catch {
+          // Offline / no transcript yet — keep the local copy.
+        }
+      })();
+    }
+  }, [chatId, provider, spriteName, options.initialClaudeSessionId, options.initialCodexSessionId, setClaudeSessionId, setCodexSessionId]);
 
   const ensureAssistantTarget = useCallback(
     (source: ChatMessage[]): { messages: ChatMessage[]; index: number } => {
