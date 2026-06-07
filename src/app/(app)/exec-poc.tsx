@@ -46,16 +46,17 @@ const QUICK_CONTROLS: QuickControl[] = [
 
 export default function ExecPocScreen() {
   const colors = useTheme();
-  const params = useLocalSearchParams<{ name?: string; cwd?: string; cmd?: string }>();
+  const params = useLocalSearchParams<{ name?: string; cwd?: string; cmd?: string; attachSessionId?: string }>();
   const paramName = typeof params.name === 'string' ? params.name : '';
   const paramCwd = typeof params.cwd === 'string' ? params.cwd : '';
   const paramCmd = typeof params.cmd === 'string' ? params.cmd : '';
+  const paramAttachSessionId = typeof params.attachSessionId === 'string' ? params.attachSessionId : '';
 
   const [spriteName, setSpriteName] = useState(paramName);
   // With a working directory we launch a shell and type `cd <dir> && claude`, which
   // works no matter how the exec endpoint tokenizes `cmd`. Otherwise run the command directly.
   const [command, setCommand] = useState(paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND));
-  const [attachSessionId, setAttachSessionId] = useState('');
+  const [attachSessionId, setAttachSessionId] = useState(paramAttachSessionId);
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
   const [showSetup, setShowSetup] = useState(false);
@@ -99,6 +100,7 @@ export default function ExecPocScreen() {
   }, [client]);
 
   // Auto-connect when launched for a specific sprite (from the sprite screen).
+  // Supports both fresh sessions (cmd/cwd) and attaching to an existing exec session (attachSessionId).
   useEffect(() => {
     if (didAutoConnectRef.current || !paramName) return;
     didAutoConnectRef.current = true;
@@ -107,7 +109,8 @@ export default function ExecPocScreen() {
         await client.connect({
           spriteName: paramName,
           command: paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND),
-          initialInput: initialInputRef.current,
+          attachSessionId: paramAttachSessionId || undefined,
+          initialInput: paramAttachSessionId ? undefined : initialInputRef.current,
         });
         setShowSetup(false);
         termRef.current?.focus();
@@ -119,7 +122,7 @@ export default function ExecPocScreen() {
         });
       }
     })();
-  }, [paramName, paramCmd, paramCwd, client, appendLog]);
+  }, [paramName, paramCmd, paramCwd, paramAttachSessionId, client, appendLog]);
 
   const sendControl = (label: string, payload: string) => {
     client.send(payload, false);

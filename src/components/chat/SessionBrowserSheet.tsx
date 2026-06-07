@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
+import { router } from 'expo-router';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
 import { ChatMessage } from '@/models/chat';
@@ -18,7 +19,10 @@ import {
   listClaudeSessions,
   readClaudeSessionMessages,
 } from '@/services/claude-sessions';
+import { ExecSession, listExecSessions } from '@/services/api';
 import { ChatMessageView } from './ChatMessageView';
+
+type BrowserTab = 'history' | 'live';
 
 interface SessionBrowserSheetProps {
   spriteName: string;
@@ -42,6 +46,9 @@ function relativeTime(ms: number): string {
 
 export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBrowserSheetProps) {
   const colors = useTheme();
+  const [activeTab, setActiveTab] = useState<BrowserTab>('history');
+
+  // History tab state
   const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -52,6 +59,12 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
   const [detailMessages, setDetailMessages] = useState<ChatMessage[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | undefined>();
+
+  // Live tab state
+  const [liveSessions, setLiveSessions] = useState<ExecSession[]>([]);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveRefreshing, setLiveRefreshing] = useState(false);
+  const [liveError, setLiveError] = useState<string | undefined>();
 
   const load = useCallback(async () => {
     setError(undefined);
@@ -66,9 +79,29 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
     }
   }, [spriteName]);
 
+  const loadLive = useCallback(async () => {
+    setLiveError(undefined);
+    try {
+      const list = await listExecSessions(spriteName);
+      setLiveSessions(list);
+    } catch (e: any) {
+      setLiveError(e?.message ?? 'Failed to load live sessions');
+    } finally {
+      setLiveLoading(false);
+      setLiveRefreshing(false);
+    }
+  }, [spriteName]);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (activeTab === 'live' && !liveLoading && liveSessions.length === 0 && !liveError) {
+      setLiveLoading(true);
+      loadLive();
+    }
+  }, [activeTab, liveLoading, liveSessions.length, liveError, loadLive]);
 
   const openDetail = useCallback(
     async (session: ClaudeSessionSummary) => {
@@ -141,13 +174,75 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
     />
   );
 
+  const renderLiveList = () => (
+    <FlatList
+      data={liveSessions}
+      keyExtractor={(item) => item.id}
+      contentContainerStyle={styles.listContent}
+      refreshControl={
+        <RefreshControl
+          refreshing={liveRefreshing}
+          onRefresh={() => {
+            setLiveRefreshing(true);
+            loadLive();
+          }}
+          tintColor={colors.tint}
+        />
+      }
+      renderItem={({ item }) => (
+        <Pressable
+          style={[styles.row, { borderBottomColor: colors.border }]}
+          onPress={() => {
+            onClose();
+            router.push({
+              pathname: '/(app)/exec-poc',
+              params: { name: spriteName, attachSessionId: item.id },
+            });
+          }}
+        >
+          <View style={styles.rowContent}>
+            <View style={styles.liveRowTop}>
+              <View style={[styles.liveDot, { backgroundColor: '#3fb950' }]} />
+              <Text style={[styles.rowPreview, { color: colors.text }]} numberOfLines={1}>
+                {item.cmd ?? 'session'}
+              </Text>
+            </View>
+            <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+              {item.id}
+              {item.last_activity ? ` · ${relativeTime(new Date(item.last_activity).getTime())}` : ''}
+            </Text>
+          </View>
+          <Text style={[styles.chevron, { color: colors.tint }]}>›</Text>
+        </Pressable>
+      )}
+      ListEmptyComponent={
+        liveLoading ? (
+          <View style={styles.centerView}>
+            <ActivityIndicator size="small" color={colors.tint} />
+            <Text style={[styles.dimText, { color: colors.textSecondary }]}>
+              Fetching live sessions…
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.centerView}>
+            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+              {liveError
+                ? liveError
+                : 'No running exec sessions. Start one from the stream terminal, or run a command via the sprite CLI.'}
+            </Text>
+          </View>
+        )
+      }
+    />
+  );
+
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         <View style={[styles.header, { borderBottomColor: colors.border }]}>
           {selected ? (
             <Pressable onPress={() => setSelected(null)} hitSlop={12}>
-              <Text style={[styles.headerButton, { color: colors.tint }]}>‹ Sessions</Text>
+              <Text style={[styles.headerButton, { color: colors.tint }]}>‹ Back</Text>
             </Pressable>
           ) : (
             <Pressable onPress={onClose} hitSlop={12}>
@@ -155,7 +250,7 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
             </Pressable>
           )}
           <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
-            {selected ? 'History' : 'Resume a session'}
+            {selected ? 'History' : 'Sessions'}
           </Text>
           <View style={styles.headerButtonRight}>
             {selected && !detailLoading && (
@@ -166,7 +261,33 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
           </View>
         </View>
 
-        {!selected && renderList()}
+        {/* Tab bar — only shown on the list (not in the detail view) */}
+        {!selected && (
+          <View style={[styles.tabBar, { borderBottomColor: colors.border }]}>
+            {(['history', 'live'] as BrowserTab[]).map((tab) => (
+              <Pressable
+                key={tab}
+                style={[
+                  styles.tab,
+                  activeTab === tab && { borderBottomColor: colors.tint, borderBottomWidth: 2 },
+                ]}
+                onPress={() => setActiveTab(tab)}
+              >
+                <Text
+                  style={[
+                    styles.tabText,
+                    { color: activeTab === tab ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {tab === 'history' ? 'History' : 'Live'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
+        {!selected && activeTab === 'history' && renderList()}
+        {!selected && activeTab === 'live' && renderLiveList()}
 
         {selected && (
           <View style={styles.flex}>
@@ -274,4 +395,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   continueText: { color: '#fff', fontSize: FontSize.md, fontWeight: '700' },
+  tabBar: {
+    flexDirection: 'row',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  tab: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: Spacing.md,
+  },
+  tabText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  liveRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
 });

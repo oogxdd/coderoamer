@@ -385,6 +385,31 @@ export async function deleteService(spriteName: string, serviceName: string): Pr
   await apiRequest<{}>('DELETE', `/sprites/${spriteName}/services/${serviceName}`, undefined, 5);
 }
 
+// MARK: - Exec Sessions
+
+export interface ExecSession {
+  id: string;
+  cmd?: string;
+  tty: boolean;
+  created_at?: string;
+  last_activity?: string;
+}
+
+/** List currently running exec sessions on a sprite (GET /sprites/{name}/exec). */
+export async function listExecSessions(spriteName: string): Promise<ExecSession[]> {
+  try {
+    const result = await apiRequest<ExecSession[] | { sessions: ExecSession[] }>(
+      'GET',
+      `/sprites/${spriteName}/exec`
+    );
+    if (Array.isArray(result)) return result;
+    if (result && Array.isArray((result as any).sessions)) return (result as any).sessions;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 // MARK: - Exec Helpers
 
 /**
