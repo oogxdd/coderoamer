@@ -32,17 +32,20 @@ The same flow is available in-app under **Guides** (dashboard → Guides).
 
 ---
 
-## Connecting: three approaches
+## Connecting: Chat, sessions, and terminals
 
-The app deliberately ships three ways to reach Claude so you can find what feels best on a phone.
-The first is the default; the other two are launched from a sprite's **Overview → "More ways to
-connect"**.
+The default is **Chat**; the terminals and the session browser are reached from a sprite's
+**Overview → "Sessions & terminals"** (the browser is also on the 🕓 clock in the chat header).
 
 | | What it is | Best for |
 |---|---|---|
 | **Chat** (default) | Runs Claude non-interactively (`claude -p --output-format stream-json`) as a one-shot Sprites *service* and streams the result into a native chat with tool/plan/result cards. | Day-to-day prompting and reading results comfortably on a phone. |
-| **Interactive Terminal** | A real TTY over a WebSocket (`/v1/sprites/{name}/exec`) rendered in a Skia terminal. Auto-runs `cd <repo> && claude`. | Answering Claude's interactive prompts, watching the live TUI, full shell control. |
-| **Web Terminal (ttyd)** | Embeds a [`ttyd`](https://github.com/tsl0922/ttyd) web terminal running *inside* the sprite, via a WebView. Experimental. | Experimenting; a full xterm in a WebView. Requires starting ttyd in the sprite. |
+| **Session browser** | Reads Claude's own transcripts (`~/.claude/projects/*/*.jsonl`) off the sprite, lists every past session with a preview, renders its full history natively, and **Continues** it via `--resume <id>`. The same data `claude --resume` shows on a computer. | Picking up any past session — even on a fresh install, since history lives on the sprite, not the phone. |
+| **Stream terminal** | A real TTY over a WebSocket (`/v1/sprites/{name}/exec`) rendered in a Skia terminal. Auto-runs `cd <repo> && claude`; run anything, including `claude --resume`. | Answering Claude's interactive prompts, watching the live TUI, full shell control. |
+| **Web Terminal (ttyd)** · *legacy* | Embeds a [`ttyd`](https://github.com/tsl0922/ttyd) web terminal running *inside* the sprite, via a WebView. Superseded by the above. | Reference / a full xterm in a WebView. Requires starting ttyd in the sprite. |
+
+A chat you reopen also auto-syncs from its transcript, so turns that completed (or were started from
+a terminal) while the app was closed show up when you come back.
 
 ### Session working directory
 
@@ -117,23 +120,24 @@ src/
       index.tsx                 # Dashboard (sprite list) + Guides/Settings
       guide.tsx                 # In-app guides & setup walkthrough
       settings.tsx              # Defaults (working dir, model, turns, instructions, git id)
-      sprite/[name].tsx         # Overview / Chat / Checkpoints, + "more ways to connect"
-      exec-poc.tsx              # Interactive Terminal (WebSocket exec → Skia terminal)
-      ttyd-terminal.tsx         # Web Terminal (ttyd in a WebView)
+      sprite/[name].tsx         # Overview / Chat / Checkpoints, + "sessions & terminals"
+      exec-poc.tsx              # Stream terminal (WebSocket exec → Skia terminal)
+      ttyd-terminal.tsx         # Web Terminal (ttyd in a WebView, legacy)
 
   components/
     chat/                       # Chat UI: messages, tool cards, plan, input bar,
-                                #   session list, new-session sheet, quick bash
+                                #   session list, session browser, new-session sheet, quick bash
     checkpoints/                # Create / list / restore checkpoints
     dashboard/                  # Sprite row + create sheet
     terminal/                   # Skia-based terminal (ANSI parser, buffer, renderer)
 
-  hooks/        useChat.ts      # Streaming, two-level NDJSON parsing, persistence, resume
-  services/     api.ts          # REST client: sprites, checkpoints, services, exec
-                auth.ts          # Secure token storage
-                claude-stream.ts # NDJSON parser for Claude events
-                exec-poc.ts      # WebSocket exec client
-                storage.ts       # AsyncStorage: chats + settings
+  hooks/        useChat.ts        # Streaming, two-level NDJSON parsing, persistence, resume
+  services/     api.ts            # REST client: sprites, checkpoints, services, exec
+                auth.ts           # Secure token storage
+                claude-stream.ts  # NDJSON parser for Claude events
+                claude-sessions.ts# Discover & render on-disk Claude transcripts from a sprite
+                exec-poc.ts       # WebSocket exec client
+                storage.ts        # AsyncStorage: chats + settings
   models/                        # sprite, chat, claude-events, service, checkpoint
   constants/    session.ts      # Working-directory defaults/helpers; theme.ts
 ```

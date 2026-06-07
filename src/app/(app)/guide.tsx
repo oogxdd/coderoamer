@@ -122,28 +122,43 @@ export default function GuideScreen() {
           </P>
         </Section>
 
-        <Section title="Three ways to connect">
+        <Section title="Ways to connect">
           <P>
             <Text style={styles.b}>Chat</Text> (default) — a native chat UI. The app runs Claude
             non-interactively and streams the result, rendering tool use, plans, and results as
             cards. Best for day-to-day prompting and reading results on a phone.
           </P>
           <P>
-            <Text style={styles.b}>Interactive Terminal</Text> — a real terminal (TTY) over a
-            WebSocket. Auto-runs <Text style={styles.mono}>cd &lt;repo&gt; &amp;&amp; claude</Text>.
-            Best when you want to answer Claude&apos;s interactive prompts or watch the live TUI.
+            <Text style={styles.b}>Stream terminal</Text> — a real terminal (TTY) over a WebSocket.
+            Auto-runs <Text style={styles.mono}>cd &lt;repo&gt; &amp;&amp; claude</Text>, and you can
+            run anything (including <Text style={styles.mono}>claude --resume</Text>). Best when you
+            want to answer Claude&apos;s interactive prompts or watch the live TUI.
           </P>
           <P>
-            <Text style={styles.b}>Web Terminal (ttyd)</Text> — embeds a{' '}
-            <Text style={styles.mono}>ttyd</Text> web terminal running inside the sprite.
-            &quot;Start ttyd in this sprite&quot; opens the sprite URL (auth: public), installs ttyd
-            if missing (apt/apk/dnf, else a static binary), runs it on port 8080 (the public URL
-            proxies to it), and connects. Experimental, and it makes the sprite URL public.
+            <Text style={styles.b}>Web Terminal (ttyd) · legacy</Text> — embeds a{' '}
+            <Text style={styles.mono}>ttyd</Text> web terminal in a WebView. It makes the sprite URL
+            public and has been superseded by the options above; kept for reference.
           </P>
-          <P>Open the last two from a sprite&apos;s Overview tab → &quot;More ways to connect&quot;.</P>
+          <P>Open the terminals from a sprite&apos;s Overview tab → &quot;Sessions &amp; terminals&quot;.</P>
         </Section>
 
-        <Section title="Resuming a session">
+        <Section title="Browse & resume any session">
+          <P>
+            Tap the <Text style={styles.b}>🕓 clock</Text> in the chat header (or &quot;Resume a
+            Claude session&quot; on the Overview tab) to browse every Claude session that ever ran on
+            the sprite. This reads Claude&apos;s own transcripts from{' '}
+            <Text style={styles.mono}>~/.claude/projects</Text> — the same data{' '}
+            <Text style={styles.mono}>claude --resume</Text> shows on a computer.
+          </P>
+          <P>
+            Pick one to see its full history rendered natively, then{' '}
+            <Text style={styles.b}>Continue</Text> to keep talking. Because the history lives on the
+            sprite (not the phone), it shows up even on a fresh install, and a chat you reopen
+            auto-syncs any turns that finished while you were away.
+          </P>
+        </Section>
+
+        <Section title="How resume works">
           <P>
             Each chat stores Claude&apos;s session id and the directory it ran in. New messages use{' '}
             <Text style={styles.mono}>--resume</Text> from the same directory, so context carries
