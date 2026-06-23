@@ -40,8 +40,33 @@ const TERMINAL_THEME = {
   ],
 };
 
-const DEFAULT_CLAUDE_COMMAND = 'bash';
-const INIT_COMMANDS = ['export COLORTERM=truecolor CLICOLOR=1 && exec claude --dangerously-skip-permissions'];
+const DEFAULT_SHELL_COMMAND = 'bash';
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function shellPathExpression(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed === '~' || trimmed === '$HOME') return '$HOME';
+  if (trimmed.startsWith('~/')) return `$HOME/${shellQuote(trimmed.slice(2))}`;
+  if (trimmed.startsWith('$HOME/')) return `$HOME/${shellQuote(trimmed.slice(6))}`;
+  return shellQuote(trimmed);
+}
+
+function buildResumeCommand(sessionId: string): string {
+  return `claude --resume ${shellQuote(sessionId.trim())}`;
+}
+
+function buildInitialInput(cwd: string, command: string): string | undefined {
+  const nextCwd = cwd.trim();
+  const nextCommand = command.trim();
+  if (!nextCwd && !nextCommand) return undefined;
+  if (!nextCwd) return `${nextCommand}\r`;
+
+  const cdCommand = `mkdir -p ${shellPathExpression(nextCwd)} && cd ${shellPathExpression(nextCwd)}`;
+  return `${nextCommand ? `${cdCommand} && ${nextCommand}` : cdCommand}\r`;
+}
 
 const QUICK_CONTROLS = [
   { label: 'Enter', payload: '\r' },
@@ -125,25 +150,34 @@ function WebTerminal({
 
 // ── Main Screen ─────────────────────────────────────────────────────────
 export default function ExecPocScreen() {
-  const params = useLocalSearchParams<{ name?: string; cwd?: string; cmd?: string; attachSessionId?: string }>();
+  const params = useLocalSearchParams<{
+    name?: string;
+    cwd?: string;
+    cmd?: string;
+    attachSessionId?: string;
+    resumeSessionId?: string;
+  }>();
   const paramName = typeof params.name === 'string' ? params.name : '';
   const paramCwd = typeof params.cwd === 'string' ? params.cwd : '';
   const paramCmd = typeof params.cmd === 'string' ? params.cmd : '';
   const paramAttachSessionId = typeof params.attachSessionId === 'string' ? params.attachSessionId : '';
+  const paramResumeSessionId = typeof params.resumeSessionId === 'string' ? params.resumeSessionId : '';
+  const routeCommand =
+    paramCmd ||
+    (paramResumeSessionId ? buildResumeCommand(paramResumeSessionId) : '');
 
-  const [spriteName, setSpriteName] = useState(paramName || 'first-sprite');
-  // With a working directory we launch a shell and type `cd <dir> && claude`, which
-  // works no matter how the exec endpoint tokenizes `cmd`. Otherwise run the command directly.
-  const [command, setCommand] = useState(paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND));
+  const [spriteName, setSpriteName] = useState(paramName);
+  const [cwd, setCwd] = useState(paramCwd);
+  const [resumeSessionId, setResumeSessionId] = useState(paramResumeSessionId);
+  // With a working directory we launch a shell and type `cd <dir> && <command>`,
+  // which works no matter how the exec endpoint tokenizes `cmd`.
+  const [command, setCommand] = useState(routeCommand);
   const [attachSessionId, setAttachSessionId] = useState(paramAttachSessionId);
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
-  const [showSetup, setShowSetup] = useState(false);
+  const [showSetup, setShowSetup] = useState(!paramName);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
-  const initialInputRef = useRef<string | undefined>(
-    paramCwd ? `mkdir -p "${paramCwd}" && cd "${paramCwd}" && claude\r` : undefined
-  );
   const didAutoConnectRef = useRef(false);
 
   const appendLog = useCallback((entry: ExecEventLog) => {
@@ -169,20 +203,19 @@ export default function ExecPocScreen() {
 
   // Auto-connect on mount. Route params can target a sprite, cwd, command, or existing session.
   useEffect(() => {
-    if (didAutoConnectRef.current || !spriteName.trim()) return;
+    if (didAutoConnectRef.current || !paramName) return;
     didAutoConnectRef.current = true;
 
-    const initialInput = paramAttachSessionId ? undefined : initialInputRef.current;
+    const startupCommand = paramResumeSessionId ? buildResumeCommand(paramResumeSessionId) : routeCommand;
+    const initialInput = paramAttachSessionId ? undefined : buildInitialInput(paramCwd, startupCommand);
 
     (async () => {
       try {
         await client.connect({
-          spriteName: spriteName.trim(),
-          command: command.trim() || DEFAULT_CLAUDE_COMMAND,
-          attachSessionId: attachSessionId.trim() || undefined,
+          spriteName: paramName,
+          command: DEFAULT_SHELL_COMMAND,
+          attachSessionId: paramAttachSessionId || undefined,
           initialInput,
-          initCommands:
-            !paramCmd && !initialInput && !attachSessionId.trim() ? INIT_COMMANDS : undefined,
         });
         setShowSetup(false);
         termRef.current?.focus();
@@ -194,7 +227,16 @@ export default function ExecPocScreen() {
         });
       }
     })();
-  }, [spriteName, command, attachSessionId, paramCmd, paramAttachSessionId, client, appendLog]);
+  }, [
+    paramName,
+    paramCwd,
+    paramCmd,
+    paramAttachSessionId,
+    paramResumeSessionId,
+    routeCommand,
+    client,
+    appendLog,
+  ]);
 
   const connect = async () => {
     if (!spriteName.trim()) {
@@ -202,14 +244,17 @@ export default function ExecPocScreen() {
       return;
     }
     try {
-      const nextCommand = command.trim() || DEFAULT_CLAUDE_COMMAND;
+      const nextResumeSessionId = resumeSessionId.trim();
+      const startupCommand = nextResumeSessionId
+        ? buildResumeCommand(nextResumeSessionId)
+        : command.trim();
       const nextAttachSessionId = attachSessionId.trim() || undefined;
+      const initialInput = nextAttachSessionId ? undefined : buildInitialInput(cwd, startupCommand);
       await client.connect({
         spriteName: spriteName.trim(),
-        command: nextCommand,
+        command: DEFAULT_SHELL_COMMAND,
         attachSessionId: nextAttachSessionId,
-        initCommands:
-          !nextAttachSessionId && nextCommand === DEFAULT_CLAUDE_COMMAND ? INIT_COMMANDS : undefined,
+        initialInput,
       });
       setShowSetup(false);
       termRef.current?.focus();
@@ -276,7 +321,29 @@ export default function ExecPocScreen() {
             </View>
             <View style={styles.setupRow}>
               <TextInput
-                style={[styles.setupInput, { flex: 1 }]}
+                style={styles.setupInput}
+                placeholder="working directory, e.g. ~/type/type_new"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={cwd}
+                onChangeText={setCwd}
+              />
+            </View>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={styles.setupInput}
+                placeholder="claude resume session ID (optional)"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={resumeSessionId}
+                onChangeText={setResumeSessionId}
+              />
+            </View>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={styles.setupInput}
                 placeholder="attach session ID (optional)"
                 placeholderTextColor="#484f58"
                 autoCapitalize="none"
@@ -327,13 +394,17 @@ export default function ExecPocScreen() {
           {Platform.OS === 'web' ? (
             <WebTerminal
               termRef={termRef}
-              onData={(data) => client.send(data, false)}
+              onData={(data) => {
+                if (client.getState() === 'open') client.send(data, false);
+              }}
               onResize={(cols, rows) => client.resize(cols, rows)}
             />
           ) : (
             <SkiaTerminalNative
               ref={termRef}
-              onData={(data: string) => client.send(data, false)}
+              onData={(data: string) => {
+                if (client.getState() === 'open') client.send(data, false);
+              }}
               onResize={(cols: number, rows: number) => client.resize(cols, rows)}
               fontSize={13}
               cursorBlinkInterval={600}
