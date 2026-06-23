@@ -100,6 +100,9 @@ export class TerminalBuffer implements IParserCallbacks {
   /** The parser instance */
   parser: AnsiParser;
 
+  /** Callback to send terminal responses back to the host (DA, DSR, etc.) */
+  onResponse: ((data: string) => void) | null = null;
+
   constructor(cols: number, rows: number, scrollback: number = 1000) {
     this.cols = cols;
     this.rows = rows;
@@ -241,6 +244,19 @@ export class TerminalBuffer implements IParserCallbacks {
       return;
     }
 
+    // Secondary DA (CSI > c) — report as xterm-256color compatible
+    if (intermediates === '>') {
+      if (finalChar === 'c') {
+        // Secondary DA: report as VT525 (xterm-compatible) with version 0
+        this.onResponse?.('\x1b[>65;0;0c');
+      }
+      // CSI > 0 q — XTVERSION: report as a modern terminal
+      if (finalChar === 'q') {
+        this.onResponse?.('\x1bP>|SkiaTerminal(0.1)\x1b\\');
+      }
+      return;
+    }
+
     const p0 = params[0] || 0;
     const p1 = params[1] || 0;
 
@@ -303,6 +319,19 @@ export class TerminalBuffer implements IParserCallbacks {
         break;
       case 'X': // ECH — Erase Characters
         this._eraseChars(p0 || 1);
+        break;
+      case 'c': // DA — Primary Device Attributes
+        // Report as VT220 with 256-color and truecolor support
+        this.onResponse?.('\x1b[?62;22c');
+        break;
+      case 'n': // DSR — Device Status Report
+        if (p0 === 5) {
+          // Status report: terminal OK
+          this.onResponse?.('\x1b[0n');
+        } else if (p0 === 6) {
+          // Cursor position report
+          this.onResponse?.(`\x1b[${this.cursor.y + 1};${this.cursor.x + 1}R`);
+        }
         break;
     }
   }

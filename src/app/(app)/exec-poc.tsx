@@ -1,7 +1,4 @@
-import SkiaWebWrapper from '@/components/web/WithSkiaWeb';
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-
-// ... other imports stay the same
 import {
   Alert,
   KeyboardAvoidingView,
@@ -15,44 +12,126 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useTheme } from '@/hooks/use-theme';
 import {
   createExecPocClient,
   ExecConnectionState,
   ExecEventLog,
 } from '@/services/exec-poc';
-import { FontSize, Spacing } from '@/constants/theme';
-import { SkiaTerminal, SkiaTerminalHandle } from '@/components/terminal';
+import type { SkiaTerminalHandle } from '@/components/terminal';
 
-const DEFAULT_CLAUDE_COMMAND = 'claude';
+// On native, statically import. On web, defer until CanvasKit loads.
+const SkiaTerminalNative =
+  Platform.OS !== 'web'
+    ? require('@/components/terminal').SkiaTerminal
+    : null;
 
-type QuickControl = {
-  label: string;
-  payload: string;
+const TERMINAL_THEME = {
+  background: '#0d1117',
+  foreground: '#c9d1d9',
+  cursor: '#58a6ff',
+  cursorAccent: '#0d1117',
+  selectionBackground: '#264f78',
+  selectionForeground: '#ffffff',
+  ansiColors: [
+    '#484f58', '#ff7b72', '#3fb950', '#d29922',
+    '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
+    '#6e7681', '#ffa198', '#56d364', '#e3b341',
+    '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
+  ],
 };
 
-const QUICK_CONTROLS: QuickControl[] = [
-  { label: '1+Enter', payload: '1\r' },
+const DEFAULT_CLAUDE_COMMAND = 'bash';
+const INIT_COMMANDS = ['export COLORTERM=truecolor CLICOLOR=1 && exec claude --dangerously-skip-permissions'];
+
+const QUICK_CONTROLS = [
   { label: 'Enter', payload: '\r' },
   { label: 'Esc', payload: '\u001b' },
   { label: 'Tab', payload: '\t' },
+  { label: '1', payload: '1\r' },
   { label: 'Up', payload: '\u001b[A' },
   { label: 'Down', payload: '\u001b[B' },
-  { label: 'Left', payload: '\u001b[D' },
-  { label: 'Right', payload: '\u001b[C' },
   { label: 'Ctrl+C', payload: '\u0003' },
   { label: 'Ctrl+D', payload: '\u0004' },
 ];
 
+const STATE_COLORS: Record<ExecConnectionState, string> = {
+  idle: '#6e7681',
+  connecting: '#d29922',
+  open: '#3fb950',
+  closed: '#6e7681',
+  error: '#ff7b72',
+};
+
+// ── Web Terminal (deferred Skia loading) ────────────────────────────────
+function WebTerminal({
+  termRef,
+  onData,
+  onResize,
+}: {
+  termRef: React.RefObject<SkiaTerminalHandle | null>;
+  onData: (data: string) => void;
+  onResize: (cols: number, rows: number) => void;
+}) {
+  const [skiaReady, setSkiaReady] = useState(false);
+  const [Terminal, setTerminal] = useState<React.ComponentType<any> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { LoadSkiaWeb } = require('@shopify/react-native-skia/lib/module/web');
+    LoadSkiaWeb()
+      .then(async () => {
+        if (cancelled) return;
+        setSkiaReady(true);
+        const mod = await import('@/components/terminal/SkiaTerminalView');
+        if (!cancelled) setTerminal(() => mod.default);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (error) {
+    return (
+      <View style={styles.terminalPlaceholder}>
+        <Text style={{ color: '#ff7b72', fontSize: 13 }}>Failed to load: {error}</Text>
+      </View>
+    );
+  }
+
+  if (!Terminal) {
+    return (
+      <View style={styles.terminalPlaceholder}>
+        <View style={styles.loadingDot} />
+        <Text style={{ color: '#6e7681', fontSize: 13, marginTop: 8 }}>
+          {skiaReady ? 'Initializing terminal...' : 'Loading CanvasKit...'}
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <Terminal
+      ref={termRef}
+      onData={onData}
+      onResize={onResize}
+      fontSize={13}
+      cursorBlinkInterval={600}
+      theme={TERMINAL_THEME}
+    />
+  );
+}
+
+// ── Main Screen ─────────────────────────────────────────────────────────
 export default function ExecPocScreen() {
-  const colors = useTheme();
   const params = useLocalSearchParams<{ name?: string; cwd?: string; cmd?: string; attachSessionId?: string }>();
   const paramName = typeof params.name === 'string' ? params.name : '';
   const paramCwd = typeof params.cwd === 'string' ? params.cwd : '';
   const paramCmd = typeof params.cmd === 'string' ? params.cmd : '';
   const paramAttachSessionId = typeof params.attachSessionId === 'string' ? params.attachSessionId : '';
 
-  const [spriteName, setSpriteName] = useState(paramName);
+  const [spriteName, setSpriteName] = useState(paramName || 'first-sprite');
   // With a working directory we launch a shell and type `cd <dir> && claude`, which
   // works no matter how the exec endpoint tokenizes `cmd`. Otherwise run the command directly.
   const [command, setCommand] = useState(paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND));
@@ -60,7 +139,6 @@ export default function ExecPocScreen() {
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
   const [showSetup, setShowSetup] = useState(false);
-  const [showKeys, setShowKeys] = useState(false);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
   const initialInputRef = useRef<string | undefined>(
@@ -70,14 +148,8 @@ export default function ExecPocScreen() {
 
   const appendLog = useCallback((entry: ExecEventLog) => {
     if (!termRef.current) return;
-    
     if (entry.source === 'ws') {
       termRef.current.write(entry.text);
-    } else if (entry.source === 'event') {
-      // Commented out to reduce noise, since session_info etc. events come often
-      // termRef.current.write(`\r\n\x1b[33m[EVENT]\x1b[0m ${entry.text}\r\n`);
-    } else if (entry.source === 'local') {
-      // termRef.current.write(`\r\n\x1b[34m[LOCAL]\x1b[0m ${entry.text}\r\n`);
     } else if (entry.source === 'error') {
       termRef.current.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
     }
@@ -93,24 +165,24 @@ export default function ExecPocScreen() {
     [appendLog]
   );
 
-  useEffect(() => {
-    return () => {
-      client.close();
-    };
-  }, [client]);
+  useEffect(() => () => client.close(), [client]);
 
-  // Auto-connect when launched for a specific sprite (from the sprite screen).
-  // Supports both fresh sessions (cmd/cwd) and attaching to an existing exec session (attachSessionId).
+  // Auto-connect on mount. Route params can target a sprite, cwd, command, or existing session.
   useEffect(() => {
-    if (didAutoConnectRef.current || !paramName) return;
+    if (didAutoConnectRef.current || !spriteName.trim()) return;
     didAutoConnectRef.current = true;
+
+    const initialInput = paramAttachSessionId ? undefined : initialInputRef.current;
+
     (async () => {
       try {
         await client.connect({
-          spriteName: paramName,
-          command: paramCmd || (paramCwd ? 'bash' : DEFAULT_CLAUDE_COMMAND),
-          attachSessionId: paramAttachSessionId || undefined,
-          initialInput: paramAttachSessionId ? undefined : initialInputRef.current,
+          spriteName: spriteName.trim(),
+          command: command.trim() || DEFAULT_CLAUDE_COMMAND,
+          attachSessionId: attachSessionId.trim() || undefined,
+          initialInput,
+          initCommands:
+            !paramCmd && !initialInput && !attachSessionId.trim() ? INIT_COMMANDS : undefined,
         });
         setShowSetup(false);
         termRef.current?.focus();
@@ -122,44 +194,27 @@ export default function ExecPocScreen() {
         });
       }
     })();
-  }, [paramName, paramCmd, paramCwd, paramAttachSessionId, client, appendLog]);
-
-  const sendControl = (label: string, payload: string) => {
-    client.send(payload, false);
-  };
+  }, [spriteName, command, attachSessionId, paramCmd, paramAttachSessionId, client, appendLog]);
 
   const connect = async () => {
     if (!spriteName.trim()) {
       Alert.alert('Missing sprite name', 'Enter a sprite name first.');
       return;
     }
-
     try {
+      const nextCommand = command.trim() || DEFAULT_CLAUDE_COMMAND;
+      const nextAttachSessionId = attachSessionId.trim() || undefined;
       await client.connect({
         spriteName: spriteName.trim(),
-        command: command.trim() || DEFAULT_CLAUDE_COMMAND,
-        attachSessionId: attachSessionId.trim() || undefined,
+        command: nextCommand,
+        attachSessionId: nextAttachSessionId,
+        initCommands:
+          !nextAttachSessionId && nextCommand === DEFAULT_CLAUDE_COMMAND ? INIT_COMMANDS : undefined,
       });
       setShowSetup(false);
       termRef.current?.focus();
     } catch (error) {
-      appendLog({
-        timestamp: Date.now(),
-        source: 'error',
-        text: `Connect failed: ${(error as Error).message}`,
-      });
-    }
-  };
-
-  const sendKill = async () => {
-    try {
-      await client.kill();
-    } catch (error) {
-      appendLog({
-        timestamp: Date.now(),
-        source: 'error',
-        text: `Kill failed: ${(error as Error).message}`,
-      });
+      appendLog({ timestamp: Date.now(), source: 'error', text: `Connect failed: ${(error as Error).message}` });
     }
   };
 
@@ -168,230 +223,121 @@ export default function ExecPocScreen() {
     setState('closed');
   };
 
+  const isConnected = state === 'open';
+
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: colors.backgroundSecondary }]} edges={['top']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: '#010409' }]} edges={['top']}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <View style={styles.headerRow}>
-          <Pressable onPress={() => router.back()}>
-            <Text style={[styles.backButton, { color: colors.tint }]}>Back</Text>
+        {/* Header */}
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} hitSlop={8}>
+            <Text style={styles.headerLink}>Back</Text>
           </Pressable>
-          <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
-            {spriteName ? spriteName : 'Terminal'}
-          </Text>
+          <View style={styles.headerCenter}>
+            <View style={[styles.statusDot, { backgroundColor: STATE_COLORS[state] }]} />
+            <Text style={styles.headerTitle}>
+              {sessionId ? `Session ${sessionId}` : 'Terminal'}
+            </Text>
+          </View>
           <View style={styles.headerActions}>
-            <Pressable onPress={() => termRef.current?.focus()}>
-              <Text style={[styles.clearButton, { color: colors.tint }]}>Focus</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <View
-          style={[
-            styles.compactBar,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[styles.compactStatus, { color: colors.text }]}>State: {state}</Text>
-          <Text style={[styles.compactStatus, { color: colors.text }]}>
-            Session: {sessionId ?? 'n/a'}
-          </Text>
-          <View style={styles.compactActions}>
-            <Pressable
-              style={({ pressed }) => [
-                styles.compactButton,
-                { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-              ]}
-              onPress={() => setShowKeys((prev) => !prev)}
-            >
-              <Text style={[styles.compactButtonText, { color: colors.text }]}>
-                {showKeys ? 'Hide Keys' : 'Keys'}
-              </Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [
-                styles.compactButton,
-                { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-              ]}
-              onPress={() => setShowSetup((prev) => !prev)}
-            >
-              <Text style={[styles.compactButtonText, { color: colors.text }]}>
-                {showSetup ? 'Hide Setup' : 'Setup'}
+            <Pressable onPress={() => setShowSetup((v) => !v)} hitSlop={8}>
+              <Text style={[styles.headerLink, showSetup && { color: '#58a6ff' }]}>
+                {showSetup ? 'Hide' : 'Setup'}
               </Text>
             </Pressable>
           </View>
         </View>
 
-        {showSetup ? (
-          <View style={[styles.card, { backgroundColor: colors.card }]}>
-            <Text style={[styles.label, { color: colors.textSecondary }]}>Sprite Name</Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder="my-sprite"
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={spriteName}
-              onChangeText={setSpriteName}
-            />
-
-            <Text style={[styles.label, { color: colors.textSecondary }]}>
-              Command (new session)
-            </Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder={DEFAULT_CLAUDE_COMMAND}
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={command}
-              onChangeText={setCommand}
-            />
-
-            <Text style={[styles.label, { color: colors.textSecondary }]}>
-              Attach Session ID (optional)
-            </Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: colors.inputBackground,
-                  color: colors.text,
-                  borderColor: colors.border,
-                },
-              ]}
-              placeholder="Existing session ID"
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={attachSessionId}
-              onChangeText={setAttachSessionId}
-            />
-
-            <View style={styles.buttonRow}>
+        {/* Setup panel */}
+        {showSetup && (
+          <View style={styles.setupPanel}>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={styles.setupInput}
+                placeholder="sprite-name"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={spriteName}
+                onChangeText={setSpriteName}
+              />
+              <TextInput
+                style={[styles.setupInput, { flex: 0.6 }]}
+                placeholder="command"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={command}
+                onChangeText={setCommand}
+              />
+            </View>
+            <View style={styles.setupRow}>
+              <TextInput
+                style={[styles.setupInput, { flex: 1 }]}
+                placeholder="attach session ID (optional)"
+                placeholderTextColor="#484f58"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={attachSessionId}
+                onChangeText={setAttachSessionId}
+              />
               <Pressable
                 style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.tint, opacity: pressed ? 0.7 : 1 },
+                  styles.connectButton,
+                  isConnected
+                    ? { backgroundColor: '#21262d', borderColor: '#30363d' }
+                    : { backgroundColor: '#238636', borderColor: '#2ea043' },
+                  pressed && { opacity: 0.7 },
                 ]}
-                onPress={connect}
+                onPress={isConnected ? disconnect : connect}
               >
-                <Text style={styles.buttonText}>Connect</Text>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.destructive, opacity: pressed ? 0.7 : 1 },
-                ]}
-                onPress={sendKill}
-              >
-                <Text style={styles.buttonText}>Kill</Text>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.button,
-                  { backgroundColor: colors.backgroundElement, opacity: pressed ? 0.7 : 1 },
-                ]}
-                onPress={disconnect}
-              >
-                <Text style={[styles.buttonText, { color: colors.text }]}>Disconnect</Text>
+                <Text style={[styles.connectButtonText, isConnected && { color: '#f0f6fc' }]}>
+                  {isConnected ? 'Disconnect' : state === 'connecting' ? 'Connecting...' : 'Connect'}
+                </Text>
               </Pressable>
             </View>
           </View>
-        ) : null}
+        )}
 
-        {showKeys ? (
+        {/* Quick keys */}
+        {isConnected && (
           <ScrollView
             horizontal
-            style={styles.quickControlsScroll}
-            contentContainerStyle={styles.quickControlsRow}
+            style={styles.keysScroll}
+            contentContainerStyle={styles.keysRow}
             showsHorizontalScrollIndicator={false}
           >
-            {QUICK_CONTROLS.map((control) => (
+            {QUICK_CONTROLS.map((c) => (
               <Pressable
-                key={control.label}
-                style={({ pressed }) => [
-                  styles.quickControlButton,
-                  {
-                    backgroundColor: colors.backgroundElement,
-                    borderColor: colors.border,
-                    opacity: pressed ? 0.7 : 1,
-                  },
-                ]}
-                onPress={() => sendControl(control.label, control.payload)}
+                key={c.label}
+                style={({ pressed }) => [styles.keyButton, pressed && { opacity: 0.6 }]}
+                onPress={() => client.send(c.payload, false)}
               >
-                <Text style={[styles.quickControlLabel, { color: colors.text }]}>
-                  {control.label}
-                </Text>
+                <Text style={styles.keyLabel}>{c.label}</Text>
               </Pressable>
             ))}
           </ScrollView>
-        ) : null}
+        )}
 
-        <View style={[styles.logContainer, { backgroundColor: '#0d1117', borderColor: colors.border }]}>
+        {/* Terminal */}
+        <View style={styles.terminalContainer}>
           {Platform.OS === 'web' ? (
-            <SkiaWebWrapper>
-              <SkiaTerminal
-                ref={termRef}
-                onData={(data) => client.send(data, false)}
-                onResize={(cols, rows) => client.resize(cols, rows)}
-                fontSize={13}
-                cursorBlinkInterval={600}
-                theme={{
-                  background: '#0d1117',
-                  foreground: '#c9d1d9',
-                  cursor: '#58a6ff',
-                  cursorAccent: '#0d1117',
-                  selectionBackground: '#264f78',
-                  selectionForeground: '#ffffff',
-                  ansiColors: [
-                    '#484f58', '#ff7b72', '#3fb950', '#d29922',
-                    '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
-                    '#6e7681', '#ffa198', '#56d364', '#e3b341',
-                    '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
-                  ],
-                }}
-              />
-            </SkiaWebWrapper>
-          ) : (
-            <SkiaTerminal
-              ref={termRef}
+            <WebTerminal
+              termRef={termRef}
               onData={(data) => client.send(data, false)}
               onResize={(cols, rows) => client.resize(cols, rows)}
+            />
+          ) : (
+            <SkiaTerminalNative
+              ref={termRef}
+              onData={(data: string) => client.send(data, false)}
+              onResize={(cols: number, rows: number) => client.resize(cols, rows)}
               fontSize={13}
               cursorBlinkInterval={600}
-              theme={{
-                background: '#0d1117',
-                foreground: '#c9d1d9',
-                cursor: '#58a6ff',
-                cursorAccent: '#0d1117',
-                selectionBackground: '#264f78',
-                selectionForeground: '#ffffff',
-                ansiColors: [
-                  '#484f58', '#ff7b72', '#3fb950', '#d29922',
-                  '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
-                  '#6e7681', '#ffa198', '#56d364', '#e3b341',
-                  '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
-                ],
-              }}
+              theme={TERMINAL_THEME}
             />
           )}
         </View>
@@ -404,125 +350,118 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  headerRow: {
+  // ── Header ──
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.sm,
-    paddingBottom: Spacing.md,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
   },
-  backButton: {
-    fontSize: FontSize.md,
-    fontWeight: '500',
+  headerCenter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  title: {
-    fontSize: FontSize.lg,
+  headerTitle: {
+    color: '#c9d1d9',
+    fontSize: 14,
     fontWeight: '600',
   },
-  clearButton: {
-    fontSize: FontSize.md,
+  headerLink: {
+    color: '#8b949e',
+    fontSize: 14,
     fontWeight: '500',
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.md,
+    gap: 16,
   },
-  card: {
-    marginHorizontal: Spacing.lg,
-    borderRadius: 12,
-    padding: Spacing.md,
-    gap: Spacing.sm,
-    marginBottom: Spacing.sm,
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
-  compactBar: {
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.sm,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.sm,
+  // ── Setup panel ──
+  setupPanel: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
+  },
+  setupRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
+    gap: 8,
   },
-  compactStatus: {
-    fontSize: FontSize.xs,
-    fontWeight: '600',
-  },
-  compactActions: {
-    marginLeft: 'auto',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-  },
-  compactButton: {
-    borderRadius: 8,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-  },
-  compactButtonText: {
-    fontSize: FontSize.sm,
-    fontWeight: '600',
-  },
-  label: {
-    fontSize: FontSize.sm,
-    fontWeight: '500',
-  },
-  input: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    fontSize: FontSize.md,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginTop: Spacing.sm,
-  },
-  button: {
-    borderRadius: 8,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    minWidth: 98,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#FFFFFF',
-    fontSize: FontSize.sm,
-    fontWeight: '600',
-  },
-  quickControlsRow: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-    paddingHorizontal: Spacing.lg,
-    paddingBottom: Spacing.sm,
-  },
-  quickControlsScroll: {
-    marginBottom: Spacing.sm,
-    flexGrow: 0,
-  },
-  quickControlButton: {
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    minWidth: 78,
-    alignItems: 'center',
-  },
-  quickControlLabel: {
-    fontSize: FontSize.sm,
-    fontWeight: '500',
-  },
-  logContainer: {
+  setupInput: {
     flex: 1,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.lg,
-    borderRadius: 12,
-    overflow: 'hidden',
+    backgroundColor: '#0d1117',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    color: '#c9d1d9',
+    fontSize: 13,
+  },
+  connectButton: {
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  connectButtonText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  // ── Quick keys ──
+  keysScroll: {
+    flexGrow: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
+  },
+  keysRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  keyButton: {
+    backgroundColor: '#21262d',
+    borderRadius: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  keyLabel: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '500',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // ── Terminal ──
+  terminalContainer: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+  },
+  terminalPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0d1117',
+  },
+  loadingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#484f58',
   },
 });

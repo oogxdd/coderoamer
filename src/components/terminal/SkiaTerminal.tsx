@@ -16,7 +16,9 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   View,
+  Text,
   TextInput,
+  Pressable,
   Keyboard,
   Dimensions,
   StyleSheet,
@@ -32,6 +34,7 @@ import {
   GestureHandlerRootView,
 } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
+import * as Clipboard from 'expo-clipboard';
 import { TerminalBuffer } from './TerminalBuffer';
 import {
   SkiaTerminalRenderer,
@@ -118,6 +121,39 @@ function extractSelectionText(
   return lines.join('\n');
 }
 
+async function copyToClipboard(text: string): Promise<void> {
+  if (Platform.OS === 'web') {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {}
+  } else {
+    await Clipboard.setStringAsync(text);
+  }
+}
+
+function findWordAt(
+  buffer: TerminalBuffer,
+  col: number,
+  row: number,
+): [number, number] {
+  const lines = buffer.getViewportLines();
+  const line = lines[row];
+  if (!line) return [col, col + 1];
+
+  const isWord = (x: number) => {
+    const ch = line[x]?.char;
+    return ch != null && ch !== '' && ch !== ' ';
+  };
+
+  if (!isWord(col)) return [col, col + 1];
+
+  let start = col;
+  while (start > 0 && isWord(start - 1)) start--;
+  let end = col;
+  while (end < line.length && isWord(end)) end++;
+  return [start, end];
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Component
 // ────────────────────────────────────────────────────────────────────────────
@@ -175,6 +211,14 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   }
   const buffer = bufferRef.current;
 
+  // Wire up terminal response callback (DA, DSR replies sent back to host)
+  useEffect(() => {
+    buffer.onResponse = (data: string) => {
+      onData?.(data);
+    };
+    return () => { buffer.onResponse = null; };
+  }, [buffer, onData]);
+
   // ── Render trigger (rAF-based) ────────────────────────────────────
   const [renderVersion, setRenderVersion] = useState(0);
   const rafRef = useRef<number | null>(null);
@@ -205,6 +249,106 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
 
   // ── Selection state ───────────────────────────────────────────────
   const [selection, setSelection] = useState<SelectionRange | null>(null);
+  const containerRef = useRef<View>(null);
+  const selectionRef = useRef<SelectionRange | null>(null);
+  selectionRef.current = selection;
+
+  const textInputRef = useRef<TextInput>(null);
+
+  const copySelection = useCallback(() => {
+    if (!selectionRef.current) return;
+    const text = extractSelectionText(buffer, selectionRef.current);
+    if (text) {
+      copyToClipboard(text);
+      onSelectionChange?.(text);
+    }
+    setSelection(null);
+  }, [buffer, onSelectionChange]);
+
+  // ── Web mouse selection ─────────────────────────────────────────
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const el = (containerRef.current as unknown as HTMLElement);
+    if (!el) return;
+
+    let isDragging = false;
+    let startCol = 0;
+    let startRow = 0;
+    let didMove = false;
+
+    const toCell = (e: MouseEvent) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        col: Math.max(0, Math.min(buffer.cols, Math.floor((e.clientX - rect.left) / cellWidth))),
+        row: Math.max(0, Math.min(buffer.rows - 1, Math.floor((e.clientY - rect.top) / cellHeight))),
+      };
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const { col, row } = toCell(e);
+      startCol = col;
+      startRow = row;
+      isDragging = true;
+      didMove = false;
+      setSelection(null);
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      const { col, row } = toCell(e);
+      if (!didMove && col === startCol && row === startRow) return;
+      didMove = true;
+      setSelection({ start: [startCol, startRow], end: [col, row] });
+      scheduleRender();
+    };
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (!isDragging) return;
+      isDragging = false;
+      if (!didMove) {
+        // Click without drag — clear selection, focus input
+        setSelection(null);
+        textInputRef.current?.focus();
+        return;
+      }
+      const { col, row } = toCell(e);
+      const sel: SelectionRange = { start: [startCol, startRow], end: [col, row] };
+      setSelection(sel);
+      scheduleRender();
+    };
+
+    const onDblClick = (e: MouseEvent) => {
+      const { col, row } = toCell(e);
+      const [wStart, wEnd] = findWordAt(buffer, col, row);
+      setSelection({ start: [wStart, row], end: [wEnd, row] });
+      scheduleRender();
+    };
+
+    el.addEventListener('mousedown', onMouseDown);
+    el.addEventListener('mousemove', onMouseMove);
+    el.addEventListener('mouseup', onMouseUp);
+    el.addEventListener('dblclick', onDblClick);
+    return () => {
+      el.removeEventListener('mousedown', onMouseDown);
+      el.removeEventListener('mousemove', onMouseMove);
+      el.removeEventListener('mouseup', onMouseUp);
+      el.removeEventListener('dblclick', onDblClick);
+    };
+  }, [buffer, cellWidth, cellHeight, scheduleRender]);
+
+  // ── Web Ctrl/Cmd+C to copy selection ────────────────────────────
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectionRef.current) {
+        e.preventDefault();
+        copySelection();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [copySelection]);
 
   // ── WebSocket ─────────────────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
@@ -280,7 +424,6 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   }, [buffer, onTitleChange, onBell]);
 
   // ── Keyboard input ────────────────────────────────────────────────
-  const textInputRef = useRef<TextInput>(null);
   const lastInputRef = useRef('');
 
   // Track modifier keys (best-effort on RN)
@@ -290,12 +433,6 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     e: NativeSyntheticEvent<TextInputKeyPressEventData>,
   ) => {
     const { key } = e.nativeEvent;
-
-    // Clear selection on any keystroke
-    if (selection) {
-      setSelection(null);
-      onSelectionChange?.(null);
-    }
 
     // Special keys → escape sequences
     const keyMap: Record<string, string> = {
@@ -319,18 +456,27 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     };
 
     if (keyMap[key]) {
+      // Clear selection on any non-copy keystroke
+      if (selectionRef.current) {
+        setSelection(null);
+        onSelectionChange?.(null);
+      }
       sendToServer(keyMap[key]);
       lastInputRef.current = key;
     } else if (key.length === 1) {
-      // Ctrl+key handling: Ctrl+A → 0x01, Ctrl+C → 0x03, etc.
-      // On iOS/Android physical keyboards, Ctrl combos may arrive as single chars
       const code = key.charCodeAt(0);
-      if (code >= 1 && code <= 26) {
-        // Already a control character
-        sendToServer(key);
-      } else {
-        sendToServer(key);
+      // Ctrl+C (0x03) with active selection → copy instead of sending to terminal
+      if (code === 3 && selectionRef.current) {
+        copySelection();
+        lastInputRef.current = key;
+        return;
       }
+      // Clear selection on any other keystroke
+      if (selectionRef.current) {
+        setSelection(null);
+        onSelectionChange?.(null);
+      }
+      sendToServer(key);
       lastInputRef.current = key;
     }
   }, [sendToServer, selection, onSelectionChange]);
@@ -384,7 +530,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
       runOnJS(() => { scrollAccumulator.current = 0; })();
     });
 
-  // Long press → start selection
+  // Long press → select word at position
   const longPressGesture = Gesture.LongPress()
     .minDuration(400)
     .onStart((e) => {
@@ -393,8 +539,8 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
         const col = Math.floor(x / cellWidth);
         const row = Math.floor(y / cellHeight);
         if (col >= 0 && col < buffer.cols && row >= 0 && row < buffer.rows) {
-          // Select the word at this position (simplified: select single cell)
-          setSelection({ start: [col, row], end: [col + 1, row] });
+          const [wStart, wEnd] = findWordAt(buffer, col, row);
+          setSelection({ start: [wStart, row], end: [wEnd, row] });
           Vibration.vibrate(30);
         }
       })(e.x, e.y);
@@ -406,7 +552,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     .onUpdate((e) => {
       'worklet';
       runOnJS((x: number, y: number) => {
-        if (!selection) return;
+        if (!selectionRef.current) return;
         const col = Math.max(0, Math.min(buffer.cols, Math.floor(x / cellWidth)));
         const row = Math.max(0, Math.min(buffer.rows - 1, Math.floor(y / cellHeight)));
         setSelection((prev) => prev ? { ...prev, end: [col, row] } : null);
@@ -415,9 +561,8 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     .onEnd(() => {
       'worklet';
       runOnJS(() => {
-        if (selection) {
-          const text = extractSelectionText(buffer, selection);
-          onSelectionChange?.(text);
+        if (selectionRef.current) {
+          onSelectionChange?.(extractSelectionText(buffer, selectionRef.current));
         }
       })();
     });
@@ -476,11 +621,19 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   const termWidth = Math.max(1, containerWidth);
   const termHeight = Math.max(1, containerHeight);
 
+  const handleTerminalPress = useCallback(() => {
+    textInputRef.current?.focus();
+    if (selection) {
+      setSelection(null);
+      onSelectionChange?.(null);
+    }
+  }, [selection, onSelectionChange]);
+
   return (
     <GestureHandlerRootView style={[styles.container, { width: propWidth, height: propHeight }]}>
-      <View style={styles.fill} onLayout={onLayout}>
+      <View ref={containerRef} style={styles.fill} onLayout={onLayout}>
         <GestureDetector gesture={composedGestures}>
-          <View style={styles.fill}>
+          <Pressable style={styles.fill} onPress={handleTerminalPress}>
             <SkiaTerminalRenderer
               buffer={buffer}
               fontSize={fontSize}
@@ -493,8 +646,29 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
               focused={focused}
               cursorBlinkInterval={cursorBlinkInterval}
             />
-          </View>
+          </Pressable>
         </GestureDetector>
+
+        {/* Native context menu */}
+        {Platform.OS !== 'web' && selection && (
+          <View
+            style={[
+              styles.contextMenu,
+              {
+                left: Math.max(8, ((Math.min(selection.start[0], selection.end[0]) +
+                  Math.max(selection.start[0], selection.end[0])) / 2) * cellWidth - 30),
+                top: Math.max(4, Math.min(selection.start[1], selection.end[1]) * cellHeight - 38),
+              },
+            ]}
+          >
+            <Pressable
+              style={({ pressed }) => [styles.contextMenuItem, pressed && { opacity: 0.6 }]}
+              onPress={copySelection}
+            >
+              <Text style={styles.contextMenuText}>Copy</Text>
+            </Pressable>
+          </View>
+        )}
 
         <TextInput
           ref={textInputRef}
@@ -537,6 +711,30 @@ const styles = StyleSheet.create({
     height: 1,
     left: -9999,
     top: -9999,
+  },
+  contextMenu: {
+    position: 'absolute',
+    backgroundColor: '#2a2a2a',
+    borderRadius: 8,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
+    flexDirection: 'row',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
+    zIndex: 100,
+  },
+  contextMenuItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  contextMenuText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '500',
   },
 });
 
