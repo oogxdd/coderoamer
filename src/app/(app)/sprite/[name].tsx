@@ -865,7 +865,6 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   headerRight: {
-    width: 50,
     flexDirection: 'row',
     justifyContent: 'flex-end',
     alignItems: 'center',
@@ -873,6 +872,10 @@ const styles = StyleSheet.create({
   },
   headerAction: {
     fontSize: FontSize.lg,
+  },
+  headerActionNew: {
+    fontSize: FontSize.sm,
+    fontWeight: '700',
   },
   statusRow: {
     flexDirection: 'row',
