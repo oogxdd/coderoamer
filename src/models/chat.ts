@@ -16,6 +16,7 @@ export interface ChatMessage {
 
 export type ChatContent =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'toolUse'; card: ToolUseCard }
   | { type: 'toolResult'; card: ToolResultCard }
   | { type: 'error'; message: string };

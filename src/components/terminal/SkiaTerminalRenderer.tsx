@@ -440,7 +440,7 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
 
     for (let x = 0; x < line.length; x++) {
       const cell = line[x];
-      if (cell.width === 0) continue;
+      if (!cell || cell.width === 0) continue;
       const { fg } = resolveCellColors(cell.attrs, theme);
       const fl = cell.attrs.flags;
       const ch = cell.char || ' ';

@@ -108,6 +108,10 @@ export default function GuideScreen() {
             Sprites CLI. Lets the app manage your sprites.
           </P>
           <P>
+            Paste it on the first sign-in screen in the app, then tap{' '}
+            <Text style={styles.b}>Continue</Text>.
+          </P>
+          <P>
             <Text style={styles.b}>Claude Code token</Text> — run this on your computer (needs a
             Claude subscription) and paste the <Text style={styles.mono}>sk-ant-oat01-…</Text> value:
           </P>
@@ -115,6 +119,10 @@ export default function GuideScreen() {
           <P>
             The app injects it as <Text style={styles.mono}>CLAUDE_CODE_OAUTH_TOKEN</Text> when it
             launches Claude in the sprite, so you don&apos;t have to log in there.
+          </P>
+          <P>
+            Paste that token on the second sign-in screen in the app. Without it, Chat cannot launch
+            Claude, but the session browser and terminal still work.
           </P>
           <P>
             <Text style={styles.b}>GitHub</Text> (optional) — connect via device flow to auto-fill
@@ -155,6 +163,20 @@ export default function GuideScreen() {
             <Text style={styles.b}>Continue</Text> to keep talking. Because the history lives on the
             sprite (not the phone), it shows up even on a fresh install, and a chat you reopen
             auto-syncs any turns that finished while you were away.
+          </P>
+        </Section>
+
+        <Section title="Fallback resume path">
+          <P>
+            If the session browser does not show the session you want, open{' '}
+            <Text style={styles.b}>Sessions &amp; terminals</Text> → <Text style={styles.b}>Stream
+            terminal</Text> and resume it manually in the sprite shell.
+          </P>
+          <Code>cd /home/sprite/type/type_new</Code>
+          <Code>claude --resume e6fb688d-8341-40a8-8bc3-00ad84961ce8</Code>
+          <P>
+            Use the absolute path above in the app if your folder is under `~/type/type_new`. `~`
+            expands to <Text style={styles.mono}>/home/sprite</Text> on the sprite.
           </P>
         </Section>
 

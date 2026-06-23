@@ -1,12 +1,13 @@
 import React, { forwardRef } from 'react';
 import { SkiaTerminal, SkiaTerminalHandle } from './SkiaTerminal';
+import type { TerminalTheme } from './SkiaTerminalRenderer';
 
 export interface SkiaTerminalViewProps {
   onData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   fontSize?: number;
   cursorBlinkInterval?: number;
-  theme?: Record<string, any>;
+  theme?: TerminalTheme;
 }
 
 const SkiaTerminalView = forwardRef<SkiaTerminalHandle, SkiaTerminalViewProps>(

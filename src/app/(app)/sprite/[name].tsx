@@ -423,14 +423,19 @@ export default function SpriteDetailScreen() {
             </View>
           )}
           {tab === 'chat' && (
-            <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-              {chatName} · {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}
-            </Text>
+            <Pressable onPress={() => setChatListVisible(true)} hitSlop={6}>
+              <Text style={[styles.chatSubtitle, { color: colors.tint }]} numberOfLines={1}>
+                {chatName} ▾ <Text style={{ color: colors.textSecondary }}>· {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}</Text>
+              </Text>
+            </Pressable>
           )}
         </View>
         <View style={styles.headerRight}>
           {tab === 'chat' && (
             <>
+              <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
+                <Text style={[styles.headerActionNew, { color: colors.tint }]}>＋ New</Text>
+              </Pressable>
               <Pressable onPress={() => setQuickBashVisible(true)} hitSlop={8}>
                 <Text style={[styles.headerAction, { color: colors.tint }]}>&#x26A1;</Text>
               </Pressable>

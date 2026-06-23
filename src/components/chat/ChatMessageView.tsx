@@ -4,6 +4,7 @@ import { ChatMessage, ChatContent, toolUseActivityLabel } from '@/models/chat';
 import { UserBubble } from './UserBubble';
 import { AssistantMessage } from './AssistantMessage';
 import { ToolUseCardView } from './ToolUseCardView';
+import { ReasoningBlock } from './ReasoningBlock';
 import { ThinkingShimmer } from './ThinkingShimmer';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
@@ -62,6 +63,14 @@ export function ChatMessageView({
         switch (item.type) {
           case 'text':
             return <AssistantMessage key={`text-${index}`} text={item.text} />;
+          case 'reasoning':
+            return (
+              <ReasoningBlock
+                key={`reasoning-${index}`}
+                text={item.text}
+                streaming={isCurrentlyStreaming && index === message.content.length - 1}
+              />
+            );
           case 'toolUse':
             return (
               <ToolUseCardView

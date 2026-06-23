@@ -64,6 +64,8 @@ export interface ClaudeAssistantEvent {
 
 export type ClaudeContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data?: string }
   | { type: 'tool_use'; id: string; name: string; input: JSONValue }
   | { type: string }; // unknown
 

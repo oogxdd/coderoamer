@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -17,6 +16,7 @@ import {
   ExecConnectionState,
   ExecEventLog,
 } from '@/services/exec-poc';
+import { TerminalErrorBoundary } from '@/components/terminal';
 import type { SkiaTerminalHandle } from '@/components/terminal';
 
 // On native, statically import. On web, defer until CanvasKit loads.
@@ -176,6 +176,9 @@ export default function ExecPocScreen() {
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [state, setState] = useState<ExecConnectionState>('idle');
   const [showSetup, setShowSetup] = useState(!paramName);
+  // Bumped to force a clean remount of the terminal (fresh buffer) after the
+  // error boundary catches, without tearing down the live WebSocket session.
+  const [terminalEpoch, setTerminalEpoch] = useState(0);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
   const didAutoConnectRef = useRef(false);
@@ -268,14 +271,24 @@ export default function ExecPocScreen() {
     setState('closed');
   };
 
+  // Re-mount the terminal with a clean buffer after a render error, then nudge
+  // the remote app to repaint into the fresh screen.
+  const handleTerminalReset = useCallback(() => {
+    setTerminalEpoch((e) => e + 1);
+    setTimeout(() => {
+      termRef.current?.focus();
+      if (client.getState() === 'open') client.send('\f', false);
+    }, 50);
+  }, [client]);
+
   const isConnected = state === 'open';
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: '#010409' }]} edges={['top']}>
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      {/* No KeyboardAvoidingView here: SkiaTerminal owns keyboard avoidance, and
+          stacking both double-subtracts the keyboard height (jumpy canvas + a
+          flood of resize events to the PTY). */}
+      <View style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
           <Pressable onPress={() => router.back()} hitSlop={8}>
@@ -391,28 +404,30 @@ export default function ExecPocScreen() {
 
         {/* Terminal */}
         <View style={styles.terminalContainer}>
-          {Platform.OS === 'web' ? (
-            <WebTerminal
-              termRef={termRef}
-              onData={(data) => {
-                if (client.getState() === 'open') client.send(data, false);
-              }}
-              onResize={(cols, rows) => client.resize(cols, rows)}
-            />
-          ) : (
-            <SkiaTerminalNative
-              ref={termRef}
-              onData={(data: string) => {
-                if (client.getState() === 'open') client.send(data, false);
-              }}
-              onResize={(cols: number, rows: number) => client.resize(cols, rows)}
-              fontSize={13}
-              cursorBlinkInterval={600}
-              theme={TERMINAL_THEME}
-            />
-          )}
+          <TerminalErrorBoundary key={terminalEpoch} onReset={handleTerminalReset}>
+            {Platform.OS === 'web' ? (
+              <WebTerminal
+                termRef={termRef}
+                onData={(data) => {
+                  if (client.getState() === 'open') client.send(data, false);
+                }}
+                onResize={(cols, rows) => client.resize(cols, rows)}
+              />
+            ) : (
+              <SkiaTerminalNative
+                ref={termRef}
+                onData={(data: string) => {
+                  if (client.getState() === 'open') client.send(data, false);
+                }}
+                onResize={(cols: number, rows: number) => client.resize(cols, rows)}
+                fontSize={13}
+                cursorBlinkInterval={600}
+                theme={TERMINAL_THEME}
+              />
+            )}
+          </TerminalErrorBoundary>
         </View>
-      </KeyboardAvoidingView>
+      </View>
     </SafeAreaView>
   );
 }

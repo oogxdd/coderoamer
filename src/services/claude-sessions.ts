@@ -227,6 +227,14 @@ export function transcriptToMessages(raw: string): ChatMessage[] {
           } else {
             next.push({ type: 'text', text: block.text });
           }
+        } else if (block?.type === 'thinking' && typeof block.thinking === 'string') {
+          if (!block.thinking) continue;
+          const last = next[next.length - 1];
+          if (last && last.type === 'reasoning') {
+            next[next.length - 1] = { type: 'reasoning', text: last.text + block.thinking };
+          } else {
+            next.push({ type: 'reasoning', text: block.thinking });
+          }
         } else if (block?.type === 'tool_use' && block.id && block.name) {
           const card: ToolUseCard = {
             toolUseId: block.id,

@@ -105,6 +105,39 @@ function countUserMessages(messages: ChatMessage[]): number {
   return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
 }
 
+/** Stable content fingerprint — two conversations with the same signature render identically. */
+function conversationSignature(messages: ChatMessage[]): string {
+  return messages
+    .map((m) => {
+      const parts = m.content.map((c) => {
+        if (c.type === 'text') return `t:${c.text}`;
+        if (c.type === 'reasoning') return `r:${c.text.length}`;
+        if (c.type === 'toolUse') return `u:${c.card.toolUseId}`;
+        if (c.type === 'toolResult') return `R:${c.card.toolUseId}`;
+        return c.type;
+      });
+      return `${m.role}|${parts.join('|')}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Overlay an incoming (e.g. on-disk transcript) conversation onto the local one,
+ * preserving the existing message ids for the common prefix. Keeping ids stable
+ * means React reuses the already-mounted bubbles instead of remounting/re-scrolling
+ * them — which is what made reopening a chat look like the last turn was duplicated
+ * and re-answered.
+ */
+function mergeTranscript(local: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  return incoming.map((msg, i) => {
+    const localMsg = local[i];
+    if (localMsg && localMsg.role === msg.role) {
+      return { ...msg, id: localMsg.id };
+    }
+    return msg;
+  });
+}
+
 function nextAssistantAfterUser(messages: ChatMessage[], userIndex: number): number {
   for (let i = userIndex + 1; i < messages.length; i++) {
     if (messages[i].role === 'user') break;
@@ -240,16 +273,21 @@ export function useChat(options: UseChatOptions) {
           const transcript = await readClaudeSessionMessages(spriteName, resumeId);
           if (loadRequest !== loadRequestRef.current) return;
           if (statusRef.current !== 'idle') return;
+          if (transcript.length === 0) return;
           const local = messagesRef.current;
           const transcriptTurns = countUserMessages(transcript);
           const localTurns = countUserMessages(local);
           // Only adopt the transcript when it clearly has more conversation than
           // we have locally (or local is empty), to avoid churn on every open.
-          if (transcript.length > 0 && (local.length === 0 || transcriptTurns > localTurns)) {
-            messagesRef.current = transcript;
-            setMessages(transcript);
-            await saveChatMessages(chatId, transcript);
-          }
+          if (local.length !== 0 && transcriptTurns <= localTurns) return;
+          // Preserve ids for the shared prefix and bail if nothing actually
+          // changed — re-setting identical messages remounts every bubble and
+          // re-scrolls, which looked like the last turn being duplicated/re-run.
+          const merged = mergeTranscript(local, transcript);
+          if (conversationSignature(merged) === conversationSignature(local)) return;
+          messagesRef.current = merged;
+          setMessages(merged);
+          await saveChatMessages(chatId, merged);
         } catch {
           // Offline / no transcript yet — keep the local copy.
         }
@@ -424,6 +462,20 @@ export function useChat(options: UseChatOptions) {
                   };
                 } else {
                   newContent.push({ type: 'text', text: block.text });
+                }
+              } else if (block.type === 'thinking' && 'thinking' in block) {
+                // Extended-thinking blocks — surface Claude's reasoning live.
+                const thinkingText = (block as { thinking?: string }).thinking ?? '';
+                if (thinkingText) {
+                  const lastContent = newContent[newContent.length - 1];
+                  if (lastContent && lastContent.type === 'reasoning') {
+                    newContent[newContent.length - 1] = {
+                      type: 'reasoning',
+                      text: lastContent.text + thinkingText,
+                    };
+                  } else {
+                    newContent.push({ type: 'reasoning', text: thinkingText });
+                  }
                 }
               } else if (block.type === 'tool_use' && 'id' in block && 'name' in block) {
                 const card: ToolUseCard = {

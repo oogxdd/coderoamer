@@ -57,6 +57,18 @@ twice over:
   The working directory is therefore locked once a conversation starts — begin a new session to
   switch folders.
 
+If your repo lives at `~/type/type_new`, use `/home/sprite/type/type_new` in the app. `~` resolves
+to the sprite home directory, which is `/home/sprite`.
+
+If the session browser does not surface the session you want, use the stream terminal instead:
+
+```bash
+cd /home/sprite/type/type_new
+claude --resume e6fb688d-8341-40a8-8bc3-00ad84961ce8
+```
+
+Use the absolute path in the app. `~` expands to `/home/sprite` on the sprite.
+
 For the third approach, **"Start ttyd in this sprite"** does it for you: it sets the sprite URL to
 `public`, installs `ttyd` if it's missing (apt/apk/dnf, falling back to a static binary), starts it
 on port 8080 (the public URL proxies to port 8080 / the first HTTP port), and connects. To run it by
@@ -79,6 +91,14 @@ First launch walks you through three steps:
 3. **GitHub** (optional) — device-flow login used to auto-fill your git commit name/email.
 
 Tokens are stored with `expo-secure-store`.
+
+### What to enter on the sign-in screen
+
+1. Paste your **Sprites API token** from `sprites.dev/account` or from the Sprites CLI, then tap
+   `Continue`.
+2. Paste your **Claude Code OAuth token** from `claude setup-token` on your computer. That token
+   starts with `sk-ant-oat01-...`. Without it, Chat cannot launch Claude.
+3. Optionally connect **GitHub** with the device-flow prompt if you want git name/email auto-fill.
 
 ---
 

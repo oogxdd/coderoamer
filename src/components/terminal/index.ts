@@ -10,3 +10,5 @@ export type { TerminalTheme, SelectionRange, FontConfig, CellMetrics, SkiaTermin
 
 export { SkiaTerminal, useTerminal } from './SkiaTerminal';
 export type { SkiaTerminalProps, SkiaTerminalHandle, ConnectionStatus } from './SkiaTerminal';
+
+export { TerminalErrorBoundary } from './TerminalErrorBoundary';

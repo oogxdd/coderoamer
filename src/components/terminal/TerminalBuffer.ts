@@ -514,6 +514,12 @@ export class TerminalBuffer implements IParserCallbacks {
             this.ybase = this._altBuffer.ybase;
             this.cursor = { ...this._altBuffer.cursor };
             this._altBuffer = null;
+            // The main buffer was saved before any resize that happened while
+            // the alt screen was up; clamp the cursor back into range so the
+            // next print() lands on a row _getActiveLine can materialize.
+            this.ydisp = 0;
+            this.cursor.x = Math.min(Math.max(0, this.cursor.x), this.cols - 1);
+            this.cursor.y = Math.min(Math.max(0, this.cursor.y), this.rows - 1);
           }
           // Mark all dirty
           for (let i = 0; i < this.rows; i++) this._dirty.add(i);
@@ -528,8 +534,26 @@ export class TerminalBuffer implements IParserCallbacks {
   // Buffer manipulation — mirrors xterm.js Buffer scroll/erase methods
   // ──────────────────────────────────────────────────────────────────────
 
+  /**
+   * Return the active buffer line for viewport row `y`, guaranteeing a dense,
+   * full-width line back. After an alt-screen restore or a grow-resize the
+   * backing `lines` array can be shorter than `ybase + rows`, or a line can be
+   * narrower than `cols`; indexing those directly throws and — with no error
+   * boundary above us — crashes the whole app. Backfilling/padding here keeps
+   * the print/erase/insert/delete paths total.
+   */
   private _getActiveLine(y: number): BufferLine {
-    return this.lines[this.ybase + y];
+    const idx = this.ybase + y;
+    let line = this.lines[idx];
+    if (!line) {
+      for (let i = this.lines.length; i <= idx; i++) {
+        this.lines[i] = this._createEmptyLine();
+      }
+      line = this.lines[idx];
+    } else if (line.length < this.cols) {
+      for (let x = line.length; x < this.cols; x++) line.push(emptyCell());
+    }
+    return line;
   }
 
   private _createEmptyLine(cols?: number): BufferLine {
