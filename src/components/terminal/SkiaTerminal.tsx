@@ -16,6 +16,7 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   View,
+  Text,
   TextInput,
   Pressable,
   Keyboard,
@@ -254,13 +255,14 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
 
   const textInputRef = useRef<TextInput>(null);
 
-  // Finalize selection: copy to clipboard
-  const finalizeSelection = useCallback((sel: SelectionRange) => {
-    const text = extractSelectionText(buffer, sel);
+  const copySelection = useCallback(() => {
+    if (!selectionRef.current) return;
+    const text = extractSelectionText(buffer, selectionRef.current);
     if (text) {
       copyToClipboard(text);
       onSelectionChange?.(text);
     }
+    setSelection(null);
   }, [buffer, onSelectionChange]);
 
   // ── Web mouse selection ─────────────────────────────────────────
@@ -314,16 +316,13 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
       const sel: SelectionRange = { start: [startCol, startRow], end: [col, row] };
       setSelection(sel);
       scheduleRender();
-      finalizeSelection(sel);
     };
 
     const onDblClick = (e: MouseEvent) => {
       const { col, row } = toCell(e);
       const [wStart, wEnd] = findWordAt(buffer, col, row);
-      const sel: SelectionRange = { start: [wStart, row], end: [wEnd, row] };
-      setSelection(sel);
+      setSelection({ start: [wStart, row], end: [wEnd, row] });
       scheduleRender();
-      finalizeSelection(sel);
     };
 
     el.addEventListener('mousedown', onMouseDown);
@@ -336,7 +335,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
       el.removeEventListener('mouseup', onMouseUp);
       el.removeEventListener('dblclick', onDblClick);
     };
-  }, [buffer, cellWidth, cellHeight, scheduleRender, finalizeSelection]);
+  }, [buffer, cellWidth, cellHeight, scheduleRender]);
 
   // ── Web Ctrl/Cmd+C to copy selection ────────────────────────────
   useEffect(() => {
@@ -344,15 +343,12 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectionRef.current) {
         e.preventDefault();
-        const text = extractSelectionText(buffer, selectionRef.current);
-        if (text) copyToClipboard(text);
-        setSelection(null);
-        onSelectionChange?.(null);
+        copySelection();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [buffer, onSelectionChange]);
+  }, [copySelection]);
 
   // ── WebSocket ─────────────────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
@@ -471,10 +467,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
       const code = key.charCodeAt(0);
       // Ctrl+C (0x03) with active selection → copy instead of sending to terminal
       if (code === 3 && selectionRef.current) {
-        const text = extractSelectionText(buffer, selectionRef.current);
-        if (text) copyToClipboard(text);
-        setSelection(null);
-        onSelectionChange?.(null);
+        copySelection();
         lastInputRef.current = key;
         return;
       }
@@ -547,10 +540,8 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
         const row = Math.floor(y / cellHeight);
         if (col >= 0 && col < buffer.cols && row >= 0 && row < buffer.rows) {
           const [wStart, wEnd] = findWordAt(buffer, col, row);
-          const sel: SelectionRange = { start: [wStart, row], end: [wEnd, row] };
-          setSelection(sel);
+          setSelection({ start: [wStart, row], end: [wEnd, row] });
           Vibration.vibrate(30);
-          finalizeSelection(sel);
         }
       })(e.x, e.y);
     });
@@ -571,7 +562,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
       'worklet';
       runOnJS(() => {
         if (selectionRef.current) {
-          finalizeSelection(selectionRef.current);
+          onSelectionChange?.(extractSelectionText(buffer, selectionRef.current));
         }
       })();
     });
@@ -658,6 +649,27 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
           </Pressable>
         </GestureDetector>
 
+        {/* Native context menu */}
+        {Platform.OS !== 'web' && selection && (
+          <View
+            style={[
+              styles.contextMenu,
+              {
+                left: Math.max(8, ((Math.min(selection.start[0], selection.end[0]) +
+                  Math.max(selection.start[0], selection.end[0])) / 2) * cellWidth - 30),
+                top: Math.max(4, Math.min(selection.start[1], selection.end[1]) * cellHeight - 38),
+              },
+            ]}
+          >
+            <Pressable
+              style={({ pressed }) => [styles.contextMenuItem, pressed && { opacity: 0.6 }]}
+              onPress={copySelection}
+            >
+              <Text style={styles.contextMenuText}>Copy</Text>
+            </Pressable>
+          </View>
+        )}
+
         <TextInput
           ref={textInputRef}
           style={styles.hiddenInput}
@@ -699,6 +711,30 @@ const styles = StyleSheet.create({
     height: 1,
     left: -9999,
     top: -9999,
+  },
+  contextMenu: {
+    position: 'absolute',
+    backgroundColor: '#2a2a2a',
+    borderRadius: 8,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
+    flexDirection: 'row',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
+    zIndex: 100,
+  },
+  contextMenuItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  contextMenuText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '500',
   },
 });
 
