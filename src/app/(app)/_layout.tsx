@@ -35,6 +35,10 @@ export default function AppLayout() {
         name="ttyd-terminal"
         options={{ title: 'Web Terminal (ttyd)' }}
       />
+      <Stack.Screen
+        name="claude-login"
+        options={{ title: 'Claude Login' }}
+      />
     </Stack>
   );
 }

@@ -4,6 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 const KEYS = {
   spritesToken: 'sprites_api_token',
   claudeToken: 'claude_oauth_token',
+  claudeCreds: 'claude_credentials_json',
   githubToken: 'github_token',
 } as const;
 
@@ -38,18 +39,20 @@ export async function hasToken(key: TokenKey): Promise<boolean> {
 }
 
 export async function loadAllTokens() {
-  const [spritesToken, claudeToken, githubToken] = await Promise.all([
+  const [spritesToken, claudeToken, claudeCreds, githubToken] = await Promise.all([
     loadToken('spritesToken'),
     loadToken('claudeToken'),
+    loadToken('claudeCreds'),
     loadToken('githubToken'),
   ]);
-  return { spritesToken, claudeToken, githubToken };
+  return { spritesToken, claudeToken, claudeCreds, githubToken };
 }
 
 export async function clearAllTokens(): Promise<void> {
   await Promise.all([
     deleteToken('spritesToken'),
     deleteToken('claudeToken'),
+    deleteToken('claudeCreds'),
     deleteToken('githubToken'),
   ]);
 }

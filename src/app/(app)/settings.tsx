@@ -62,6 +62,24 @@ export default function SettingsScreen() {
   // Preferences
   const [autoCheckpoint, setAutoCheckpoint] = useState(false);
 
+  // GitHub token (paste — supports OAuth tokens and fine-grained PATs)
+  const [githubTokenInput, setGithubTokenInput] = useState('');
+  const [savingGitHub, setSavingGitHub] = useState(false);
+
+  const handleSaveGitHubToken = useCallback(async () => {
+    const trimmed = githubTokenInput.trim();
+    if (!trimmed) return;
+    setSavingGitHub(true);
+    try {
+      await auth.saveGitHubToken(trimmed);
+      setGithubTokenInput('');
+      Alert.alert('Saved', 'GitHub token saved. New sprites can now clone your repos.');
+    } catch {
+      Alert.alert('Error', 'Failed to save GitHub token.');
+    }
+    setSavingGitHub(false);
+  }, [githubTokenInput, auth]);
+
   // Load all settings on mount
   useEffect(() => {
     (async () => {
@@ -195,20 +213,81 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={styles.row}>
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Claude Code Token</Text>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Claude Auth</Text>
           <View style={styles.statusContainer}>
             <View
               style={[
                 styles.statusDot,
-                { backgroundColor: auth.hasClaudeToken ? colors.success : colors.warning },
+                {
+                  backgroundColor:
+                    auth.hasClaudeCreds || auth.hasClaudeToken ? colors.success : colors.warning,
+                },
               ]}
             />
             <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-              {auth.hasClaudeToken ? 'Saved' : 'Not Set'}
+              {auth.hasClaudeCreds
+                ? 'Browser login'
+                : auth.hasClaudeToken
+                  ? 'Pasted token'
+                  : 'Not Set'}
             </Text>
           </View>
         </View>
+
+        <Pressable
+          style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
+          onPress={() => router.push('/(app)/claude-login')}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Log in with browser</Text>
+          <Text style={[styles.statusText, { color: colors.tint }]}>Capture →</Text>
+        </Pressable>
+      </View>
+
+      {/* GitHub Section */}
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>GITHUB</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Token</Text>
+          <View style={styles.statusContainer}>
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: auth.hasGitHubToken ? colors.success : colors.warning },
+              ]}
+            />
+            <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+              {auth.hasGitHubToken ? 'Saved' : 'Not Set'}
+            </Text>
+          </View>
+        </View>
+        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Paste</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={githubTokenInput}
+            onChangeText={setGithubTokenInput}
+            placeholder="ghp_… or github_pat_…"
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+        </View>
+        <Pressable
+          style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
+          disabled={savingGitHub || !githubTokenInput.trim()}
+          onPress={handleSaveGitHubToken}
+        >
+          <Text
+            style={[
+              styles.rowLabel,
+              { color: githubTokenInput.trim() ? colors.tint : colors.textSecondary },
+            ]}
+          >
+            {savingGitHub ? 'Saving…' : 'Save Token'}
+          </Text>
+        </Pressable>
       </View>
 
       <Pressable

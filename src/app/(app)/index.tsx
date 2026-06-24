@@ -14,6 +14,7 @@ import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite } from '@/models/sprite';
 import * as api from '@/services/api';
+import { ensureProvisionedOnce } from '@/services/provision';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { SpriteRow } from '@/components/dashboard/SpriteRow';
@@ -48,6 +49,9 @@ export default function DashboardScreen() {
   const handleCreate = async (name: string) => {
     await api.createSprite(name);
     await loadSprites();
+    // Best-effort: write credentials onto the new sprite once. If it isn't ready
+    // yet, the first chat turn re-attempts via ensureProvisionedOnce.
+    ensureProvisionedOnce(name).catch(() => {});
   };
 
   const handleDelete = (sprite: Sprite) => {

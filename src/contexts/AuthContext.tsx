@@ -5,6 +5,7 @@ interface AuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
   hasClaudeToken: boolean;
+  hasClaudeCreds: boolean;
   hasGitHubToken: boolean;
 }
 
@@ -12,6 +13,7 @@ interface AuthContextValue extends AuthState {
   refreshAuth: () => Promise<void>;
   saveSpritesToken: (token: string) => Promise<void>;
   saveClaudeToken: (token: string) => Promise<void>;
+  saveClaudeCreds: (creds: string) => Promise<void>;
   saveGitHubToken: (token: string) => Promise<void>;
   signOut: () => Promise<void>;
   getClaudeToken: () => Promise<string | null>;
@@ -24,6 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isLoading: true,
     isAuthenticated: false,
     hasClaudeToken: false,
+    hasClaudeCreds: false,
     hasGitHubToken: false,
   });
 
@@ -33,6 +36,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isLoading: false,
       isAuthenticated: !!tokens.spritesToken,
       hasClaudeToken: !!tokens.claudeToken,
+      hasClaudeCreds: !!tokens.claudeCreds,
       hasGitHubToken: !!tokens.githubToken,
     });
   }, []);
@@ -48,6 +52,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const saveClaudeTokenFn = useCallback(async (token: string) => {
     await saveToken('claudeToken', token);
+    await refreshAuth();
+  }, [refreshAuth]);
+
+  const saveClaudeCreds = useCallback(async (creds: string) => {
+    await saveToken('claudeCreds', creds);
     await refreshAuth();
   }, [refreshAuth]);
 
@@ -72,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         refreshAuth,
         saveSpritesToken,
         saveClaudeToken: saveClaudeTokenFn,
+        saveClaudeCreds,
         saveGitHubToken,
         signOut,
         getClaudeToken,
