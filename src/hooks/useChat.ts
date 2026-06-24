@@ -868,6 +868,11 @@ export function useChat(options: UseChatOptions) {
         }
 
         if (abortRef.current === abortController) {
+          // Stream finished (normally or with error) without being interrupted.
+          // Delete the service so Sprites doesn't restart it and respawn Claude,
+          // which would create orphan ~/.claude/projects/*/*.jsonl sessions.
+          // interrupt() already deletes the service on abort.
+          api.deleteService(spriteName, serviceNameRef.current).catch(() => {});
           abortRef.current = null;
         }
         activeUserMessageIdRef.current = undefined;
