@@ -10,6 +10,7 @@
 
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { terror } from './terminalLog';
 
 interface Props {
   children: React.ReactNode;
@@ -29,8 +30,15 @@ export class TerminalErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    // Keep the message in the log stream rather than the redbox.
-    console.warn('[Terminal] render error caught:', error?.message, info?.componentStack);
+    // Keep the message in the log stream rather than the redbox. NOTE: this only fires
+    // for throws during React render/lifecycle — it does NOT catch throws in the async
+    // WebSocket→buffer.write parse path, nor native Skia paint crashes. Those are
+    // contained / logged at their own sites (see TerminalBuffer.write, terminalLog).
+    terror('boundary', 'render error caught', {
+      message: error?.message,
+      stack: error?.stack,
+      componentStack: info?.componentStack,
+    });
   }
 
   private handleReset = () => {

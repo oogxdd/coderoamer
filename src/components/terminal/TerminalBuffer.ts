@@ -20,6 +20,7 @@ import {
   cloneAttrs,
   emptyCell,
 } from './AnsiParser';
+import { terror, hexPreview, errInfo } from './terminalLog';
 
 /** Standard 256-color palette (xterm colors). First 16 are the "named" ANSI colors. */
 export const ANSI_COLORS: string[] = [
@@ -121,10 +122,30 @@ export class TerminalBuffer implements IParserCallbacks {
   // Public API
   // ──────────────────────────────────────────────────────────────────────
 
-  /** Write raw data (with ANSI escapes) into the terminal */
+  /** Write raw data (with ANSI escapes) into the terminal.
+   *
+   * Runs inside the WebSocket onmessage callback, *outside* React render, so a throw
+   * here is NOT caught by <TerminalErrorBoundary> — it would crash the whole app.
+   * We contain it: log the offending chunk + state, reset the parser to a known-good
+   * GROUND state (a partially-consumed escape sequence is the most likely culprit),
+   * and keep the session alive. */
   write(data: string): void {
     this._dirty.clear();
-    this.parser.parse(data);
+    try {
+      this.parser.parse(data);
+    } catch (e) {
+      terror('buffer.write', 'parse threw — containing crash', {
+        err: errInfo(e),
+        chunk: hexPreview(data, 200),
+        chunkLen: data.length,
+        cursor: { x: this.cursor.x, y: this.cursor.y },
+        size: { cols: this.cols, rows: this.rows },
+        ybase: this.ybase,
+        lines: this.lines.length,
+      });
+      // Re-arm the parser so the next chunk starts clean rather than mid-sequence.
+      try { this.parser.reset(); } catch {}
+    }
   }
 
   /** Get the visible viewport lines */

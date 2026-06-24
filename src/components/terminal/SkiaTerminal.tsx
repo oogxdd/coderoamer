@@ -36,6 +36,7 @@ import {
 import { runOnJS } from 'react-native-reanimated';
 import * as Clipboard from 'expo-clipboard';
 import { TerminalBuffer } from './TerminalBuffer';
+import { tinfo, tdebug, twarn, hexPreview } from './terminalLog';
 import {
   SkiaTerminalRenderer,
   TerminalTheme,
@@ -244,6 +245,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   const [focused, setFocused] = useState(false);
 
   useEffect(() => {
+    tinfo('conn', `status → ${connectionStatus}`);
     onConnectionChange?.(connectionStatus);
   }, [connectionStatus, onConnectionChange]);
 
@@ -354,6 +356,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   const wsRef = useRef<WebSocket | null>(null);
 
   const sendToServer = useCallback((data: string) => {
+    tdebug('input', 'send', { data: hexPreview(data, 60), len: data.length });
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(data);
     }
@@ -387,12 +390,13 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
 
     ws.onmessage = (event) => {
       const data = typeof event.data === 'string' ? event.data : '';
+      tdebug('output', 'ws.message', { data: hexPreview(data, 80), len: data.length });
       buffer.write(data);
       scheduleRender();
     };
 
-    ws.onerror = () => setConnectionStatus('error');
-    ws.onclose = () => setConnectionStatus('disconnected');
+    ws.onerror = (ev) => { twarn('conn', 'ws error', { ev: String((ev as any)?.message ?? ev) }); setConnectionStatus('error'); };
+    ws.onclose = (ev) => { tinfo('conn', 'ws close', { code: (ev as any)?.code, reason: (ev as any)?.reason }); setConnectionStatus('disconnected'); };
 
     return () => {
       if (!externalWs && ws.readyState !== WebSocket.CLOSED) {
@@ -579,6 +583,9 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     const newRows = propRows || Math.max(1, Math.floor(containerHeight / cellHeight));
 
     if (newCols !== buffer.cols || newRows !== buffer.rows) {
+      tinfo('resize', `${buffer.cols}x${buffer.rows} → ${newCols}x${newRows}`, {
+        containerWidth, containerHeight, cellWidth, cellHeight,
+      });
       buffer.resize(newCols, newRows);
       scheduleRender();
       onResize?.(newCols, newRows);
@@ -602,6 +609,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
   // ── Imperative handle ─────────────────────────────────────────────
   React.useImperativeHandle(ref, () => ({
     write: (data: string) => {
+      tdebug('output', 'write', { data: hexPreview(data, 80), len: data.length });
       buffer.write(data);
       scheduleRender();
     },

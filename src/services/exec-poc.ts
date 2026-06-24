@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { loadToken } from '@/services/auth';
+import { tinfo, tdebug, twarn, terror, hexPreview, errInfo } from '@/components/terminal/terminalLog';
 
 const EXEC_HTTP_BASE = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
 const EXEC_WS_BASE =
@@ -206,6 +207,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       : `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec?cmd=${encodeURIComponent(command)}&tty=true&stdin=true&cols=${DEFAULT_COLS}&rows=${DEFAULT_ROWS}${isWeb ? `&token=${encodeURIComponent(token)}` : ''}`;
 
     setState('connecting');
+    tinfo('exec.conn', 'connecting', { sprite: spriteName, attach: attachSessionId, cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
     options.onLog(makeLog('local', `Connecting: ${wsUrl}`));
 
     if (isWeb) {
@@ -221,6 +223,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
 
     socket.onopen = () => {
       setState('open');
+      tinfo('exec.conn', 'open');
       options.onLog(makeLog('local', 'WebSocket connected'));
       sendResize();
       if (attachSessionId) {
@@ -238,7 +241,18 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     };
 
     socket.onmessage = async (event) => {
-      const raw = await decodeMessageData(event.data);
+      let raw: string;
+      try {
+        raw = await decodeMessageData(event.data);
+      } catch (e) {
+        terror('exec.msg', 'decode threw', { err: errInfo(e), kind: typeof event.data });
+        return;
+      }
+      tdebug('exec.msg', 'recv', {
+        len: raw.length,
+        kind: typeof event.data,
+        preview: hexPreview(raw, 80),
+      });
 
       let parsed: unknown;
       try {
@@ -289,11 +303,13 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
 
     socket.onerror = (event) => {
       setState('error');
+      twarn('exec.conn', 'error', { event: safeStringify(event) });
       options.onLog(makeLog('error', `WebSocket error: ${safeStringify(event)}`));
     };
 
     socket.onclose = (event) => {
       setState('closed');
+      tinfo('exec.conn', 'close', { code: event.code, reason: event.reason || 'n/a' });
       options.onLog(
         makeLog('local', `WebSocket closed (code=${event.code}, reason=${event.reason || 'n/a'})`)
       );
@@ -303,11 +319,13 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
 
   const send = (text: string, appendNewline: boolean = true) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      twarn('exec.send', 'socket not open', { state: socket?.readyState });
       options.onLog(makeLog('error', 'Cannot send: socket is not open'));
       return;
     }
 
     const payload = appendNewline ? `${text}\r` : text;
+    tdebug('exec.send', 'send', { payload: hexPreview(payload, 60), len: payload.length });
     socket.send(toArrayBuffer(payload));
   };
 

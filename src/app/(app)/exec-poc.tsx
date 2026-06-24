@@ -16,8 +16,10 @@ import {
   ExecConnectionState,
   ExecEventLog,
 } from '@/services/exec-poc';
+import * as Clipboard from 'expo-clipboard';
 import { TerminalErrorBoundary } from '@/components/terminal';
 import type { SkiaTerminalHandle } from '@/components/terminal';
+import { terror, tinfo, errInfo, dumpTerminalLog, clearTerminalLog } from '@/components/terminal/terminalLog';
 
 // On native, statically import. On web, defer until CanvasKit loads.
 const SkiaTerminalNative =
@@ -185,10 +187,16 @@ export default function ExecPocScreen() {
 
   const appendLog = useCallback((entry: ExecEventLog) => {
     if (!termRef.current) return;
-    if (entry.source === 'ws') {
-      termRef.current.write(entry.text);
-    } else if (entry.source === 'error') {
-      termRef.current.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
+    // Defense in depth: termRef.write → buffer.write already contains parser throws,
+    // but keep this path total too so a logging write can never bubble up here.
+    try {
+      if (entry.source === 'ws') {
+        termRef.current.write(entry.text);
+      } else if (entry.source === 'error') {
+        termRef.current.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
+      }
+    } catch (e) {
+      terror('screen.appendLog', 'write threw', { err: errInfo(e), source: entry.source });
     }
   }, []);
 
@@ -274,12 +282,23 @@ export default function ExecPocScreen() {
   // Re-mount the terminal with a clean buffer after a render error, then nudge
   // the remote app to repaint into the fresh screen.
   const handleTerminalReset = useCallback(() => {
+    tinfo('screen.reset', 'terminal error boundary reset — remounting with fresh buffer');
     setTerminalEpoch((e) => e + 1);
     setTimeout(() => {
       termRef.current?.focus();
       if (client.getState() === 'open') client.send('\f', false);
     }, 50);
   }, [client]);
+
+  const copyLogs = useCallback(async () => {
+    const dump = dumpTerminalLog();
+    try {
+      await Clipboard.setStringAsync(dump);
+      Alert.alert('Terminal logs copied', `${dump.split('\n').length} lines copied to clipboard. Paste them to share.`);
+    } catch (e) {
+      Alert.alert('Copy failed', (e as Error).message);
+    }
+  }, []);
 
   const isConnected = state === 'open';
 
@@ -301,6 +320,9 @@ export default function ExecPocScreen() {
             </Text>
           </View>
           <View style={styles.headerActions}>
+            <Pressable onPress={copyLogs} onLongPress={() => { clearTerminalLog(); Alert.alert('Terminal logs cleared'); }} hitSlop={8}>
+              <Text style={styles.headerLink}>Logs</Text>
+            </Pressable>
             <Pressable onPress={() => setShowSetup((v) => !v)} hitSlop={8}>
               <Text style={[styles.headerLink, showSetup && { color: '#58a6ff' }]}>
                 {showSetup ? 'Hide' : 'Setup'}

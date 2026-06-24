@@ -39,6 +39,7 @@ import {
 } from 'react-native-reanimated';
 import { TerminalBuffer, ANSI_COLORS, BufferLine } from './TerminalBuffer';
 import { AttrFlags, CellAttrs } from './AnsiParser';
+import { terror, tdebug, errInfo } from './terminalLog';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Theme
@@ -94,6 +95,15 @@ function isCellSelected(x: number, y: number, sel: SelectionRange | null): boole
 // Color resolution
 // ────────────────────────────────────────────────────────────────────────────
 
+// Skia throws on a color string it can't parse. Everything we generate *should* be
+// valid hex / rgb(), but a malformed theme entry or out-of-range palette index would
+// otherwise crash the native renderer. Validate before handing a color to Skia.
+const VALID_COLOR_RE = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|transparent)$/;
+function safeColor(color: string | undefined | null, fallback: string): string {
+  if (typeof color === 'string' && VALID_COLOR_RE.test(color)) return color;
+  return fallback;
+}
+
 function resolveColor(attrs: CellAttrs, isFg: boolean, theme: TerminalTheme): string {
   const rgb = isFg ? attrs.fgRGB : attrs.bgRGB;
   const idx = isFg ? attrs.fg : attrs.bg;
@@ -126,7 +136,11 @@ function resolveCellColors(attrs: CellAttrs, theme: TerminalTheme): { fg: string
   if (attrs.flags & AttrFlags.INVISIBLE) {
     fg = bg === 'transparent' ? theme.background : bg;
   }
-  return { fg, bg };
+  // Final guard: never hand Skia a color it can't parse.
+  return {
+    fg: safeColor(fg, safeColor(theme.foreground, DEFAULT_THEME.foreground)),
+    bg: safeColor(bg, 'transparent'),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -241,18 +255,33 @@ export interface CellMetrics {
   strikeY: number;
 }
 
+/** A finite, strictly-positive fallback. Guards against NaN/0/Infinity metrics from a
+ *  bad font, which would otherwise propagate NaN into Skia coordinates and can crash
+ *  the native renderer (uncatchable by the JS error boundary). */
+function posFinite(value: number, fallback: number): number {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 export function measureCell(font: SkFont, fontSize: number): CellMetrics {
-  const glyphWidths = font.getGlyphWidths(font.getGlyphIDs('W'));
-  const cellWidth = glyphWidths.length > 0 ? glyphWidths[0] : fontSize * 0.6;
+  let rawWidth = fontSize * 0.6;
+  try {
+    const glyphWidths = font.getGlyphWidths(font.getGlyphIDs('W'));
+    if (glyphWidths.length > 0 && Number.isFinite(glyphWidths[0]) && glyphWidths[0] > 0) {
+      rawWidth = glyphWidths[0];
+    }
+  } catch {
+    // fall back to estimate
+  }
+  const cellWidth = posFinite(rawWidth, fontSize * 0.6);
 
   const m = font.getMetrics();
-  const ascent = Math.abs(m.ascent);
-  const descent = Math.abs(m.descent);
-  const leading = m.leading || 0;
+  const ascent = posFinite(Math.abs(m.ascent), fontSize * 0.8);
+  const descent = posFinite(Math.abs(m.descent), fontSize * 0.2);
+  const leading = Number.isFinite(m.leading) ? Math.max(0, m.leading) : 0;
   const lineHeight = ascent + descent + leading;
 
-  const cellHeight = Math.ceil(lineHeight * 1.15);
-  const baseline = Math.ceil(ascent + (cellHeight - lineHeight) / 2);
+  const cellHeight = posFinite(Math.ceil(lineHeight * 1.15), Math.ceil(fontSize * 1.2));
+  const baseline = posFinite(Math.ceil(ascent + (cellHeight - lineHeight) / 2), Math.ceil(fontSize * 0.96));
   const underlineY = baseline + Math.ceil(descent * 0.4);
   const strikeY = baseline - Math.ceil(ascent * 0.35);
 
@@ -460,8 +489,12 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
 
   const renderCursor = (): React.ReactNode | null => {
     if (buffer.ydisp !== 0) return null;
-    const cx = cursor.x * cellWidth;
-    const cy = cursor.y * cellHeight;
+    // Clamp into the visible grid; a stray NaN/out-of-range cursor would push a NaN
+    // coordinate into Skia and can crash the native renderer.
+    const colN = Number.isFinite(cursor.x) ? Math.max(0, Math.min(buffer.cols - 1, cursor.x)) : 0;
+    const rowN = Number.isFinite(cursor.y) ? Math.max(0, Math.min(buffer.rows - 1, cursor.y)) : 0;
+    const cx = colN * cellWidth;
+    const cy = rowN * cellHeight;
 
     // If the app hid the cursor (e.g. Claude Code TUI), show a thin bar
     // so the user still sees where input goes. Use the full cursor style
@@ -471,8 +504,8 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
     const inner = (() => {
       switch (style) {
         case 'block': {
-          const line = viewportLines[cursor.y];
-          const cell = line?.[cursor.x];
+          const line = viewportLines[rowN];
+          const cell = line?.[colN];
           return (
             <>
               <Rect x={cx} y={cy} width={cellWidth} height={cellHeight} color={theme.cursor} />
@@ -504,11 +537,44 @@ export const SkiaTerminalRenderer: React.FC<SkiaTerminalRendererProps> = ({
 
   // ── Render ────────────────────────────────────────────────────────
 
+  // Per-row guard: a JS throw while building a row's Skia nodes drops just that row
+  // (logged) instead of failing the whole render tree.
+  const safeRows: React.ReactNode[] = [];
+  for (let i = 0; i < viewportLines.length; i++) {
+    try {
+      safeRows.push(renderRow(viewportLines[i], i));
+    } catch (e) {
+      terror('render.row', `row ${i} threw`, { err: errInfo(e), cols: buffer.cols, rows: buffer.rows });
+    }
+  }
+
+  let cursorNode: React.ReactNode = null;
+  try {
+    cursorNode = renderCursor();
+  } catch (e) {
+    terror('render.cursor', 'cursor render threw', {
+      err: errInfo(e),
+      cursor: { x: cursor.x, y: cursor.y },
+    });
+  }
+
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : 1;
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : 1;
+  const safeBg = safeColor(theme.background, DEFAULT_THEME.background);
+
+  tdebug('render', 'frame', {
+    v: renderVersion, w: safeWidth, h: safeHeight,
+    cols: buffer.cols, rows: buffer.rows,
+    cell: { w: cellWidth, h: cellHeight },
+    cur: { x: cursor.x, y: cursor.y, vis: cursor.visible },
+    lines: viewportLines.length,
+  });
+
   return (
-    <Canvas style={{ width, height }}>
-      <Fill color={theme.background} />
-      {viewportLines.map((line, i) => renderRow(line, i))}
-      {renderCursor()}
+    <Canvas style={{ width: safeWidth, height: safeHeight }}>
+      <Fill color={safeBg} />
+      {safeRows}
+      {cursorNode}
     </Canvas>
   );
 };
