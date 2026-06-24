@@ -21,7 +21,7 @@ import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream
 import { CodexStreamParser } from '@/services/codex-stream';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import * as api from '@/services/api';
-import { loadToken } from '@/services/auth';
+import { ensureProvisionedOnce } from '@/services/provision';
 import { getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
 
 const CODEX_MODEL = 'gpt-5-codex';
@@ -727,19 +727,16 @@ export function useChat(options: UseChatOptions) {
 
       const commandParts: string[] = [];
 
+      // Credentials (git identity, GitHub HTTPS auth, Claude OAuth) are written
+      // to the sprite once — at creation, or lazily here on first use this
+      // session — so they aren't re-sent on every chat command.
+      await ensureProvisionedOnce(spriteName);
+
       commandParts.push(`mkdir -p ${workingDirectory}`);
       commandParts.push(`cd ${workingDirectory}`);
-
-      const [gitName, gitEmail] = await Promise.all([getSetting('gitName'), getSetting('gitEmail')]);
-
-      if (gitName) {
-        const escapedName = gitName.replace(/'/g, "'\\''");
-        commandParts.push(`git config --global user.name '${escapedName}'`);
-      }
-      if (gitEmail) {
-        const escapedEmail = gitEmail.replace(/'/g, "'\\''");
-        commandParts.push(`git config --global user.email '${escapedEmail}'`);
-      }
+      // Load the persisted Claude OAuth token (env-var path); harmless no-op when
+      // a captured login credentials file is used instead.
+      commandParts.push('. ~/.sprite_env 2>/dev/null || true');
 
       if (provider === 'claude') {
         const claudePrompt = claudeSessionIdRef.current
@@ -747,10 +744,6 @@ export function useChat(options: UseChatOptions) {
           : buildFallbackPrompt(historyBeforeSend, prompt);
         const escapedClaudePrompt = claudePrompt.replace(/'/g, "'\\''");
 
-        const claudeToken = await loadToken('claudeToken');
-        if (claudeToken) {
-          commandParts.push(`export CLAUDE_CODE_OAUTH_TOKEN='${claudeToken}'`);
-        }
         commandParts.push('export NO_DNA=1');
 
         let claudeCmd =
