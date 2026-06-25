@@ -26,7 +26,7 @@ import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { ClaudeSessionSummary } from '@/services/claude-sessions';
-import { PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages } from '@/services/storage';
+import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
@@ -69,6 +69,7 @@ export default function SpriteDetailScreen() {
   const [chatProvider, setChatProvider] = useState<AgentProvider>('claude');
   const [claudeSessionId, setClaudeSessionId] = useState<string | undefined>();
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
+  const [activeRun, setActiveRun] = useState<ActiveChatRun | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
   const [sessionBrowserVisible, setSessionBrowserVisible] = useState(false);
@@ -90,6 +91,7 @@ export default function SpriteDetailScreen() {
     provider: chatProvider,
     initialClaudeSessionId: claudeSessionId,
     initialCodexSessionId: codexSessionId,
+    initialActiveRun: activeRun,
     onSessionIdsChange: (sessionIds) => {
       setClaudeSessionId(sessionIds.claudeSessionId);
       setCodexSessionId(sessionIds.codexSessionId);
@@ -102,6 +104,15 @@ export default function SpriteDetailScreen() {
               codexSessionId: sessionIds.codexSessionId,
             }
           : chatMeta
+      );
+      chatListRef.current = updated;
+      saveChatList(spriteName, updated);
+    },
+    onActiveRunChange: (nextActiveRun) => {
+      setActiveRun(nextActiveRun);
+      if (!chatId) return;
+      const updated = chatListRef.current.map((chatMeta) =>
+        chatMeta.id === chatId ? { ...chatMeta, activeRun: nextActiveRun } : chatMeta
       );
       chatListRef.current = updated;
       saveChatList(spriteName, updated);
@@ -134,6 +145,7 @@ export default function SpriteDetailScreen() {
         setChatProvider(normalizeProvider(current.provider));
         setClaudeSessionId(current.claudeSessionId);
         setCodexSessionId(current.codexSessionId);
+        setActiveRun(current.activeRun);
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
         const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
@@ -157,6 +169,7 @@ export default function SpriteDetailScreen() {
         setChatProvider(defaultProvider);
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
+        setActiveRun(undefined);
         setWorkingDirectory(fallbackDir);
       }
     })();
@@ -174,6 +187,13 @@ export default function SpriteDetailScreen() {
       if (mounted) setIsLoadingSprite(false);
     })();
     return () => { mounted = false; };
+  }, [spriteName]);
+
+  // Old builds ran chat turns as persistent `wisp-*` services. Clean those up
+  // when the sprite opens so they cannot restart and replay prompts into Claude.
+  useEffect(() => {
+    if (!spriteName) return;
+    api.cleanupLegacyChatServices(spriteName).catch(() => {});
   }, [spriteName]);
 
   // Load chat session when chatId changes (or when forced via reloadNonce).
@@ -247,6 +267,7 @@ export default function SpriteDetailScreen() {
     setWorkingDirectory(dir);
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
+    setActiveRun(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
   }, [chat.isStreaming, chat.interrupt, spriteName]);
@@ -276,6 +297,7 @@ export default function SpriteDetailScreen() {
     setChatProvider(normalizeProvider(selectedChat.provider));
     setClaudeSessionId(selectedChat.claudeSessionId);
     setCodexSessionId(selectedChat.codexSessionId);
+    setActiveRun(selectedChat.activeRun);
     setWorkingDirectory(selectedChat.workingDirectory || defaultDirectory);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
@@ -333,6 +355,7 @@ export default function SpriteDetailScreen() {
       setChatProvider('claude');
       setClaudeSessionId(session.id);
       setCodexSessionId(undefined);
+      setActiveRun(undefined);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
       setChatId(target.id);
