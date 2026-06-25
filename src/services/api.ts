@@ -5,6 +5,13 @@ import { Platform } from 'react-native';
 import { loadToken } from './auth';
 
 const BASE_URL = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
+const WS_BASE_URL = Platform.OS === 'web' ? 'ws://localhost:8082/v1' : 'wss://api.sprites.dev/v1';
+
+type RNWebSocketCtor = new (
+  url: string,
+  protocols?: string | string[] | null,
+  options?: { headers?: Record<string, string> } | null
+) => WebSocket;
 
 class AppError extends Error {
   constructor(public code: string, message: string, public statusCode?: number) {
@@ -330,6 +337,276 @@ export async function streamServiceLogs(
   }
 }
 
+// MARK: - Exec Streaming
+
+interface StreamExecOptions {
+  attachSessionId?: string;
+  path?: string;
+  maxRunAfterDisconnect?: string;
+  tty?: boolean;
+  stdin?: boolean;
+  onSessionId?: (sessionId: string) => void;
+}
+
+function createAbortError(): Error {
+  const error = new Error('Aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function makeExecWsUrl(
+  spriteName: string,
+  command: string[],
+  token: string,
+  options: StreamExecOptions
+): string {
+  if (options.attachSessionId) {
+    const params = new URLSearchParams();
+    if (Platform.OS === 'web') params.set('token', token);
+    const query = params.toString();
+    return `${WS_BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(options.attachSessionId)}${query ? `?${query}` : ''}`;
+  }
+
+  const params = new URLSearchParams();
+  for (const part of command) params.append('cmd', part);
+  params.set('path', options.path ?? command[0] ?? 'bash');
+  params.set('tty', options.tty ? 'true' : 'false');
+  params.set('stdin', options.stdin ? 'true' : 'false');
+  params.set('max_run_after_disconnect', options.maxRunAfterDisconnect ?? '0s');
+  if (Platform.OS === 'web') params.set('token', token);
+
+  return `${WS_BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
+}
+
+async function messageDataToBytes(data: unknown): Promise<Uint8Array | undefined> {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return new Uint8Array(await data.arrayBuffer());
+  }
+  return undefined;
+}
+
+async function messageDataToText(data: unknown): Promise<string> {
+  if (typeof data === 'string') return data;
+  const bytes = await messageDataToBytes(data);
+  if (bytes) return new TextDecoder().decode(bytes);
+  return String(data ?? '');
+}
+
+function extractExecSessionId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const obj = payload as Record<string, unknown>;
+  const direct = obj.session_id ?? obj.sessionId;
+  if (typeof direct === 'string') return direct;
+  if (typeof direct === 'number') return String(direct);
+  return undefined;
+}
+
+function parseExecExitCode(bytes: Uint8Array): number {
+  if (bytes.length === 0) return 0;
+  if (bytes.length === 1) return bytes[0];
+
+  const text = new TextDecoder().decode(bytes).trim();
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : bytes[0];
+}
+
+function stringLooksLikeBinaryFrame(text: string): boolean {
+  if (!text) return false;
+  const streamId = text.charCodeAt(0);
+  return streamId >= 0 && streamId <= 4;
+}
+
+function stringToBytes(text: string): Uint8Array {
+  return Uint8Array.from(Array.from(text, (ch) => ch.charCodeAt(0) & 0xff));
+}
+
+/**
+ * Stream a one-shot command through the Exec API.
+ *
+ * Chat turns must not use the Services API: services are persistent supervised
+ * processes and may be restarted by the sprite service manager, replaying the
+ * same prompt into `claude --resume`. Exec sessions do not auto-restart, and
+ * `max_run_after_disconnect` explicitly controls disconnect behavior.
+ */
+export async function streamExec(
+  spriteName: string,
+  command: string[],
+  onEvent: (event: ServiceLogEvent) => void,
+  signal?: AbortSignal,
+  options: StreamExecOptions = {}
+): Promise<void> {
+  const token = await getToken();
+  const url = makeExecWsUrl(spriteName, command, token, options);
+  const stdoutDecoder = new TextDecoder();
+  const stderrDecoder = new TextDecoder();
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
+    let socket: WebSocket | null = null;
+    let settled = false;
+    let sawExit = false;
+
+    const cleanup = () => {
+      signal?.removeEventListener('abort', handleAbort);
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+      }
+    };
+
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) {
+        reject(err);
+      } else {
+        onEvent({ type: 'complete' });
+        resolve();
+      }
+    };
+
+    const closeSocket = () => {
+      if (!socket) return;
+      if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) return;
+      socket.close();
+    };
+
+    function handleAbort() {
+      closeSocket();
+      settle(createAbortError());
+    }
+
+    const handleJsonMessage = (payload: unknown): boolean => {
+      if (!payload || typeof payload !== 'object') return false;
+      const obj = payload as Record<string, unknown>;
+      const sessionId = extractExecSessionId(obj);
+      if (sessionId) options.onSessionId?.(sessionId);
+
+      if (obj.type === 'session_info') {
+        onEvent({ type: 'started' });
+        return true;
+      }
+
+      if (obj.type === 'exit') {
+        sawExit = true;
+        const exitCode =
+          typeof obj.exit_code === 'number' ? obj.exit_code :
+          typeof obj.exitCode === 'number' ? obj.exitCode :
+          0;
+        onEvent({ type: 'exit', exit_code: exitCode });
+        closeSocket();
+        return true;
+      }
+
+      return false;
+    };
+
+    const handleTextMessage = (text: string): boolean => {
+      try {
+        return handleJsonMessage(JSON.parse(text));
+      } catch {
+        return false;
+      }
+    };
+
+    const handleBinaryMessage = (bytes: Uint8Array) => {
+      if (bytes.length === 0) return;
+      const streamId = bytes[0];
+      const payload = bytes.slice(1);
+
+      if (streamId === 1) {
+        const data = stdoutDecoder.decode(payload, { stream: true });
+        if (data) onEvent({ type: 'stdout', data });
+      } else if (streamId === 2) {
+        const data = stderrDecoder.decode(payload, { stream: true });
+        if (data) onEvent({ type: 'stderr', data });
+      } else if (streamId === 3) {
+        const stdoutRemainder = stdoutDecoder.decode();
+        const stderrRemainder = stderrDecoder.decode();
+        if (stdoutRemainder) onEvent({ type: 'stdout', data: stdoutRemainder });
+        if (stderrRemainder) onEvent({ type: 'stderr', data: stderrRemainder });
+        sawExit = true;
+        onEvent({ type: 'exit', exit_code: parseExecExitCode(payload) });
+        closeSocket();
+      }
+    };
+
+    signal?.addEventListener('abort', handleAbort, { once: true });
+
+    if (Platform.OS === 'web') {
+      socket = new WebSocket(url);
+    } else {
+      const RNWebSocket = WebSocket as unknown as RNWebSocketCtor;
+      socket = new RNWebSocket(url, undefined, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    }
+
+    socket.binaryType = 'arraybuffer';
+
+    socket.onopen = () => {
+      onEvent({ type: 'started' });
+    };
+
+    socket.onmessage = async (event) => {
+      try {
+        if (typeof event.data === 'string') {
+          if (stringLooksLikeBinaryFrame(event.data)) {
+            handleBinaryMessage(stringToBytes(event.data));
+            return;
+          }
+          if (!handleTextMessage(event.data)) {
+            onEvent({ type: 'stdout', data: event.data });
+          }
+          return;
+        }
+
+        const bytes = await messageDataToBytes(event.data);
+        if (bytes) {
+          handleBinaryMessage(bytes);
+          return;
+        }
+
+        const text = await messageDataToText(event.data);
+        if (!handleTextMessage(text)) {
+          onEvent({ type: 'stdout', data: text });
+        }
+      } catch (err) {
+        settle(err as Error);
+      }
+    };
+
+    socket.onerror = () => {
+      closeSocket();
+      settle(new AppError('networkError', 'Exec WebSocket error'));
+    };
+
+    socket.onclose = () => {
+      if (signal?.aborted) {
+        settle(createAbortError());
+        return;
+      }
+      if (!sawExit) {
+        onEvent({ type: 'exit', exit_code: 0 });
+      }
+      settle();
+    };
+  });
+}
+
 /**
  * Start a long-running service and let it keep running in the background.
  * `streamService` only resolves when the service exits, so this fires it without
@@ -386,6 +663,28 @@ export async function deleteService(spriteName: string, serviceName: string): Pr
   await apiRequest<{}>('DELETE', `/sprites/${spriteName}/services/${serviceName}`, undefined, 5);
 }
 
+export async function listServices(spriteName: string): Promise<ServiceInfo[]> {
+  const result = await apiRequest<ServiceInfo[] | { services?: ServiceInfo[] }>(
+    'GET',
+    `/sprites/${spriteName}/services`
+  );
+  if (Array.isArray(result)) return result;
+  if (result && Array.isArray(result.services)) return result.services;
+  return [];
+}
+
+export async function cleanupLegacyChatServices(spriteName: string): Promise<void> {
+  const stalePrefixes = ['wisp-claude-', 'wisp-codex-', 'wisp-exec-'];
+  const services = await listServices(spriteName);
+  const staleServices = services.filter((service) =>
+    stalePrefixes.some((prefix) => service.name.startsWith(prefix))
+  );
+
+  await Promise.allSettled(
+    staleServices.map((service) => deleteService(spriteName, service.name))
+  );
+}
+
 // MARK: - Exec Sessions
 
 export interface ExecSession {
@@ -411,11 +710,45 @@ export async function listExecSessions(spriteName: string): Promise<ExecSession[
   }
 }
 
+export async function killExecSession(
+  spriteName: string,
+  sessionId: string,
+  signal: string = 'SIGTERM',
+  timeout: string = '5s'
+): Promise<void> {
+  const token = await getToken();
+  const params = new URLSearchParams({ signal, timeout });
+  const response = await fetch(
+    `${BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(sessionId)}/kill?${params.toString()}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (response.status === 401) throw new AppError('unauthorized', 'Unauthorized');
+  if (response.status === 404) throw new AppError('notFound', 'Not found');
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new AppError('serverError', text || `Kill error ${response.status}`, response.status);
+  }
+
+  const reader = response.body?.getReader();
+  if (reader) {
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+  }
+}
+
 // MARK: - Exec Helpers
 
 /**
- * Run a short command on a sprite via the service API.
- * Creates a temporary service, collects output, and cleans up.
+ * Run a short command on a sprite via the Exec API.
+ * Creates a temporary exec session and collects stdout.
  * Used for simple operations like waking sprites or fetching session info.
  */
 export async function runExec(
@@ -423,42 +756,35 @@ export async function runExec(
   command: string,
   timeout: number = 15
 ): Promise<{ output: string; success: boolean }> {
-  const serviceName = `wisp-exec-${Date.now().toString(36)}`;
-  const config: ServiceRequest = {
-    cmd: 'bash',
-    args: ['-c', command],
-  };
-
   let output = '';
-  let success = false;
+  let exitCode: number | undefined;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout * 1000);
 
   try {
-    await streamService(
+    await streamExec(
       spriteName,
-      serviceName,
-      config,
+      ['bash', '-c', command],
       (event) => {
         if (event.type === 'stdout' && event.data) {
           output += event.data;
         } else if (event.type === 'exit') {
-          success = event.exit_code === 0;
+          exitCode = event.exit_code ?? 0;
         }
       },
       controller.signal,
-      `${timeout}s`
+      {
+        path: '/bin/bash',
+        maxRunAfterDisconnect: '1s',
+      }
     );
-    success = true;
   } catch (err: any) {
     if (err.name !== 'AbortError') {
-      success = false;
+      exitCode = exitCode ?? 1;
     }
   } finally {
     clearTimeout(timer);
-    // Best-effort cleanup
-    deleteService(spriteName, serviceName).catch(() => {});
   }
 
-  return { output, success };
+  return { output, success: exitCode === 0 };
 }
