@@ -134,6 +134,10 @@ export default function TtydTerminalScreen() {
   const webViewRef = useRef<any>(null);
   const progressBucketRef = useRef(-1);
   const serviceAbortRef = useRef<AbortController | null>(null);
+  const logBufferRef = useRef<TtydLog[]>([]);
+  const flushScheduledRef = useRef(false);
+  const reloadAttemptsRef = useRef(0);
+  const lastCrashRef = useRef(0);
   const [host, setHost] = useState(DEFAULT_HOST);
   const [username, setUsername] = useState(DEFAULT_USER);
   const [password, setPassword] = useState(DEFAULT_PASS);
@@ -144,6 +148,8 @@ export default function TtydTerminalScreen() {
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<TtydLog[]>([]);
   const [showLogs, setShowLogs] = useState(true);
+  // Bumping this remounts the WebView with a fresh content process after a crash.
+  const [webViewKey, setWebViewKey] = useState(0);
 
   const displayUrl = host.trim().replace(/\/+$/, '');
   const authedUrl = useMemo(
@@ -151,12 +157,23 @@ export default function TtydTerminalScreen() {
     [displayUrl, username, password]
   );
 
+  // Buffer log lines and flush on a timer, so a flood of WebView messages (e.g.
+  // a resize-error burst while a command streams output) collapses into one
+  // state update instead of one render per message.
   const appendLog = useCallback((message: string) => {
-    const timestamp = Date.now();
-    setLogs((previous) => {
-      const next = previous.length >= MAX_LOG_LINES ? previous.slice(previous.length - MAX_LOG_LINES + 1) : previous;
-      return [...next, { message, timestamp }];
-    });
+    logBufferRef.current.push({ message, timestamp: Date.now() });
+    if (flushScheduledRef.current) return;
+    flushScheduledRef.current = true;
+    setTimeout(() => {
+      flushScheduledRef.current = false;
+      const pending = logBufferRef.current;
+      logBufferRef.current = [];
+      if (!pending.length) return;
+      setLogs((previous) => {
+        const merged = previous.concat(pending);
+        return merged.length > MAX_LOG_LINES ? merged.slice(merged.length - MAX_LOG_LINES) : merged;
+      });
+    }, 200);
   }, []);
 
   const clearLogs = useCallback(() => {
@@ -171,6 +188,42 @@ export default function TtydTerminalScreen() {
     await Clipboard.setStringAsync(output);
     appendLog('logs: copied to clipboard');
   }, [appendLog, logs]);
+
+  // The WebView's content/render process can be killed by the OS when xterm.js
+  // buffers heavy command output (OOM). Unhandled, that crashes the whole app on
+  // Android. Remount the WebView to recover, capped to avoid a crash loop.
+  const recoverWebView = useCallback(
+    (reason: string) => {
+      const now = Date.now();
+      if (now - lastCrashRef.current > 30000) reloadAttemptsRef.current = 0;
+      lastCrashRef.current = now;
+      reloadAttemptsRef.current += 1;
+
+      if (reloadAttemptsRef.current > 3) {
+        appendLog(`terminal crashed repeatedly: ${reason}`);
+        setError('Terminal ran out of memory from heavy output. Reconnect to start a fresh session.');
+        setIsConnected(false);
+        setLoading(false);
+        return;
+      }
+
+      appendLog(`recovering terminal (attempt ${reloadAttemptsRef.current}): ${reason}`);
+      setLoading(true);
+      setWebViewKey((key) => key + 1);
+    },
+    [appendLog]
+  );
+
+  const handleRenderProcessGone = useCallback(
+    (event: { nativeEvent?: { didCrash?: boolean } }) => {
+      recoverWebView(`android render process gone (didCrash=${event?.nativeEvent?.didCrash ?? '?'})`);
+    },
+    [recoverWebView]
+  );
+
+  const handleContentProcessDidTerminate = useCallback(() => {
+    recoverWebView('ios content process terminated');
+  }, [recoverWebView]);
 
   // Prefill the host from the sprite's public URL when launched for a sprite.
   useEffect(() => {
@@ -264,8 +317,19 @@ export default function TtydTerminalScreen() {
         }
       }
 
+      var __lastPost = {};
+      var rlPost = function(type, payload) {
+        var now = Date.now();
+        if (__lastPost[type] && now - __lastPost[type] < 1000) return;
+        __lastPost[type] = now;
+        post(type, payload);
+      };
+
       window.addEventListener('error', function(event) {
-        post('window-error', {
+        // ResizeObserver loop warnings fire in bursts when the terminal refits
+        // around streaming output — benign, and forwarding them floods the bridge.
+        if (event.message && event.message.indexOf('ResizeObserver') !== -1) return;
+        rlPost('window-error', {
           message: event.message,
           source: event.filename,
           line: event.lineno,
@@ -274,7 +338,7 @@ export default function TtydTerminalScreen() {
       });
 
       window.addEventListener('unhandledrejection', function(event) {
-        post('promise-rejection', { reason: String(event.reason) });
+        rlPost('promise-rejection', { reason: String(event.reason) });
       });
 
       var meta = document.createElement('meta');
@@ -352,7 +416,9 @@ export default function TtydTerminalScreen() {
         `fi`,
         `if ! command -v ttyd >/dev/null 2>&1; then echo "could not install ttyd automatically — install it manually and retry"; exit 127; fi`,
         `echo "starting ttyd on :8080";`,
-        `exec ttyd -W -p 8080 -c '${safeUser}:${safePass}' claude`,
+        // -t scrollback caps xterm.js's in-memory buffer so heavy output doesn't
+        // OOM-kill the WebView; -t disableLeaveAlert avoids a beforeunload prompt.
+        `exec ttyd -W -t scrollback=2000 -t disableLeaveAlert=true -p 8080 -c '${safeUser}:${safePass}' claude`,
       ].join('\n');
 
       serviceAbortRef.current?.abort();
@@ -527,6 +593,7 @@ export default function TtydTerminalScreen() {
           {WebViewComponent ? (
             <WebViewComponent
               ref={webViewRef}
+              key={webViewKey}
               source={{ uri: authedUrl, headers: authHeaders }}
               basicAuthCredential={{ username, password }}
               onShouldStartLoadWithRequest={handleShouldStartLoad}
@@ -538,6 +605,8 @@ export default function TtydTerminalScreen() {
               onLoadProgress={handleLoadProgress}
               onNavigationStateChange={handleNavigationStateChange}
               onMessage={handleMessage}
+              onRenderProcessGone={handleRenderProcessGone}
+              onContentProcessDidTerminate={handleContentProcessDidTerminate}
               injectedJavaScript={injectedJS}
               originWhitelist={['*']}
               javaScriptEnabled
@@ -546,6 +615,8 @@ export default function TtydTerminalScreen() {
               thirdPartyCookiesEnabled
               mixedContentMode="compatibility"
               allowsInlineMediaPlayback
+              androidLayerType="hardware"
+              setSupportMultipleWindows={false}
               style={styles.webview}
             />
           ) : (
