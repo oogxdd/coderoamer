@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { useCallback, useRef, useState } from 'react';
 import {
   AgentProvider,
   ChatContent,
@@ -17,13 +16,13 @@ import {
   ClaudeToolResultEvent,
 } from '@/models/claude-events';
 import { CodexStreamEvent } from '@/models/codex-events';
-import { ServiceLogEvent, ServiceRequest } from '@/models/service';
+import { ServiceLogEvent } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
-import { getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
+import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
 
 const CODEX_MODEL = 'gpt-5-codex';
 
@@ -39,13 +38,35 @@ interface UseChatOptions {
   provider: AgentProvider;
   initialClaudeSessionId?: string;
   initialCodexSessionId?: string;
-  initialServiceName?: string;
+  initialActiveRun?: ActiveChatRun;
   onSessionIdsChange?: (sessionIds: SessionIds) => void;
+  onActiveRunChange?: (activeRun: ActiveChatRun | undefined) => void;
   onCodexAuthIssue?: (message: string) => void;
 }
 
-function makeServiceName(provider: AgentProvider): string {
-  return `wisp-${provider}-${makeId()}`;
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function safeTaskName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
+}
+
+function withSpriteTaskHeartbeat(command: string, taskName: string): string {
+  const quotedTaskName = shellQuote(taskName);
+  return [
+    `TASK_NAME=${quotedTaskName}`,
+    `TASK_EXPIRE=5m`,
+    `sprite_task_api() { curl -sS --unix-socket /.sprite/api.sock -H "Content-Type: application/json" "$@" >/dev/null 2>&1 || true; }`,
+    `sprite_task_put() { sprite_task_api -X PUT "http://sprite/v1/tasks/$TASK_NAME" -d "{\\"expire\\":\\"$TASK_EXPIRE\\"}"; }`,
+    `sprite_task_delete() { sprite_task_api -X DELETE "http://sprite/v1/tasks/$TASK_NAME"; }`,
+    'cleanup() { status=$?; trap - EXIT INT TERM; if [ -n "${LOG_HBEAT:-}" ]; then kill "$LOG_HBEAT" 2>/dev/null || true; wait "$LOG_HBEAT" 2>/dev/null || true; fi; if [ -n "${TASK_HBEAT:-}" ]; then kill "$TASK_HBEAT" 2>/dev/null || true; wait "$TASK_HBEAT" 2>/dev/null || true; fi; sprite_task_delete; exit "$status"; }',
+    `trap cleanup EXIT INT TERM`,
+    `sprite_task_put`,
+    `(while true; do sleep 60; sprite_task_put; done) & TASK_HBEAT=$!`,
+    `(while true; do sleep 20; printf . >&2; done) & LOG_HBEAT=$!`,
+    command,
+  ].join('; ');
 }
 
 function classifyCodexAuthIssue(raw: string): string | undefined {
@@ -153,8 +174,6 @@ function debugChat(...args: unknown[]) {
   console.log('[chat-debug]', ...args);
 }
 
-const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 export function useChat(options: UseChatOptions) {
   const { spriteName, chatId, workingDirectory, provider } = options;
 
@@ -167,7 +186,8 @@ export function useChat(options: UseChatOptions) {
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
-  const serviceNameRef = useRef<string>(options.initialServiceName ?? makeServiceName(provider));
+  const activeRunRef = useRef<ActiveChatRun | undefined>(options.initialActiveRun);
+  const execSessionIdRef = useRef<string | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const claudeParserRef = useRef(new ClaudeStreamParser());
   const codexParserRef = useRef(new CodexStreamParser());
@@ -182,12 +202,7 @@ export function useChat(options: UseChatOptions) {
   const serviceEventsSeenRef = useRef(0);
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
-  // A turn is "active" from send until it genuinely finishes or is interrupted —
-  // a dropped network connection (e.g. app backgrounded) does NOT end it, since
-  // the service keeps running on the sprite.
-  const turnActiveRef = useRef(false);
-  const sawExitRef = useRef(false);
-  const resumingRef = useRef(false);
+  const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -200,6 +215,14 @@ export function useChat(options: UseChatOptions) {
       codexSessionId: codexSessionIdRef.current,
     });
   }, [options.onSessionIdsChange]);
+
+  const setActiveRun = useCallback(
+    (activeRun: ActiveChatRun | undefined) => {
+      activeRunRef.current = activeRun;
+      options.onActiveRunChange?.(activeRun);
+    },
+    [options.onActiveRunChange]
+  );
 
   const setClaudeSessionId = useCallback(
     (sessionId: string | undefined) => {
@@ -236,6 +259,34 @@ export function useChat(options: UseChatOptions) {
     [chatId]
   );
 
+  const syncClaudeTranscript = useCallback(
+    async (loadRequest: number, resumeId: string | undefined) => {
+      if (provider !== 'claude' || !resumeId) return;
+
+      try {
+        const transcript = await readClaudeSessionMessages(spriteName, resumeId);
+        if (loadRequest !== loadRequestRef.current) return;
+        if (statusRef.current !== 'idle') return;
+        if (transcript.length === 0) return;
+        const local = messagesRef.current;
+        const transcriptTurns = countUserMessages(transcript);
+        const localTurns = countUserMessages(local);
+        // The app may already have persisted the user's in-flight turn before
+        // it was closed. In that case the turn counts are equal, but the
+        // transcript can now contain the completed assistant response.
+        if (local.length !== 0 && transcriptTurns < localTurns) return;
+        const merged = mergeTranscript(local, transcript);
+        if (conversationSignature(merged) === conversationSignature(local)) return;
+        messagesRef.current = merged;
+        setMessages(merged);
+        await saveChatMessages(chatId, merged);
+      } catch {
+        // Offline / no transcript yet — keep the local copy.
+      }
+    },
+    [chatId, provider, spriteName]
+  );
+
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
     const initialMessageCount = messagesRef.current.length;
@@ -247,6 +298,7 @@ export function useChat(options: UseChatOptions) {
 
     messagesRef.current = saved;
     setMessages(saved);
+    activeRunRef.current = options.initialActiveRun;
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
@@ -270,39 +322,75 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
     }
 
+    const activeRun = options.initialActiveRun;
+    if (activeRun && activeRun.provider === provider) {
+      activeUserMessageIdRef.current = activeRun.userMessageId;
+      activeAssistantMessageIdRef.current = activeRun.assistantMessageId;
+      execSessionIdRef.current = activeRun.execSessionId;
+      processedUUIDsRef.current = new Set();
+      claudeParserRef.current.reset();
+      codexParserRef.current.reset();
+      codexStderrRef.current = '';
+      codexSawAssistantRef.current = false;
+      serviceEventsSeenRef.current = 0;
+      setStatusTracked('reconnecting');
+
+      (async () => {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        try {
+          await api.streamExec(
+            spriteName,
+            [],
+            (event) => processServiceEventRef.current(event),
+            controller.signal,
+            { attachSessionId: activeRun.execSessionId }
+          );
+        } catch (err: any) {
+          if (err.name !== 'AbortError') {
+            debugChat('active exec attach failed', provider, err.message ?? err);
+          }
+        } finally {
+          if (abortRef.current === controller) {
+            abortRef.current = null;
+          }
+          execSessionIdRef.current = undefined;
+          activeUserMessageIdRef.current = undefined;
+          activeAssistantMessageIdRef.current = undefined;
+          assistantTextSeenRef.current = false;
+          setActiveRun(undefined);
+          setStatusTracked('idle');
+          await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
+          await persistMessages();
+        }
+      })();
+      return;
+    }
+
+    if (activeRun) {
+      setActiveRun(undefined);
+    }
+
     // Source-of-truth sync: if this chat resumes a known Claude session, pull its
     // on-disk transcript from the sprite. Catches turns that finished (or were
     // started from a terminal / another device) while the app was away — the same
     // history `claude --resume` would show. Runs in the background; guarded so it
     // never clobbers a fresh local send.
-    const resumeId = options.initialClaudeSessionId;
-    if (provider === 'claude' && resumeId) {
-      (async () => {
-        try {
-          const transcript = await readClaudeSessionMessages(spriteName, resumeId);
-          if (loadRequest !== loadRequestRef.current) return;
-          if (statusRef.current !== 'idle') return;
-          if (transcript.length === 0) return;
-          const local = messagesRef.current;
-          const transcriptTurns = countUserMessages(transcript);
-          const localTurns = countUserMessages(local);
-          // Only adopt the transcript when it clearly has more conversation than
-          // we have locally (or local is empty), to avoid churn on every open.
-          if (local.length !== 0 && transcriptTurns <= localTurns) return;
-          // Preserve ids for the shared prefix and bail if nothing actually
-          // changed — re-setting identical messages remounts every bubble and
-          // re-scrolls, which looked like the last turn being duplicated/re-run.
-          const merged = mergeTranscript(local, transcript);
-          if (conversationSignature(merged) === conversationSignature(local)) return;
-          messagesRef.current = merged;
-          setMessages(merged);
-          await saveChatMessages(chatId, merged);
-        } catch {
-          // Offline / no transcript yet — keep the local copy.
-        }
-      })();
-    }
-  }, [chatId, provider, spriteName, options.initialClaudeSessionId, options.initialCodexSessionId, setClaudeSessionId, setCodexSessionId]);
+    syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
+  }, [
+    chatId,
+    options.initialActiveRun,
+    options.initialClaudeSessionId,
+    options.initialCodexSessionId,
+    persistMessages,
+    provider,
+    setClaudeSessionId,
+    setCodexSessionId,
+    setActiveRun,
+    setStatusTracked,
+    spriteName,
+    syncClaudeTranscript,
+  ]);
 
   const ensureAssistantTarget = useCallback(
     (source: ChatMessage[]): { messages: ChatMessage[]; index: number } => {
@@ -632,7 +720,7 @@ export function useChat(options: UseChatOptions) {
   const processServiceEvent = useCallback(
     (event: ServiceLogEvent) => {
       serviceEventsSeenRef.current += 1;
-      debugChat('service event', provider, event.type);
+      debugChat('exec event', provider, event.type);
       switch (event.type) {
         case 'stdout': {
           if (!event.data) return;
@@ -670,9 +758,6 @@ export function useChat(options: UseChatOptions) {
           break;
         }
         case 'exit': {
-          // The service process finished — this turn is genuinely done (vs. a
-          // mere connection drop), so it's safe to stop reconnecting.
-          sawExitRef.current = true;
           const remaining =
             provider === 'claude'
               ? claudeParserRef.current.flush()
@@ -703,122 +788,7 @@ export function useChat(options: UseChatOptions) {
     },
     [handleClaudeEvent, handleCodexEvent, provider, setStatusTracked]
   );
-
-  // Pull the authoritative on-disk Claude transcript from the sprite and merge
-  // it in. This is the source of truth: it recovers the full answer even if the
-  // live stream was missed entirely (app closed/backgrounded during the turn).
-  const reconcileTranscript = useCallback(async () => {
-    if (provider !== 'claude') return;
-    const sessionId = claudeSessionIdRef.current;
-    if (!sessionId) return;
-    try {
-      const transcript = await readClaudeSessionMessages(spriteName, sessionId);
-      if (transcript.length === 0) return;
-      const local = messagesRef.current;
-      // Don't drop newer local turns; signature check avoids needless churn.
-      if (local.length !== 0 && countUserMessages(transcript) < countUserMessages(local)) return;
-      const merged = mergeTranscript(local, transcript);
-      if (conversationSignature(merged) === conversationSignature(local)) return;
-      messagesRef.current = merged;
-      setMessages(merged);
-      await saveChatMessages(chatId, merged);
-    } catch {
-      // Offline / no transcript yet — keep the local copy.
-    }
-  }, [provider, spriteName, chatId]);
-
-  // End-of-turn cleanup: flush parser tail, stop the (now-finished) service so
-  // Sprites doesn't respawn it, and return to idle.
-  const finalizeTurn = useCallback(
-    async (controller: AbortController) => {
-      const remaining =
-        provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
-      if (provider === 'claude') {
-        for (const parsed of remaining as ClaudeStreamEvent[]) {
-          if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
-          if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
-          handleClaudeEvent(parsed);
-        }
-      } else {
-        for (const parsed of remaining as CodexStreamEvent[]) {
-          handleCodexEvent(parsed);
-        }
-      }
-      if (provider === 'codex' && !codexSawAssistantRef.current) {
-        reportCodexAuthIssue(codexStderrRef.current);
-      }
-      if (abortRef.current === controller) {
-        api.deleteService(spriteName, serviceNameRef.current).catch(() => {});
-        abortRef.current = null;
-      }
-      turnActiveRef.current = false;
-      activeUserMessageIdRef.current = undefined;
-      activeAssistantMessageIdRef.current = undefined;
-      assistantTextSeenRef.current = false;
-      setStatusTracked('idle');
-      await persistMessages();
-    },
-    [
-      provider,
-      handleClaudeEvent,
-      handleCodexEvent,
-      reportCodexAuthIssue,
-      spriteName,
-      setStatusTracked,
-      persistMessages,
-    ]
-  );
-
-  // Re-attach to a still-running service's logs after a dropped connection.
-  // Dedup (by UUID) makes replay safe. Retries with backoff while foregrounded;
-  // when backgrounded it bails and the AppState listener resumes it on return.
-  const resumeTurn = useCallback(async () => {
-    if (!turnActiveRef.current || resumingRef.current) return;
-    const controller = abortRef.current;
-    if (!controller) return;
-    resumingRef.current = true;
-    const serviceName = serviceNameRef.current;
-    try {
-      let attempt = 0;
-      while (turnActiveRef.current && !controller.signal.aborted) {
-        setStatusTracked('reconnecting');
-        try {
-          await api.streamServiceLogs(spriteName, serviceName, processServiceEvent, controller.signal);
-          if (sawExitRef.current) {
-            // Process genuinely finished — sync the transcript and wrap up.
-            await reconcileTranscript();
-            await finalizeTurn(controller);
-            return;
-          }
-          // Logs stream ended but the process is still alive — re-attach shortly.
-          if (AppState.currentState !== 'active') return;
-          await delay(1000);
-          continue;
-        } catch (err: any) {
-          if (err?.name === 'AbortError' || controller.signal.aborted) return;
-          const code = err?.name === 'AppError' ? err.code : undefined;
-          if (code === 'notFound') {
-            // Service already cleaned up — recover the answer from the transcript.
-            await reconcileTranscript();
-            await finalizeTurn(controller);
-            return;
-          }
-          if (code === 'unauthorized') {
-            setErrorMessage(err.message ?? 'Unauthorized');
-            await finalizeTurn(controller);
-            return;
-          }
-          // Network drop. If backgrounded, stop — AppState 'active' will retry.
-          if (AppState.currentState !== 'active') return;
-          attempt += 1;
-          if (attempt > 5) return;
-          await delay(Math.min(1000 * attempt, 5000));
-        }
-      }
-    } finally {
-      resumingRef.current = false;
-    }
-  }, [spriteName, processServiceEvent, reconcileTranscript, finalizeTurn, setStatusTracked]);
+  processServiceEventRef.current = processServiceEvent;
 
   const sendMessage = useCallback(
     async (text?: string) => {
@@ -850,7 +820,9 @@ export function useChat(options: UseChatOptions) {
       activeUserMessageIdRef.current = userMessage.id;
       activeAssistantMessageIdRef.current = assistantMessage.id;
       assistantTextSeenRef.current = false;
-      updateMessages((prev) => [...prev, userMessage, assistantMessage]);
+      const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
+      updateMessages(() => pendingMessages);
+      await saveChatMessages(chatId, pendingMessages);
       debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
 
       const commandParts: string[] = [];
@@ -860,8 +832,8 @@ export function useChat(options: UseChatOptions) {
       // session — so they aren't re-sent on every chat command.
       await ensureProvisionedOnce(spriteName);
 
-      commandParts.push(`mkdir -p ${workingDirectory}`);
-      commandParts.push(`cd ${workingDirectory}`);
+      commandParts.push(`mkdir -p ${shellQuote(workingDirectory)}`);
+      commandParts.push(`cd ${shellQuote(workingDirectory)}`);
       // Load the persisted Claude OAuth token (env-var path); harmless no-op when
       // a captured login credentials file is used instead.
       commandParts.push('. ~/.sprite_env 2>/dev/null || true');
@@ -870,7 +842,6 @@ export function useChat(options: UseChatOptions) {
         const claudePrompt = claudeSessionIdRef.current
           ? prompt
           : buildFallbackPrompt(historyBeforeSend, prompt);
-        const escapedClaudePrompt = claudePrompt.replace(/'/g, "'\\''");
 
         commandParts.push('export NO_DNA=1');
 
@@ -883,43 +854,37 @@ export function useChat(options: UseChatOptions) {
           getSetting('customInstructions'),
         ]);
 
-        claudeCmd += ` --model ${modelId ?? 'sonnet'}`;
+        claudeCmd += ` --model ${shellQuote(modelId ?? 'sonnet')}`;
 
         if (maxTurns && maxTurns !== '0') {
-          claudeCmd += ` --max-turns ${maxTurns}`;
+          claudeCmd += ` --max-turns ${shellQuote(maxTurns)}`;
         }
 
         if (customInstructions && customInstructions.trim()) {
-          const escapedInstructions = customInstructions.replace(/'/g, "'\\''");
-          claudeCmd += ` --append-system-prompt '${escapedInstructions}'`;
+          claudeCmd += ` --append-system-prompt ${shellQuote(customInstructions)}`;
         }
 
         if (claudeSessionIdRef.current) {
-          claudeCmd += ` --resume ${claudeSessionIdRef.current}`;
+          claudeCmd += ` --resume ${shellQuote(claudeSessionIdRef.current)}`;
         }
-        claudeCmd += ` '${escapedClaudePrompt}'`;
+        claudeCmd += ` ${shellQuote(claudePrompt)}`;
 
-        commandParts.push(
-          `{ (while true; do sleep 20; printf . >&2; done) & HBEAT=$!; trap "kill $HBEAT 2>/dev/null" EXIT; ${claudeCmd}; kill $HBEAT 2>/dev/null; }`
-        );
+        commandParts.push(claudeCmd);
       } else {
         setModelName(CODEX_MODEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
           : buildFallbackPrompt(historyBeforeSend, prompt);
-        const escapedCodexPrompt = codexPrompt.replace(/'/g, "'\\''");
-        const escapedSessionId = codexSessionIdRef.current?.replace(/'/g, "'\\''");
 
         const codexCmd = codexSessionIdRef.current
-          ? `codex exec resume '${escapedSessionId}' --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox '${escapedCodexPrompt}'`
-          : `codex exec --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox '${escapedCodexPrompt}'`;
+          ? `codex exec resume ${shellQuote(codexSessionIdRef.current)} --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`
+          : `codex exec --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`;
 
-        commandParts.push(
-          `{ (while true; do sleep 20; printf . >&2; done) & HBEAT=$!; trap "kill $HBEAT 2>/dev/null" EXIT; ${codexCmd}; kill $HBEAT 2>/dev/null; }`
-        );
+        commandParts.push(codexCmd);
       }
 
-      const fullCommand = commandParts.join(' && ');
+      const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
+      const fullCommand = withSpriteTaskHeartbeat(commandParts.join(' && '), taskName);
 
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
@@ -933,115 +898,109 @@ export function useChat(options: UseChatOptions) {
 
       const abortController = new AbortController();
       abortRef.current = abortController;
-
-      const serviceName = makeServiceName(provider);
-      serviceNameRef.current = serviceName;
-
-      const config: ServiceRequest = {
-        cmd: 'bash',
-        args: ['-c', fullCommand],
-      };
-
-      turnActiveRef.current = true;
-      sawExitRef.current = false;
+      execSessionIdRef.current = undefined;
 
       try {
-        await api.streamService(
+        await api.streamExec(
           spriteName,
-          serviceName,
-          config,
+          ['bash', '-c', fullCommand],
           processServiceEvent,
-          abortController.signal
+          abortController.signal,
+          {
+            path: '/bin/bash',
+            maxRunAfterDisconnect: '0',
+            onSessionId: (sessionId) => {
+              execSessionIdRef.current = sessionId;
+              setActiveRun({
+                execSessionId: sessionId,
+                taskName,
+                provider,
+                userMessageId: userMessage.id,
+                assistantMessageId: assistantMessage.id,
+                workingDirectory,
+                startedAt: Date.now(),
+              });
+            },
+          }
         );
-        if (serviceEventsSeenRef.current === 0) {
-          debugChat('no events from service stream; fallback to logs stream', provider);
-          await api.streamServiceLogs(
-            spriteName,
-            serviceName,
-            processServiceEvent,
-            abortController.signal
-          );
-        }
-        // Stream ended cleanly → the service process finished.
-        await finalizeTurn(abortController);
       } catch (err: any) {
-        if (err?.name === 'AbortError' || abortController.signal.aborted) {
-          // User interrupted; interrupt() handles cleanup.
-          return;
-        }
-        const code = err?.name === 'AppError' ? err.code : undefined;
-        if (code === 'unauthorized' || code === 'serverError') {
-          // A real failure that reconnecting won't fix.
+        if (err.name !== 'AbortError') {
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
           setErrorMessage(message);
           if (provider === 'codex') {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
-          await finalizeTurn(abortController);
-          return;
         }
-        if (sawExitRef.current) {
-          // The turn finished right before the socket closed.
-          await finalizeTurn(abortController);
-          return;
+      } finally {
+        const remaining =
+          provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
+
+        if (provider === 'claude') {
+          for (const parsed of remaining as ClaudeStreamEvent[]) {
+            if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
+            if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
+            handleClaudeEvent(parsed);
+          }
+        } else {
+          for (const parsed of remaining as CodexStreamEvent[]) {
+            handleCodexEvent(parsed);
+          }
         }
-        // Network drop (e.g. app backgrounded): the service keeps running on the
-        // sprite. Don't show an error and don't delete it — reconnect to its logs.
-        // If we're backgrounded the resume fails fast; AppState 'active' retries.
-        debugChat('stream dropped; reconnecting', provider, err?.message);
-        await resumeTurn();
+
+        if (provider === 'codex' && !codexSawAssistantRef.current) {
+          reportCodexAuthIssue(codexStderrRef.current);
+        }
+
+        if (abortRef.current === abortController) {
+          abortRef.current = null;
+        }
+        setActiveRun(undefined);
+        execSessionIdRef.current = undefined;
+        activeUserMessageIdRef.current = undefined;
+        activeAssistantMessageIdRef.current = undefined;
+        assistantTextSeenRef.current = false;
+        setStatusTracked('idle');
+        persistMessages();
       }
     },
     [
       inputText,
+      chatId,
+      persistMessages,
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
+      setActiveRun,
       setStatusTracked,
       spriteName,
+      handleClaudeEvent,
+      handleCodexEvent,
       updateMessages,
       workingDirectory,
-      finalizeTurn,
-      resumeTurn,
     ]
   );
 
   const interrupt = useCallback(() => {
+    const sessionId = execSessionIdRef.current;
+    if (sessionId) {
+      api.killExecSession(spriteName, sessionId).catch(() => {});
+      execSessionIdRef.current = undefined;
+    }
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
-    turnActiveRef.current = false;
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
+    setActiveRun(undefined);
     setStatusTracked('idle');
-
-    const svcName = serviceNameRef.current;
-    api.deleteService(spriteName, svcName).catch(() => {});
-  }, [setStatusTracked, spriteName]);
+  }, [setActiveRun, setStatusTracked, spriteName]);
 
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
   }, []);
-
-  // On returning to the foreground: resume an in-flight turn that lost its socket
-  // while backgrounded, or — if no turn is active — pull in anything that
-  // finished on the sprite while we were away. Guarantees the full conversation.
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (next) => {
-      if (next !== 'active') return;
-      if (turnActiveRef.current && statusRef.current === 'reconnecting') {
-        // A turn whose socket dropped while we were away — resume it.
-        resumeTurn();
-      } else if (statusRef.current === 'idle') {
-        // Nothing in flight — pull anything that finished on the sprite while away.
-        reconcileTranscript();
-      }
-    });
-    return () => sub.remove();
-  }, [resumeTurn, reconcileTranscript]);
 
   return {
     messages,
