@@ -26,6 +26,7 @@ type ProviderOption = { label: string; value: AgentProvider };
 const PROVIDER_OPTIONS: ProviderOption[] = [
   { label: 'Claude', value: 'claude' },
   { label: 'Codex', value: 'codex' },
+  { label: 'Crush', value: 'crush' },
 ];
 
 const MODEL_OPTIONS: { label: string; value: ClaudeModel }[] = [
@@ -96,7 +97,7 @@ export default function SettingsScreen() {
             getSetting('defaultWorkingDirectory'),
           ]);
 
-        if (providerSetting === 'claude' || providerSetting === 'codex') {
+        if (providerSetting === 'claude' || providerSetting === 'codex' || providerSetting === 'crush') {
           setDefaultProvider(providerSetting as AgentProvider);
         }
         if (model && ['sonnet', 'opus', 'haiku'].includes(model)) {

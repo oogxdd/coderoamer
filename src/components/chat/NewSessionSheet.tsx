@@ -32,7 +32,7 @@ interface NewSessionSheetProps {
   onCreate: (config: NewSessionConfig) => void;
 }
 
-const PROVIDERS: AgentProvider[] = ['claude', 'codex'];
+const PROVIDERS: AgentProvider[] = ['claude', 'codex', 'crush'];
 
 export function NewSessionSheet({
   title = 'New Session',

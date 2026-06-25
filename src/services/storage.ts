@@ -15,6 +15,7 @@ export interface PersistedChat {
   provider: AgentProvider;
   claudeSessionId?: string;
   codexSessionId?: string;
+  crushSessionId?: string;
   currentServiceName?: string;
   workingDirectory: string;
   createdAt: number;
@@ -37,7 +38,7 @@ export interface ActiveChatRun {
 }
 
 function normalizeProvider(value: unknown): AgentProvider {
-  return value === 'codex' ? 'codex' : 'claude';
+  return value === 'codex' || value === 'crush' ? value : 'claude';
 }
 
 function normalizePersistedChat(value: unknown): { chat: PersistedChat; changed: boolean } {
@@ -47,6 +48,7 @@ function normalizePersistedChat(value: unknown): { chat: PersistedChat; changed:
   const changed =
     raw.provider !== provider ||
     ('codexSessionId' in raw && raw.codexSessionId !== undefined && typeof raw.codexSessionId !== 'string') ||
+    ('crushSessionId' in raw && raw.crushSessionId !== undefined && typeof raw.crushSessionId !== 'string') ||
     ('activeRun' in raw && raw.activeRun !== undefined && activeRun === undefined);
   return {
     chat: {
@@ -57,6 +59,7 @@ function normalizePersistedChat(value: unknown): { chat: PersistedChat; changed:
       provider,
       claudeSessionId: typeof raw.claudeSessionId === 'string' ? raw.claudeSessionId : undefined,
       codexSessionId: typeof raw.codexSessionId === 'string' ? raw.codexSessionId : undefined,
+      crushSessionId: typeof raw.crushSessionId === 'string' ? raw.crushSessionId : undefined,
       currentServiceName:
         typeof raw.currentServiceName === 'string' ? raw.currentServiceName : undefined,
       workingDirectory: String(raw.workingDirectory ?? ''),

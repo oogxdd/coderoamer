@@ -128,13 +128,31 @@ api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
 
 ### Codex provider
 
-`AgentProvider = 'claude' | 'codex'`. The chat layer is provider-abstracted. For
+`AgentProvider = 'claude' | 'codex' | 'crush'`. The chat layer is provider-abstracted. For
 Codex, the command is `codex exec [--json] [--resume <id>] --model gpt-5-codex
 --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox '<prompt>'`,
 parsed by `CodexStreamParser` / `parseCodexEvent`. Codex auth issues are sniffed
 from stderr by `classifyCodexAuthIssue` (looks for `codex login`, 401/403, etc.)
 and surfaced with a switch-to-Claude prompt. Codex is keyed on `codexSessionId`
 (Codex thread id); Claude on `claudeSessionId`.
+
+### Crush provider
+
+Crush (charm.land) is the third `AgentProvider`. Unlike Claude/Codex, Crush's
+non-interactive `crush run` mode has **no streaming-JSON flag** — it prints the
+assistant's final answer as plain text on stdout. So the live stream is minimal:
+`CrushStreamParser` (`src/services/crush-stream.ts`) re-emits each stdout line as
+an `assistantDelta` (`src/models/crush-events.ts`). The command is
+`crush run --cwd <wd> [--model <m>] [--session <id>] '<prompt>'`; `crush run`
+auto-approves tool use in headless mode (no `--yolo` needed). Tool calls and
+reasoning are **not** surfaced live — they are recovered after each turn (and on
+reopen) from `crush session show <id> --json` via `syncCrushTranscript` /
+`crushTranscriptToMessages` (`src/services/crush-sessions.ts`). Crush does not
+print its session id, so it is captured after the run with
+`crush session last --json --cwd <wd>` and stored as `crushSessionId` (used for
+`--session` resume). Crush auth issues are sniffed by `classifyCrushAuthIssue`.
+Crush auth is set up manually in the sprite (`crush login` or a configured
+provider in `~/.config/crush/crush.json`) — there is no token injection.
 
 ### Session browser (`src/services/claude-sessions.ts`)
 

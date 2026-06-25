@@ -16,11 +16,14 @@ import {
   ClaudeToolResultEvent,
 } from '@/models/claude-events';
 import { CodexStreamEvent } from '@/models/codex-events';
+import { CrushStreamEvent } from '@/models/crush-events';
 import { ServiceLogEvent } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
+import { CrushStreamParser } from '@/services/crush-stream';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import { readCodexSessionMessages } from '@/services/codex-sessions';
+import { readCrushLastSessionId, readCrushSessionMessages } from '@/services/crush-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
@@ -30,6 +33,7 @@ const CODEX_MODEL = 'gpt-5-codex';
 interface SessionIds {
   claudeSessionId?: string;
   codexSessionId?: string;
+  crushSessionId?: string;
 }
 
 interface UseChatOptions {
@@ -39,10 +43,12 @@ interface UseChatOptions {
   provider: AgentProvider;
   initialClaudeSessionId?: string;
   initialCodexSessionId?: string;
+  initialCrushSessionId?: string;
   initialActiveRun?: ActiveChatRun;
   onSessionIdsChange?: (sessionIds: SessionIds) => void;
   onActiveRunChange?: (activeRun: ActiveChatRun | undefined) => void;
   onCodexAuthIssue?: (message: string) => void;
+  onCrushAuthIssue?: (message: string) => void;
 }
 
 function shellQuote(value: string): string {
@@ -90,6 +96,28 @@ function classifyCodexAuthIssue(raw: string): string | undefined {
   return [
     'Codex is not authenticated in this sprite environment.',
     'Run `codex login status` and then `codex login` inside the sprite shell, or switch this chat to Claude.',
+  ].join(' ');
+}
+
+function classifyCrushAuthIssue(raw: string): string | undefined {
+  const text = raw.toLowerCase();
+  const matchesAuthIssue =
+    text.includes('crush login') ||
+    text.includes('not logged in') ||
+    text.includes('no provider') ||
+    text.includes('authentication') ||
+    text.includes('unauthorized') ||
+    text.includes('forbidden') ||
+    text.includes('api key') ||
+    text.includes('login required') ||
+    text.includes('status code: 401') ||
+    text.includes('status code: 403');
+
+  if (!matchesAuthIssue) return undefined;
+
+  return [
+    'Crush is not authenticated in this sprite environment.',
+    'Run `crush login` inside the sprite shell (or configure a provider in ~/.config/crush/crush.json), or switch this chat to Claude.',
   ].join(' ');
 }
 
@@ -184,14 +212,17 @@ export function useChat(options: UseChatOptions) {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   const [inputText, setInputText] = useState('');
   const [codexAuthIssue, setCodexAuthIssue] = useState<string | undefined>();
+  const [crushAuthIssue, setCrushAuthIssue] = useState<string | undefined>();
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
+  const crushSessionIdRef = useRef<string | undefined>(options.initialCrushSessionId);
   const activeRunRef = useRef<ActiveChatRun | undefined>(options.initialActiveRun);
   const execSessionIdRef = useRef<string | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const claudeParserRef = useRef(new ClaudeStreamParser());
   const codexParserRef = useRef(new CodexStreamParser());
+  const crushParserRef = useRef(new CrushStreamParser());
   const loadRequestRef = useRef(0);
   const messagesRef = useRef<ChatMessage[]>([]);
   const activeUserMessageIdRef = useRef<string | undefined>(undefined);
@@ -203,6 +234,8 @@ export function useChat(options: UseChatOptions) {
   const serviceEventsSeenRef = useRef(0);
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
+  const crushStderrRef = useRef('');
+  const crushSawAssistantRef = useRef(false);
   const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
@@ -214,6 +247,7 @@ export function useChat(options: UseChatOptions) {
     options.onSessionIdsChange?.({
       claudeSessionId: claudeSessionIdRef.current,
       codexSessionId: codexSessionIdRef.current,
+      crushSessionId: crushSessionIdRef.current,
     });
   }, [options.onSessionIdsChange]);
 
@@ -238,6 +272,15 @@ export function useChat(options: UseChatOptions) {
     (sessionId: string | undefined) => {
       if (codexSessionIdRef.current === sessionId) return;
       codexSessionIdRef.current = sessionId;
+      emitSessionIds();
+    },
+    [emitSessionIds]
+  );
+
+  const setCrushSessionId = useCallback(
+    (sessionId: string | undefined) => {
+      if (crushSessionIdRef.current === sessionId) return;
+      crushSessionIdRef.current = sessionId;
       emitSessionIds();
     },
     [emitSessionIds]
@@ -316,6 +359,35 @@ export function useChat(options: UseChatOptions) {
     [chatId, provider, spriteName]
   );
 
+  // Crush counterpart: pull the on-disk transcript for a resumed Crush session
+  // (`crush session show <id> --json`). This is the only way to recover tool
+  // calls and reasoning — `crush run` only streams the final answer as plain
+  // text, so the live path never sees them.
+  const syncCrushTranscript = useCallback(
+    async (loadRequest: number, resumeId: string | undefined) => {
+      if (provider !== 'crush' || !resumeId) return;
+
+      try {
+        const transcript = await readCrushSessionMessages(spriteName, resumeId, workingDirectory);
+        if (loadRequest !== loadRequestRef.current) return;
+        if (statusRef.current !== 'idle') return;
+        if (transcript.length === 0) return;
+        const local = messagesRef.current;
+        const transcriptTurns = countUserMessages(transcript);
+        const localTurns = countUserMessages(local);
+        if (local.length !== 0 && transcriptTurns < localTurns) return;
+        const merged = mergeTranscript(local, transcript);
+        if (conversationSignature(merged) === conversationSignature(local)) return;
+        messagesRef.current = merged;
+        setMessages(merged);
+        await saveChatMessages(chatId, merged);
+      } catch {
+        // Offline / no transcript yet — keep the local copy.
+      }
+    },
+    [chatId, provider, spriteName, workingDirectory]
+  );
+
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
     const initialMessageCount = messagesRef.current.length;
@@ -334,6 +406,7 @@ export function useChat(options: UseChatOptions) {
 
     setClaudeSessionId(options.initialClaudeSessionId);
     setCodexSessionId(options.initialCodexSessionId);
+    setCrushSessionId(options.initialCrushSessionId);
 
     const index = new Map<string, { messageIndex: number; toolName: string }>();
     saved.forEach((msg, idx) => {
@@ -349,6 +422,7 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      crushParserRef.current.reset();
     }
 
     const activeRun = options.initialActiveRun;
@@ -359,8 +433,11 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      crushParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      crushStderrRef.current = '';
+      crushSawAssistantRef.current = false;
       serviceEventsSeenRef.current = 0;
       setStatusTracked('reconnecting');
 
@@ -391,6 +468,7 @@ export function useChat(options: UseChatOptions) {
           setStatusTracked('idle');
           await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
           await syncCodexTranscript(loadRequest, options.initialCodexSessionId);
+          await syncCrushTranscript(loadRequest, options.initialCrushSessionId);
           await persistMessages();
         }
       })();
@@ -408,20 +486,24 @@ export function useChat(options: UseChatOptions) {
     // never clobbers a fresh local send.
     syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
     syncCodexTranscript(loadRequest, options.initialCodexSessionId);
+    syncCrushTranscript(loadRequest, options.initialCrushSessionId);
   }, [
     chatId,
     options.initialActiveRun,
     options.initialClaudeSessionId,
     options.initialCodexSessionId,
+    options.initialCrushSessionId,
     persistMessages,
     provider,
     setClaudeSessionId,
     setCodexSessionId,
+    setCrushSessionId,
     setActiveRun,
     setStatusTracked,
     spriteName,
     syncClaudeTranscript,
     syncCodexTranscript,
+    syncCrushTranscript,
   ]);
 
   const ensureAssistantTarget = useCallback(
@@ -860,6 +942,25 @@ export function useChat(options: UseChatOptions) {
     [appendAssistantText, updateActiveAssistant, setCodexSessionId]
   );
 
+  // Crush's `crush run` only streams the final answer as plain text, so the
+  // live event model is a single assistant text delta per stdout line. Tool
+  // calls and reasoning are recovered later via syncCrushTranscript.
+  const handleCrushEvent = useCallback(
+    (event: CrushStreamEvent) => {
+      switch (event.type) {
+        case 'assistantDelta':
+          if (event.text) {
+            crushSawAssistantRef.current = true;
+            appendAssistantText(event.text);
+          }
+          break;
+        case 'unknown':
+          break;
+      }
+    },
+    [appendAssistantText]
+  );
+
   const reportCodexAuthIssue = useCallback(
     (raw: string) => {
       const issue = classifyCodexAuthIssue(raw);
@@ -868,6 +969,16 @@ export function useChat(options: UseChatOptions) {
       options.onCodexAuthIssue?.(issue);
     },
     [options.onCodexAuthIssue]
+  );
+
+  const reportCrushAuthIssue = useCallback(
+    (raw: string) => {
+      const issue = classifyCrushAuthIssue(raw);
+      if (!issue) return;
+      setCrushAuthIssue(issue);
+      options.onCrushAuthIssue?.(issue);
+    },
+    [options.onCrushAuthIssue]
   );
 
   const processServiceEvent = useCallback(
@@ -892,13 +1003,21 @@ export function useChat(options: UseChatOptions) {
               if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
               handleClaudeEvent(parsed);
             }
-          } else {
+          } else if (provider === 'codex') {
             const events = codexParserRef.current.parse(dataStr);
             if (events.length > 0) {
               debugChat('stdout parsed', provider, events.map((e) => e.type).join(','));
             }
             for (const parsed of events) {
               handleCodexEvent(parsed);
+            }
+          } else {
+            const events = crushParserRef.current.parse(dataStr);
+            if (events.length > 0) {
+              debugChat('stdout parsed', provider, events.map((e) => e.type).join(','));
+            }
+            for (const parsed of events) {
+              handleCrushEvent(parsed);
             }
           }
           break;
@@ -907,24 +1026,28 @@ export function useChat(options: UseChatOptions) {
           if (statusRef.current === 'connecting') setStatusTracked('streaming');
           if (provider === 'codex' && event.data) {
             codexStderrRef.current += `\n${event.data}`;
+          } else if (provider === 'crush' && event.data) {
+            crushStderrRef.current += `\n${event.data}`;
           }
           break;
         }
         case 'exit': {
-          const remaining =
-            provider === 'claude'
-              ? claudeParserRef.current.flush()
-              : codexParserRef.current.flush();
-
           if (provider === 'claude') {
+            const remaining = claudeParserRef.current.flush();
             for (const parsed of remaining as ClaudeStreamEvent[]) {
               if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
               if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
               handleClaudeEvent(parsed);
             }
-          } else {
+          } else if (provider === 'codex') {
+            const remaining = codexParserRef.current.flush();
             for (const parsed of remaining as CodexStreamEvent[]) {
               handleCodexEvent(parsed);
+            }
+          } else {
+            const remaining = crushParserRef.current.flush();
+            for (const parsed of remaining as CrushStreamEvent[]) {
+              handleCrushEvent(parsed);
             }
           }
           break;
@@ -939,7 +1062,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [handleClaudeEvent, handleCodexEvent, provider, setStatusTracked]
+    [handleClaudeEvent, handleCodexEvent, handleCrushEvent, provider, setStatusTracked]
   );
   processServiceEventRef.current = processServiceEvent;
 
@@ -1023,7 +1146,7 @@ export function useChat(options: UseChatOptions) {
         claudeCmd += ` ${shellQuote(claudePrompt)}`;
 
         commandParts.push(claudeCmd);
-      } else {
+      } else if (provider === 'codex') {
         setModelName(CODEX_MODEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
@@ -1034,6 +1157,30 @@ export function useChat(options: UseChatOptions) {
           : `codex exec --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`;
 
         commandParts.push(codexCmd);
+      } else {
+        // Crush: non-interactive `crush run`. It auto-approves tool use in
+        // headless mode (no --yolo needed), streams the final answer as plain
+        // text on stdout, and resumes prior context via --session <id>. The
+        // session id is captured after the run via `crush session last`.
+        const crushPrompt = crushSessionIdRef.current
+          ? prompt
+          : buildFallbackPrompt(historyBeforeSend, prompt);
+
+        const crushModel = await getSetting('crushModel');
+        if (crushModel && crushModel.trim()) {
+          setModelName(crushModel);
+        }
+
+        let crushCmd = `crush run --cwd ${shellQuote(workingDirectory)}`;
+        if (crushModel && crushModel.trim()) {
+          crushCmd += ` --model ${shellQuote(crushModel)}`;
+        }
+        if (crushSessionIdRef.current) {
+          crushCmd += ` --session ${shellQuote(crushSessionIdRef.current)}`;
+        }
+        crushCmd += ` ${shellQuote(crushPrompt)}`;
+
+        commandParts.push(crushCmd);
       }
 
       const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
@@ -1042,11 +1189,15 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      crushParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      crushStderrRef.current = '';
+      crushSawAssistantRef.current = false;
       setStatusTracked('connecting');
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
+      setCrushAuthIssue(undefined);
       serviceEventsSeenRef.current = 0;
 
       const abortController = new AbortController();
@@ -1083,26 +1234,35 @@ export function useChat(options: UseChatOptions) {
           setErrorMessage(message);
           if (provider === 'codex') {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
+          } else if (provider === 'crush') {
+            reportCrushAuthIssue(`${message}\n${crushStderrRef.current}`);
           }
         }
       } finally {
-        const remaining =
-          provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
-
         if (provider === 'claude') {
+          const remaining = claudeParserRef.current.flush();
           for (const parsed of remaining as ClaudeStreamEvent[]) {
             if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
             if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
             handleClaudeEvent(parsed);
           }
-        } else {
+        } else if (provider === 'codex') {
+          const remaining = codexParserRef.current.flush();
           for (const parsed of remaining as CodexStreamEvent[]) {
             handleCodexEvent(parsed);
+          }
+        } else {
+          const remaining = crushParserRef.current.flush();
+          for (const parsed of remaining as CrushStreamEvent[]) {
+            handleCrushEvent(parsed);
           }
         }
 
         if (provider === 'codex' && !codexSawAssistantRef.current) {
           reportCodexAuthIssue(codexStderrRef.current);
+        }
+        if (provider === 'crush' && !crushSawAssistantRef.current) {
+          reportCrushAuthIssue(crushStderrRef.current);
         }
 
         if (abortRef.current === abortController) {
@@ -1114,6 +1274,24 @@ export function useChat(options: UseChatOptions) {
         activeAssistantMessageIdRef.current = undefined;
         assistantTextSeenRef.current = false;
         setStatusTracked('idle');
+
+        // Crush doesn't print its session id, so capture it after the run via
+        // `crush session last` (scoped to this working directory). Enables
+        // --session resume on the next turn and backfills tool calls / reasoning
+        // that the plain-text stdout omitted. Must run after status is idle so the
+        // transcript sync isn't short-circuited.
+        if (provider === 'crush') {
+          try {
+            if (!crushSessionIdRef.current) {
+              const id = await readCrushLastSessionId(spriteName, workingDirectory);
+              if (id) setCrushSessionId(id);
+            }
+            await syncCrushTranscript(loadRequestRef.current, crushSessionIdRef.current);
+          } catch {
+            // Best-effort — resume / tool-card backfill recover on next load.
+          }
+        }
+
         persistMessages();
       }
     },
@@ -1124,11 +1302,15 @@ export function useChat(options: UseChatOptions) {
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
+      reportCrushAuthIssue,
       setActiveRun,
+      setCrushSessionId,
       setStatusTracked,
       spriteName,
       handleClaudeEvent,
       handleCodexEvent,
+      handleCrushEvent,
+      syncCrushTranscript,
       updateMessages,
       workingDirectory,
     ]
@@ -1155,6 +1337,17 @@ export function useChat(options: UseChatOptions) {
     setCodexAuthIssue(undefined);
   }, []);
 
+  const clearCrushAuthIssue = useCallback(() => {
+    setCrushAuthIssue(undefined);
+  }, []);
+
+  const sessionId =
+    provider === 'codex'
+      ? codexSessionIdRef.current
+      : provider === 'crush'
+        ? crushSessionIdRef.current
+        : claudeSessionIdRef.current;
+
   return {
     messages,
     status,
@@ -1166,8 +1359,10 @@ export function useChat(options: UseChatOptions) {
     sendMessage,
     interrupt,
     loadSession,
-    sessionId: provider === 'codex' ? codexSessionIdRef.current : claudeSessionIdRef.current,
+    sessionId,
     codexAuthIssue,
     clearCodexAuthIssue,
+    crushAuthIssue,
+    clearCrushAuthIssue,
   };
 }

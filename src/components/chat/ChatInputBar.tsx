@@ -43,7 +43,7 @@ export function ChatInputBar({
       <View style={styles.providerRow}>
         <Text style={[styles.providerLabel, { color: colors.textSecondary }]}>Provider</Text>
         <View style={[styles.providerControl, { backgroundColor: colors.backgroundElement }]}>
-          {(['claude', 'codex'] as AgentProvider[]).map((option) => (
+          {(['claude', 'codex', 'crush'] as AgentProvider[]).map((option) => (
             <Pressable
               key={option}
               style={[

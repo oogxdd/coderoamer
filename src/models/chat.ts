@@ -1,7 +1,7 @@
 import { JSONValue, jsonGet, jsonString, jsonPretty } from './claude-events';
 
 export type ChatRole = 'user' | 'assistant' | 'system';
-export type AgentProvider = 'claude' | 'codex';
+export type AgentProvider = 'claude' | 'codex' | 'crush';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
 
@@ -159,5 +159,12 @@ export function makeId(): string {
 }
 
 export function providerDisplayName(provider: AgentProvider): string {
-  return provider === 'codex' ? 'Codex' : 'Claude';
+  switch (provider) {
+    case 'codex':
+      return 'Codex';
+    case 'crush':
+      return 'Crush';
+    default:
+      return 'Claude';
+  }
 }

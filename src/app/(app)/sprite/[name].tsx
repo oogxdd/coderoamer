@@ -33,7 +33,7 @@ import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirec
 type Tab = 'overview' | 'chat' | 'checkpoints';
 
 function normalizeProvider(provider: unknown): AgentProvider {
-  return provider === 'codex' ? 'codex' : 'claude';
+  return provider === 'codex' || provider === 'crush' ? provider : 'claude';
 }
 
 /** Find the active tool label from the last assistant message's content */
@@ -69,6 +69,7 @@ export default function SpriteDetailScreen() {
   const [chatProvider, setChatProvider] = useState<AgentProvider>('claude');
   const [claudeSessionId, setClaudeSessionId] = useState<string | undefined>();
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
+  const [crushSessionId, setCrushSessionId] = useState<string | undefined>();
   const [activeRun, setActiveRun] = useState<ActiveChatRun | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
@@ -91,10 +92,12 @@ export default function SpriteDetailScreen() {
     provider: chatProvider,
     initialClaudeSessionId: claudeSessionId,
     initialCodexSessionId: codexSessionId,
+    initialCrushSessionId: crushSessionId,
     initialActiveRun: activeRun,
     onSessionIdsChange: (sessionIds) => {
       setClaudeSessionId(sessionIds.claudeSessionId);
       setCodexSessionId(sessionIds.codexSessionId);
+      setCrushSessionId(sessionIds.crushSessionId);
       if (!chatId) return;
       const updated = chatListRef.current.map((chatMeta) =>
         chatMeta.id === chatId
@@ -102,6 +105,7 @@ export default function SpriteDetailScreen() {
               ...chatMeta,
               claudeSessionId: sessionIds.claudeSessionId,
               codexSessionId: sessionIds.codexSessionId,
+              crushSessionId: sessionIds.crushSessionId,
             }
           : chatMeta
       );
@@ -145,6 +149,7 @@ export default function SpriteDetailScreen() {
         setChatProvider(normalizeProvider(current.provider));
         setClaudeSessionId(current.claudeSessionId);
         setCodexSessionId(current.codexSessionId);
+        setCrushSessionId(current.crushSessionId);
         setActiveRun(current.activeRun);
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
@@ -169,6 +174,7 @@ export default function SpriteDetailScreen() {
         setChatProvider(defaultProvider);
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
+        setCrushSessionId(undefined);
         setActiveRun(undefined);
         setWorkingDirectory(fallbackDir);
       }
@@ -267,6 +273,7 @@ export default function SpriteDetailScreen() {
     setWorkingDirectory(dir);
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
+    setCrushSessionId(undefined);
     setActiveRun(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
@@ -297,6 +304,7 @@ export default function SpriteDetailScreen() {
     setChatProvider(normalizeProvider(selectedChat.provider));
     setClaudeSessionId(selectedChat.claudeSessionId);
     setCodexSessionId(selectedChat.codexSessionId);
+    setCrushSessionId(selectedChat.crushSessionId);
     setActiveRun(selectedChat.activeRun);
     setWorkingDirectory(selectedChat.workingDirectory || defaultDirectory);
     // Update lastUsed
@@ -355,6 +363,7 @@ export default function SpriteDetailScreen() {
       setChatProvider('claude');
       setClaudeSessionId(session.id);
       setCodexSessionId(undefined);
+      setCrushSessionId(undefined);
       setActiveRun(undefined);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
@@ -405,6 +414,35 @@ export default function SpriteDetailScreen() {
       ]
     );
   }, [chat.codexAuthIssue, chat.clearCodexAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
+
+  useEffect(() => {
+    if (!chat.crushAuthIssue) return;
+    const isLocked = isProviderLocked;
+    Alert.alert(
+      'Crush Authentication Required',
+      isLocked
+        ? `${chat.crushAuthIssue}\n\nThis session is locked to Crush. Start a new Claude session now?`
+        : `${chat.crushAuthIssue}\n\nSwitch this session to Claude now?`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => chat.clearCrushAuthIssue(),
+        },
+        {
+          text: isLocked ? 'New Claude Session' : 'Switch to Claude',
+          onPress: () => {
+            if (isLocked) {
+              createChat({ workingDirectory, provider: 'claude' });
+            } else {
+              handleProviderChange('claude');
+            }
+            chat.clearCrushAuthIssue();
+          },
+        },
+      ]
+    );
+  }, [chat.crushAuthIssue, chat.clearCrushAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
 
   const handleInsertBashOutput = useCallback((text: string) => {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
