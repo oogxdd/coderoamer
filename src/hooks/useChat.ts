@@ -20,6 +20,7 @@ import { ServiceLogEvent } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
+import { readCodexSessionMessages } from '@/services/codex-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
@@ -287,6 +288,34 @@ export function useChat(options: UseChatOptions) {
     [chatId, provider, spriteName]
   );
 
+  // Codex counterpart of syncClaudeTranscript: pull the on-disk rollout for a
+  // resumed Codex thread so turns that finished while the app was away (or ran
+  // from a terminal) are recovered — the same history `codex exec resume` sees.
+  const syncCodexTranscript = useCallback(
+    async (loadRequest: number, resumeId: string | undefined) => {
+      if (provider !== 'codex' || !resumeId) return;
+
+      try {
+        const transcript = await readCodexSessionMessages(spriteName, resumeId);
+        if (loadRequest !== loadRequestRef.current) return;
+        if (statusRef.current !== 'idle') return;
+        if (transcript.length === 0) return;
+        const local = messagesRef.current;
+        const transcriptTurns = countUserMessages(transcript);
+        const localTurns = countUserMessages(local);
+        if (local.length !== 0 && transcriptTurns < localTurns) return;
+        const merged = mergeTranscript(local, transcript);
+        if (conversationSignature(merged) === conversationSignature(local)) return;
+        messagesRef.current = merged;
+        setMessages(merged);
+        await saveChatMessages(chatId, merged);
+      } catch {
+        // Offline / no rollout yet — keep the local copy.
+      }
+    },
+    [chatId, provider, spriteName]
+  );
+
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
     const initialMessageCount = messagesRef.current.length;
@@ -361,6 +390,7 @@ export function useChat(options: UseChatOptions) {
           setActiveRun(undefined);
           setStatusTracked('idle');
           await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
+          await syncCodexTranscript(loadRequest, options.initialCodexSessionId);
           await persistMessages();
         }
       })();
@@ -377,6 +407,7 @@ export function useChat(options: UseChatOptions) {
     // history `claude --resume` would show. Runs in the background; guarded so it
     // never clobbers a fresh local send.
     syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
+    syncCodexTranscript(loadRequest, options.initialCodexSessionId);
   }, [
     chatId,
     options.initialActiveRun,
@@ -390,6 +421,7 @@ export function useChat(options: UseChatOptions) {
     setStatusTracked,
     spriteName,
     syncClaudeTranscript,
+    syncCodexTranscript,
   ]);
 
   const ensureAssistantTarget = useCallback(
