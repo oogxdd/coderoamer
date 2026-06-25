@@ -23,6 +23,17 @@ export interface PersistedChat {
   firstMessagePreview?: string;
   lastSessionComplete: boolean;
   processedEventUUIDs: string[];
+  activeRun?: ActiveChatRun;
+}
+
+export interface ActiveChatRun {
+  execSessionId: string;
+  taskName: string;
+  provider: AgentProvider;
+  userMessageId: string;
+  assistantMessageId: string;
+  workingDirectory: string;
+  startedAt: number;
 }
 
 function normalizeProvider(value: unknown): AgentProvider {
@@ -32,9 +43,11 @@ function normalizeProvider(value: unknown): AgentProvider {
 function normalizePersistedChat(value: unknown): { chat: PersistedChat; changed: boolean } {
   const raw = (value ?? {}) as Partial<PersistedChat> & Record<string, unknown>;
   const provider = normalizeProvider(raw.provider);
+  const activeRun = normalizeActiveRun(raw.activeRun);
   const changed =
     raw.provider !== provider ||
-    ('codexSessionId' in raw && raw.codexSessionId !== undefined && typeof raw.codexSessionId !== 'string');
+    ('codexSessionId' in raw && raw.codexSessionId !== undefined && typeof raw.codexSessionId !== 'string') ||
+    ('activeRun' in raw && raw.activeRun !== undefined && activeRun === undefined);
   return {
     chat: {
       id: String(raw.id ?? ''),
@@ -56,8 +69,32 @@ function normalizePersistedChat(value: unknown): { chat: PersistedChat; changed:
       processedEventUUIDs: Array.isArray(raw.processedEventUUIDs)
         ? raw.processedEventUUIDs.filter((x): x is string => typeof x === 'string')
         : [],
+      activeRun,
     },
     changed,
+  };
+}
+
+function normalizeActiveRun(value: unknown): ActiveChatRun | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Partial<ActiveChatRun> & Record<string, unknown>;
+  if (
+    typeof raw.execSessionId !== 'string' ||
+    typeof raw.taskName !== 'string' ||
+    typeof raw.userMessageId !== 'string' ||
+    typeof raw.assistantMessageId !== 'string'
+  ) {
+    return undefined;
+  }
+
+  return {
+    execSessionId: raw.execSessionId,
+    taskName: raw.taskName,
+    provider: normalizeProvider(raw.provider),
+    userMessageId: raw.userMessageId,
+    assistantMessageId: raw.assistantMessageId,
+    workingDirectory: typeof raw.workingDirectory === 'string' ? raw.workingDirectory : '',
+    startedAt: Number(raw.startedAt ?? Date.now()),
   };
 }
 
