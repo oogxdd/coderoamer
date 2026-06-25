@@ -649,6 +649,21 @@ export function useChat(options: UseChatOptions) {
           debugChat('codex assistant delta', 'len', event.text.length);
           appendAssistantText(event.text);
           break;
+        case 'reasoning':
+          debugChat('codex reasoning', 'len', event.text.length);
+          updateActiveAssistant((newContent) => {
+            const last = newContent[newContent.length - 1];
+            if (last && last.type === 'reasoning') {
+              newContent[newContent.length - 1] = {
+                type: 'reasoning',
+                text: `${last.text}\n${event.text}`,
+              };
+            } else {
+              newContent.push({ type: 'reasoning', text: event.text });
+            }
+            return newContent;
+          });
+          break;
         case 'commandBegin':
           updateActiveAssistant((newContent, targetIndex) => {
             const card: ToolUseCard = {
@@ -690,12 +705,118 @@ export function useChat(options: UseChatOptions) {
             return newContent;
           });
           break;
+        case 'fileChange':
+          updateActiveAssistant((newContent, targetIndex) => {
+            const paths = event.files.map((f) => f.path);
+            const filePath = paths.length === 1 ? paths[0] : `${paths.length} files`;
+            const summary = event.files.map((f) => `${f.kind}: ${f.path}`).join('\n');
+            const resultCard: ToolResultCard = {
+              toolUseId: event.changeId,
+              toolName: 'Edit',
+              content: summary || null,
+              completedAt: Date.now(),
+            };
+            const card: ToolUseCard = {
+              toolUseId: event.changeId,
+              toolName: 'Edit',
+              input: { file_path: filePath },
+              startedAt: Date.now(),
+              result: resultCard,
+            };
+            newContent.push({ type: 'toolUse', card });
+            toolUseIndexRef.current.set(event.changeId, {
+              messageIndex: targetIndex,
+              toolName: 'Edit',
+            });
+            return newContent;
+          });
+          break;
+        case 'mcpToolBegin':
+          updateActiveAssistant((newContent, targetIndex) => {
+            const toolName = event.server ? `${event.server}.${event.tool}` : event.tool;
+            const card: ToolUseCard = {
+              toolUseId: event.callId,
+              toolName,
+              input: event.args,
+              startedAt: Date.now(),
+            };
+            newContent.push({ type: 'toolUse', card });
+            toolUseIndexRef.current.set(event.callId, { messageIndex: targetIndex, toolName });
+            return newContent;
+          });
+          break;
+        case 'mcpToolEnd':
+          updateActiveAssistant((newContent) => {
+            const toolName =
+              toolUseIndexRef.current.get(event.callId)?.toolName ??
+              (event.server ? `${event.server}.${event.tool}` : event.tool);
+            const resultCard: ToolResultCard = {
+              toolUseId: event.callId,
+              toolName,
+              content: event.output ?? (event.isError ? 'MCP tool error' : null),
+              completedAt: Date.now(),
+            };
+            newContent.push({ type: 'toolResult', card: resultCard });
+            for (let i = 0; i < newContent.length; i++) {
+              const item = newContent[i];
+              if (item.type === 'toolUse' && item.card.toolUseId === event.callId) {
+                newContent[i] = { type: 'toolUse', card: { ...item.card, result: resultCard } };
+                break;
+              }
+            }
+            return newContent;
+          });
+          break;
+        case 'webSearch':
+          updateActiveAssistant((newContent) => {
+            const id = `web-${makeId()}`;
+            const resultCard: ToolResultCard = {
+              toolUseId: id,
+              toolName: 'WebSearch',
+              content: null,
+              completedAt: Date.now(),
+            };
+            const card: ToolUseCard = {
+              toolUseId: id,
+              toolName: 'WebSearch',
+              input: { query: event.query },
+              startedAt: Date.now(),
+              result: resultCard,
+            };
+            newContent.push({ type: 'toolUse', card });
+            return newContent;
+          });
+          break;
+        case 'todoList':
+          updateActiveAssistant((newContent, targetIndex) => {
+            const todos = event.items.map((entry, i) => ({
+              id: `todo-${i}`,
+              content: entry.text,
+              status: entry.completed ? 'completed' : 'pending',
+            }));
+            const input = { todos } as unknown as ToolUseCard['input'];
+            for (let i = 0; i < newContent.length; i++) {
+              const item = newContent[i];
+              if (item.type === 'toolUse' && item.card.toolUseId === event.listId) {
+                newContent[i] = { type: 'toolUse', card: { ...item.card, input } };
+                return newContent;
+              }
+            }
+            const card: ToolUseCard = {
+              toolUseId: event.listId,
+              toolName: 'TodoWrite',
+              input,
+              startedAt: Date.now(),
+            };
+            newContent.push({ type: 'toolUse', card });
+            toolUseIndexRef.current.set(event.listId, {
+              messageIndex: targetIndex,
+              toolName: 'TodoWrite',
+            });
+            return newContent;
+          });
+          break;
         case 'turnCompleted':
-          if (event.text && event.text.trim()) {
-            debugChat('codex turn completed text', 'len', event.text.length);
-            ensureTurnAssistantText(event.text);
-          }
-          if (event.model) setModelName(event.model);
           break;
         case 'error':
           setErrorMessage(event.message);
@@ -704,7 +825,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [appendAssistantText, ensureTurnAssistantText, updateActiveAssistant, setCodexSessionId]
+    [appendAssistantText, updateActiveAssistant, setCodexSessionId]
   );
 
   const reportCodexAuthIssue = useCallback(

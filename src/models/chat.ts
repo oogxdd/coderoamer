@@ -51,6 +51,8 @@ export function toolUseSummary(card: ToolUseCard): string {
       return jsonString(jsonGet(input, 'pattern')) ?? 'glob search';
     case 'Grep':
       return jsonString(jsonGet(input, 'pattern')) ?? 'grep search';
+    case 'WebSearch':
+      return jsonString(jsonGet(input, 'query')) ?? 'web search';
     case 'TodoWrite': {
       const todos = jsonGet(input, 'todos');
       if (Array.isArray(todos)) {
@@ -75,6 +77,7 @@ export function toolUseIcon(toolName: string): string {
     case 'Edit': return '✏️';
     case 'Glob': return '🔍';
     case 'Grep': return '🔎';
+    case 'WebSearch': return '🌐';
     case 'TodoWrite': return '📋';
     default: return '🔧';
   }
@@ -113,6 +116,10 @@ export function toolUseActivityLabel(card: ToolUseCard, cwd?: string): string {
     case 'Grep': {
       const pattern = jsonString(jsonGet(input, 'pattern')) ?? 'code';
       return `Searching ${pattern}...`;
+    }
+    case 'WebSearch': {
+      const query = jsonString(jsonGet(input, 'query')) ?? 'web';
+      return `Searching the web for ${query.slice(0, 40)}...`;
     }
     case 'TodoWrite':
       return 'Updating plan...';
