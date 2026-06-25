@@ -12,3 +12,7 @@ export { SkiaTerminal, useTerminal } from './SkiaTerminal';
 export type { SkiaTerminalProps, SkiaTerminalHandle, ConnectionStatus } from './SkiaTerminal';
 
 export { TerminalErrorBoundary } from './TerminalErrorBoundary';
+
+// Experimental alternative engine backed by the vendored `next-term` library.
+export { NextTermTerminal } from './NextTermTerminal';
+export type { NextTermTerminalHandle, NextTermTerminalProps } from './NextTermTerminal';
