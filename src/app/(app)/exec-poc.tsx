@@ -18,7 +18,7 @@ import {
 } from '@/services/exec-poc';
 import * as Clipboard from 'expo-clipboard';
 import { TerminalErrorBoundary } from '@/components/terminal';
-import type { SkiaTerminalHandle } from '@/components/terminal';
+import type { SkiaTerminalHandle, NextTermTerminalHandle } from '@/components/terminal';
 import { terror, tinfo, errInfo, dumpTerminalLog, clearTerminalLog } from '@/components/terminal/terminalLog';
 
 // On native, statically import. On web, defer until CanvasKit loads.
@@ -26,6 +26,14 @@ const SkiaTerminalNative =
   Platform.OS !== 'web'
     ? require('@/components/terminal').SkiaTerminal
     : null;
+
+// Experimental alternative engine (vendored next-term). Native-only.
+const NextTermTerminalNative =
+  Platform.OS !== 'web'
+    ? require('@/components/terminal').NextTermTerminal
+    : null;
+
+type TerminalEngine = 'builtin' | 'next-term';
 
 const TERMINAL_THEME = {
   background: '#0d1117',
@@ -183,22 +191,38 @@ export default function ExecPocScreen() {
   const [terminalEpoch, setTerminalEpoch] = useState(0);
 
   const termRef = useRef<SkiaTerminalHandle>(null);
+  const nextTermRef = useRef<NextTermTerminalHandle>(null);
   const didAutoConnectRef = useRef(false);
 
+  // Which terminal renderer is mounted. `engineRef` mirrors it for callbacks
+  // (appendLog, focus) that are created once and must read the latest value.
+  const [engine, setEngine] = useState<TerminalEngine>('builtin');
+  const engineRef = useRef<TerminalEngine>(engine);
+  useEffect(() => { engineRef.current = engine; }, [engine]);
+
+  const writeToActiveTerminal = useCallback((data: string) => {
+    if (engineRef.current === 'next-term') nextTermRef.current?.write(data);
+    else termRef.current?.write(data);
+  }, []);
+
+  const focusActiveTerminal = useCallback(() => {
+    if (engineRef.current === 'next-term') nextTermRef.current?.focus();
+    else termRef.current?.focus();
+  }, []);
+
   const appendLog = useCallback((entry: ExecEventLog) => {
-    if (!termRef.current) return;
     // Defense in depth: termRef.write → buffer.write already contains parser throws,
     // but keep this path total too so a logging write can never bubble up here.
     try {
       if (entry.source === 'ws') {
-        termRef.current.write(entry.text);
+        writeToActiveTerminal(entry.text);
       } else if (entry.source === 'error') {
-        termRef.current.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
+        writeToActiveTerminal(`\r\n\x1b[31m[ERROR]\x1b[0m ${entry.text}\r\n`);
       }
     } catch (e) {
       terror('screen.appendLog', 'write threw', { err: errInfo(e), source: entry.source });
     }
-  }, []);
+  }, [writeToActiveTerminal]);
 
   const client = useMemo(
     () =>
@@ -229,7 +253,7 @@ export default function ExecPocScreen() {
           initialInput,
         });
         setShowSetup(false);
-        termRef.current?.focus();
+        focusActiveTerminal();
       } catch (error) {
         appendLog({
           timestamp: Date.now(),
@@ -285,10 +309,20 @@ export default function ExecPocScreen() {
     tinfo('screen.reset', 'terminal error boundary reset — remounting with fresh buffer');
     setTerminalEpoch((e) => e + 1);
     setTimeout(() => {
-      termRef.current?.focus();
+      focusActiveTerminal();
       if (client.getState() === 'open') client.send('\f', false);
     }, 50);
-  }, [client]);
+  }, [client, focusActiveTerminal]);
+
+  // Swap terminal engines. The freshly-mounted engine starts with a blank
+  // buffer, so nudge a repaint (Ctrl-L) once it's attached.
+  const toggleEngine = useCallback(() => {
+    setEngine((prev) => (prev === 'builtin' ? 'next-term' : 'builtin'));
+    setTimeout(() => {
+      focusActiveTerminal();
+      if (client.getState() === 'open') client.send('\f', false);
+    }, 60);
+  }, [client, focusActiveTerminal]);
 
   const copyLogs = useCallback(async () => {
     const dump = dumpTerminalLog();
@@ -320,6 +354,13 @@ export default function ExecPocScreen() {
             </Text>
           </View>
           <View style={styles.headerActions}>
+            {Platform.OS !== 'web' && (
+              <Pressable onPress={toggleEngine} hitSlop={8}>
+                <Text style={[styles.headerLink, engine === 'next-term' && { color: '#bc8cff' }]}>
+                  {engine === 'next-term' ? 'next-term' : 'built-in'}
+                </Text>
+              </Pressable>
+            )}
             <Pressable onPress={copyLogs} onLongPress={() => { clearTerminalLog(); Alert.alert('Terminal logs cleared'); }} hitSlop={8}>
               <Text style={styles.headerLink}>Logs</Text>
             </Pressable>
@@ -434,6 +475,16 @@ export default function ExecPocScreen() {
                   if (client.getState() === 'open') client.send(data, false);
                 }}
                 onResize={(cols, rows) => client.resize(cols, rows)}
+              />
+            ) : engine === 'next-term' ? (
+              <NextTermTerminalNative
+                ref={nextTermRef}
+                onData={(data: string) => {
+                  if (client.getState() === 'open') client.send(data, false);
+                }}
+                onResize={(cols: number, rows: number) => client.resize(cols, rows)}
+                fontSize={13}
+                theme={TERMINAL_THEME}
               />
             ) : (
               <SkiaTerminalNative
