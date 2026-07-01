@@ -166,12 +166,15 @@ export default function ExecPocScreen() {
     cmd?: string;
     attachSessionId?: string;
     resumeSessionId?: string;
+    engine?: string;
   }>();
   const paramName = typeof params.name === 'string' ? params.name : '';
   const paramCwd = typeof params.cwd === 'string' ? params.cwd : '';
   const paramCmd = typeof params.cmd === 'string' ? params.cmd : '';
   const paramAttachSessionId = typeof params.attachSessionId === 'string' ? params.attachSessionId : '';
   const paramResumeSessionId = typeof params.resumeSessionId === 'string' ? params.resumeSessionId : '';
+  const initialEngine: TerminalEngine =
+    Platform.OS !== 'web' && params.engine === 'next-term' ? 'next-term' : 'builtin';
   const routeCommand =
     paramCmd ||
     (paramResumeSessionId ? buildResumeCommand(paramResumeSessionId) : '');
@@ -196,7 +199,7 @@ export default function ExecPocScreen() {
 
   // Which terminal renderer is mounted. `engineRef` mirrors it for callbacks
   // (appendLog, focus) that are created once and must read the latest value.
-  const [engine, setEngine] = useState<TerminalEngine>('builtin');
+  const [engine, setEngine] = useState<TerminalEngine>(initialEngine);
   const engineRef = useRef<TerminalEngine>(engine);
   useEffect(() => { engineRef.current = engine; }, [engine]);
 

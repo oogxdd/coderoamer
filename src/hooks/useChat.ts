@@ -25,7 +25,8 @@ import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
 
-const CODEX_MODEL = 'gpt-5-codex';
+const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
+const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
 
 interface SessionIds {
   claudeSessionId?: string;
@@ -243,7 +244,11 @@ export function useChat(options: UseChatOptions) {
     [emitSessionIds]
   );
 
-  const isStreaming = status === 'streaming' || status === 'connecting' || status === 'reconnecting';
+  const isStreaming =
+    status === 'streaming' ||
+    status === 'connecting' ||
+    status === 'reconnecting' ||
+    activeRunRef.current !== undefined;
 
   const updateMessages = useCallback((updater: (prev: ChatMessage[]) => ChatMessage[]) => {
     setMessages((prev) => {
@@ -366,6 +371,7 @@ export function useChat(options: UseChatOptions) {
 
       (async () => {
         const controller = new AbortController();
+        let disconnectedBeforeExit = false;
         abortRef.current = controller;
         try {
           await api.streamExec(
@@ -373,7 +379,12 @@ export function useChat(options: UseChatOptions) {
             [],
             (event) => processServiceEventRef.current(event),
             controller.signal,
-            { attachSessionId: activeRun.execSessionId }
+            {
+              attachSessionId: activeRun.execSessionId,
+              onDisconnectBeforeExit: () => {
+                disconnectedBeforeExit = true;
+              },
+            }
           );
         } catch (err: any) {
           if (err.name !== 'AbortError') {
@@ -382,6 +393,11 @@ export function useChat(options: UseChatOptions) {
         } finally {
           if (abortRef.current === controller) {
             abortRef.current = null;
+          }
+          if (disconnectedBeforeExit && activeRunRef.current) {
+            setStatusTracked('idle');
+            await persistMessages();
+            return;
           }
           execSessionIdRef.current = undefined;
           activeUserMessageIdRef.current = undefined;
@@ -674,7 +690,7 @@ export function useChat(options: UseChatOptions) {
       switch (event.type) {
         case 'threadStarted':
           setCodexSessionId(event.threadId);
-          setModelName((prev) => prev ?? CODEX_MODEL);
+          setModelName((prev) => prev ?? CODEX_DEFAULT_MODEL_LABEL);
           break;
         case 'assistantDelta':
           codexSawAssistantRef.current = true;
@@ -946,6 +962,10 @@ export function useChat(options: UseChatOptions) {
   const sendMessage = useCallback(
     async (text?: string) => {
       if (statusRef.current !== 'idle') return;
+      if (activeRunRef.current) {
+        loadSession();
+        return;
+      }
 
       const prompt = (text ?? inputText).trim();
       if (!prompt) return;
@@ -1024,14 +1044,19 @@ export function useChat(options: UseChatOptions) {
 
         commandParts.push(claudeCmd);
       } else {
-        setModelName(CODEX_MODEL);
+        const codexModel = (await getSetting('codexModel'))?.trim();
+        setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
           : buildFallbackPrompt(historyBeforeSend, prompt);
 
-        const codexCmd = codexSessionIdRef.current
-          ? `codex exec resume ${shellQuote(codexSessionIdRef.current)} --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`
-          : `codex exec --json --model ${CODEX_MODEL} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`;
+        let codexCmd = codexSessionIdRef.current
+          ? `codex exec resume ${shellQuote(codexSessionIdRef.current)} --json`
+          : 'codex exec --json';
+        if (codexModel) {
+          codexCmd += ` --model ${shellQuote(codexModel)}`;
+        }
+        codexCmd += ` --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`;
 
         commandParts.push(codexCmd);
       }
@@ -1052,6 +1077,7 @@ export function useChat(options: UseChatOptions) {
       const abortController = new AbortController();
       abortRef.current = abortController;
       execSessionIdRef.current = undefined;
+      let disconnectedBeforeExit = false;
 
       try {
         await api.streamExec(
@@ -1061,7 +1087,10 @@ export function useChat(options: UseChatOptions) {
           abortController.signal,
           {
             path: '/bin/bash',
-            maxRunAfterDisconnect: '0',
+            maxRunAfterDisconnect: CHAT_MAX_RUN_AFTER_DISCONNECT,
+            onDisconnectBeforeExit: () => {
+              disconnectedBeforeExit = true;
+            },
             onSessionId: (sessionId) => {
               execSessionIdRef.current = sessionId;
               setActiveRun({
@@ -1108,18 +1137,24 @@ export function useChat(options: UseChatOptions) {
         if (abortRef.current === abortController) {
           abortRef.current = null;
         }
+        if (disconnectedBeforeExit && activeRunRef.current) {
+          setStatusTracked('idle');
+          await persistMessages();
+          return;
+        }
         setActiveRun(undefined);
         execSessionIdRef.current = undefined;
         activeUserMessageIdRef.current = undefined;
         activeAssistantMessageIdRef.current = undefined;
         assistantTextSeenRef.current = false;
         setStatusTracked('idle');
-        persistMessages();
+        await persistMessages();
       }
     },
     [
       inputText,
       chatId,
+      loadSession,
       persistMessages,
       processServiceEvent,
       provider,
@@ -1135,7 +1170,7 @@ export function useChat(options: UseChatOptions) {
   );
 
   const interrupt = useCallback(() => {
-    const sessionId = execSessionIdRef.current;
+    const sessionId = execSessionIdRef.current ?? activeRunRef.current?.execSessionId;
     if (sessionId) {
       api.killExecSession(spriteName, sessionId).catch(() => {});
       execSessionIdRef.current = undefined;

@@ -346,6 +346,7 @@ interface StreamExecOptions {
   tty?: boolean;
   stdin?: boolean;
   onSessionId?: (sessionId: string) => void;
+  onDisconnectBeforeExit?: () => void;
 }
 
 function createAbortError(): Error {
@@ -600,7 +601,11 @@ export async function streamExec(
         return;
       }
       if (!sawExit) {
-        onEvent({ type: 'exit', exit_code: 0 });
+        if (options.onDisconnectBeforeExit) {
+          options.onDisconnectBeforeExit();
+        } else {
+          onEvent({ type: 'exit', exit_code: 0 });
+        }
       }
       settle();
     };
