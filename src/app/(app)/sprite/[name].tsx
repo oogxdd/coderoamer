@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
+  AppState,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -79,6 +80,7 @@ export default function SpriteDetailScreen() {
   // null = closed. 'new' creates a fresh session; 'edit' changes the current session's directory.
   const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'edit' | null>(null);
   const chatListRef = useRef<PersistedChat[]>([]);
+  const appStateRef = useRef(AppState.currentState);
 
   const spriteName = name ?? '';
   const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
@@ -203,6 +205,22 @@ export default function SpriteDetailScreen() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, reloadNonce]);
+
+  // Re-sync the current chat whenever the app returns from the background or lock screen.
+  // The hook will reattach to a still-running exec session, or merge the on-disk transcript
+  // if the agent finished while the app was suspended.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const wasAway =
+        appStateRef.current === 'inactive' || appStateRef.current === 'background';
+      appStateRef.current = nextState;
+      if (nextState === 'active' && wasAway && chatId) {
+        setReloadNonce((n) => n + 1);
+      }
+    });
+
+    return () => subscription.remove();
+  }, [chatId]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -787,6 +805,29 @@ function OverviewTab({
             Browse every Claude session that ever ran on this sprite (read from
             ~/.claude/projects), view its full history, and continue it — like
             `claude --resume`, natively.
+          </Text>
+        </View>
+        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [
+          styles.connectRow,
+          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+        ]}
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/exec-poc',
+            params: { name: spriteName, cwd: workingDirectory, engine: 'next-term' },
+          })
+        }
+      >
+        <View style={styles.connectRowText}>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>
+            Stream terminal (next-term)
+          </Text>
+          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
+            Experimental renderer using the vendored next-term engine with the same
+            WebSocket TTY connection and working directory.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
