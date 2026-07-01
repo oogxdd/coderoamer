@@ -142,6 +142,36 @@ async function decodeMessageData(data: unknown): Promise<string> {
   return String(data ?? '');
 }
 
+async function messageDataToBytes(data: unknown): Promise<Uint8Array | undefined> {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return new Uint8Array(await data.arrayBuffer());
+  }
+  return undefined;
+}
+
+function stringLooksLikeBinaryFrame(text: string): boolean {
+  if (!text) return false;
+  const streamId = text.charCodeAt(0);
+  return streamId >= 1 && streamId <= 3;
+}
+
+function stringToBytes(text: string): Uint8Array {
+  return Uint8Array.from(Array.from(text, (ch) => ch.charCodeAt(0) & 0xff));
+}
+
+function parseExitCode(bytes: Uint8Array): number {
+  if (bytes.length === 0) return 0;
+  if (bytes.length === 1) return bytes[0];
+
+  const text = new TextDecoder().decode(bytes).trim();
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : bytes[0];
+}
+
 function safeStringify(value: unknown): string {
   try {
     return JSON.stringify(value);
@@ -199,6 +229,9 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     currentSpriteName = spriteName;
     currentSessionId = attachSessionId || undefined;
     options.onSessionId(currentSessionId);
+    const stdoutDecoder = new TextDecoder();
+    const stderrDecoder = new TextDecoder();
+    const rawDecoder = new TextDecoder();
 
     const encodedSprite = encodeURIComponent(spriteName);
     const isWeb = Platform.OS === 'web';
@@ -220,6 +253,7 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
         },
       });
     }
+    socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => {
       setState('open');
@@ -240,19 +274,42 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       }
     };
 
-    socket.onmessage = async (event) => {
-      let raw: string;
-      try {
-        raw = await decodeMessageData(event.data);
-      } catch (e) {
-        terror('exec.msg', 'decode threw', { err: errInfo(e), kind: typeof event.data });
+    const handleBinaryFrame = (bytes: Uint8Array): boolean => {
+      if (bytes.length === 0) return true;
+      const streamId = bytes[0];
+      const payload = bytes.slice(1);
+
+      if (streamId === 1) {
+        const output = stdoutDecoder.decode(payload, { stream: true });
+        if (output) options.onLog(makeLog('ws', output));
+        return true;
+      }
+
+      if (streamId === 2) {
+        const output = stderrDecoder.decode(payload, { stream: true });
+        if (output) options.onLog(makeLog('ws', output));
+        return true;
+      }
+
+      if (streamId === 3) {
+        const stdoutRemainder = stdoutDecoder.decode();
+        const stderrRemainder = stderrDecoder.decode();
+        const rawRemainder = rawDecoder.decode();
+        if (stdoutRemainder) options.onLog(makeLog('ws', stdoutRemainder));
+        if (stderrRemainder) options.onLog(makeLog('ws', stderrRemainder));
+        if (rawRemainder) options.onLog(makeLog('ws', rawRemainder));
+        options.onLog(makeLog('local', `Exec exited with code ${parseExitCode(payload)}`));
+        socket?.close();
+        return true;
+      }
+
+      return false;
+    };
+
+    const handleTextMessage = (raw: string) => {
+      if (stringLooksLikeBinaryFrame(raw) && handleBinaryFrame(stringToBytes(raw))) {
         return;
       }
-      tdebug('exec.msg', 'recv', {
-        len: raw.length,
-        kind: typeof event.data,
-        preview: hexPreview(raw, 80),
-      });
 
       let parsed: unknown;
       try {
@@ -288,6 +345,20 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
           }
         }
 
+        if (eventType === 'exit') {
+          const exitCode =
+            asNumber(obj.exit_code) ??
+            asNumber(obj.exitCode) ??
+            0;
+          const stdoutRemainder = stdoutDecoder.decode();
+          const stderrRemainder = stderrDecoder.decode();
+          const rawRemainder = rawDecoder.decode();
+          if (stdoutRemainder) options.onLog(makeLog('ws', stdoutRemainder));
+          if (stderrRemainder) options.onLog(makeLog('ws', stderrRemainder));
+          if (rawRemainder) options.onLog(makeLog('ws', rawRemainder));
+          options.onLog(makeLog('local', `Exec exited with code ${exitCode}`));
+        }
+
         const output = extractOutput(parsed);
         if (output) {
           options.onLog(makeLog('ws', output));
@@ -301,6 +372,39 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       options.onLog(makeLog('ws', raw));
     };
 
+    socket.onmessage = async (event) => {
+      try {
+        if (typeof event.data !== 'string') {
+          const bytes = await messageDataToBytes(event.data);
+          if (bytes) {
+            tdebug('exec.msg', 'recv.bytes', {
+              len: bytes.byteLength,
+              first: bytes[0],
+            });
+            if (handleBinaryFrame(bytes)) return;
+
+            const raw = rawDecoder.decode(bytes, { stream: true });
+            tdebug('exec.msg', 'recv.raw-bytes', {
+              len: raw.length,
+              preview: hexPreview(raw, 80),
+            });
+            handleTextMessage(raw);
+            return;
+          }
+        }
+
+        const raw = await decodeMessageData(event.data);
+        tdebug('exec.msg', 'recv', {
+          len: raw.length,
+          kind: typeof event.data,
+          preview: hexPreview(raw, 80),
+        });
+        handleTextMessage(raw);
+      } catch (e) {
+        terror('exec.msg', 'message handler threw', { err: errInfo(e), kind: typeof event.data });
+      }
+    };
+
     socket.onerror = (event) => {
       setState('error');
       twarn('exec.conn', 'error', { event: safeStringify(event) });
@@ -308,6 +412,12 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     };
 
     socket.onclose = (event) => {
+      const stdoutRemainder = stdoutDecoder.decode();
+      const stderrRemainder = stderrDecoder.decode();
+      const rawRemainder = rawDecoder.decode();
+      if (stdoutRemainder) options.onLog(makeLog('ws', stdoutRemainder));
+      if (stderrRemainder) options.onLog(makeLog('ws', stderrRemainder));
+      if (rawRemainder) options.onLog(makeLog('ws', rawRemainder));
       setState('closed');
       tinfo('exec.conn', 'close', { code: event.code, reason: event.reason || 'n/a' });
       options.onLog(

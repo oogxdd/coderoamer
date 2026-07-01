@@ -497,41 +497,80 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
 
   // ── Gestures ──────────────────────────────────────────────────────
 
+  const clearSelection = useCallback(() => {
+    if (!selectionRef.current) return;
+    setSelection(null);
+    onSelectionChange?.(null);
+  }, [onSelectionChange]);
+
+  const handleTapGestureEnd = useCallback(() => {
+    textInputRef.current?.focus();
+    clearSelection();
+  }, [clearSelection]);
+
+  const scrollRemainderRef = useRef(0);
+  const lastPanTranslationRef = useRef(0);
+  const handleScrollGestureUpdate = useCallback((translationY: number) => {
+    const deltaY = translationY - lastPanTranslationRef.current;
+    lastPanTranslationRef.current = translationY;
+    scrollRemainderRef.current += deltaY;
+
+    const linesToScroll = Math.trunc(scrollRemainderRef.current / cellHeight);
+    if (linesToScroll === 0) return;
+
+    scrollRemainderRef.current -= linesToScroll * cellHeight;
+    const maxScroll = buffer.ybase;
+    const newDisp = Math.max(-maxScroll, Math.min(0, buffer.ydisp + linesToScroll));
+    if (newDisp !== buffer.ydisp) {
+      buffer.ydisp = newDisp;
+      scheduleRender();
+    }
+  }, [buffer, cellHeight, scheduleRender]);
+
+  const handleScrollGestureEnd = useCallback(() => {
+    scrollRemainderRef.current = 0;
+    lastPanTranslationRef.current = 0;
+  }, []);
+
+  const handleLongPressGestureStart = useCallback((x: number, y: number) => {
+    const col = Math.floor(x / cellWidth);
+    const row = Math.floor(y / cellHeight);
+    if (col >= 0 && col < buffer.cols && row >= 0 && row < buffer.rows) {
+      const [wStart, wEnd] = findWordAt(buffer, col, row);
+      setSelection({ start: [wStart, row], end: [wEnd, row] });
+      if (Platform.OS !== 'web') Vibration.vibrate(30);
+    }
+  }, [buffer, cellWidth, cellHeight]);
+
+  const handleSelectionPanUpdate = useCallback((x: number, y: number) => {
+    if (!selectionRef.current) return;
+    const col = Math.max(0, Math.min(buffer.cols, Math.floor(x / cellWidth)));
+    const row = Math.max(0, Math.min(buffer.rows - 1, Math.floor(y / cellHeight)));
+    setSelection((prev) => prev ? { ...prev, end: [col, row] } : null);
+  }, [buffer, cellWidth, cellHeight]);
+
+  const handleSelectionPanEnd = useCallback(() => {
+    if (selectionRef.current) {
+      onSelectionChange?.(extractSelectionText(buffer, selectionRef.current));
+    }
+  }, [buffer, onSelectionChange]);
+
   // Tap → focus
   const tapGesture = Gesture.Tap()
     .onEnd(() => {
       'worklet';
-      runOnJS(() => {
-        textInputRef.current?.focus();
-        if (selection) {
-          setSelection(null);
-          onSelectionChange?.(null);
-        }
-      })();
+      runOnJS(handleTapGestureEnd)();
     });
 
   // Pan → scroll through scrollback
-  const scrollAccumulator = useRef(0);
   const panGesture = Gesture.Pan()
     .onUpdate((e) => {
       'worklet';
-      runOnJS((dy: number) => {
-        scrollAccumulator.current += dy;
-        const linesToScroll = Math.trunc(scrollAccumulator.current / cellHeight);
-        if (linesToScroll !== 0) {
-          scrollAccumulator.current -= linesToScroll * cellHeight;
-          const maxScroll = buffer.ybase;
-          const newDisp = Math.max(-maxScroll, Math.min(0, buffer.ydisp + linesToScroll));
-          if (newDisp !== buffer.ydisp) {
-            buffer.ydisp = newDisp;
-            scheduleRender();
-          }
-        }
-      })(e.translationY - (scrollAccumulator.current || 0));
+      runOnJS(handleScrollGestureUpdate)(e.translationY);
     })
     .onEnd(() => {
       'worklet';
-      runOnJS(() => { scrollAccumulator.current = 0; })();
+      runOnJS(handleScrollGestureEnd)();
     });
 
   // Long press → select word at position
@@ -539,15 +578,7 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     .minDuration(400)
     .onStart((e) => {
       'worklet';
-      runOnJS((x: number, y: number) => {
-        const col = Math.floor(x / cellWidth);
-        const row = Math.floor(y / cellHeight);
-        if (col >= 0 && col < buffer.cols && row >= 0 && row < buffer.rows) {
-          const [wStart, wEnd] = findWordAt(buffer, col, row);
-          setSelection({ start: [wStart, row], end: [wEnd, row] });
-          Vibration.vibrate(30);
-        }
-      })(e.x, e.y);
+      runOnJS(handleLongPressGestureStart)(e.x, e.y);
     });
 
   // Pan after long press → extend selection
@@ -555,20 +586,11 @@ export const SkiaTerminal = React.forwardRef<SkiaTerminalHandle, SkiaTerminalPro
     .activateAfterLongPress(400)
     .onUpdate((e) => {
       'worklet';
-      runOnJS((x: number, y: number) => {
-        if (!selectionRef.current) return;
-        const col = Math.max(0, Math.min(buffer.cols, Math.floor(x / cellWidth)));
-        const row = Math.max(0, Math.min(buffer.rows - 1, Math.floor(y / cellHeight)));
-        setSelection((prev) => prev ? { ...prev, end: [col, row] } : null);
-      })(e.x, e.y);
+      runOnJS(handleSelectionPanUpdate)(e.x, e.y);
     })
     .onEnd(() => {
       'worklet';
-      runOnJS(() => {
-        if (selectionRef.current) {
-          onSelectionChange?.(extractSelectionText(buffer, selectionRef.current));
-        }
-      })();
+      runOnJS(handleSelectionPanEnd)();
     });
 
   const composedGestures = Gesture.Race(
