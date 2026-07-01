@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import {
   AgentProvider,
   ChatContent,
@@ -152,6 +153,8 @@ function debugChat(...args: unknown[]) {
   console.log('[chat-debug]', ...args);
 }
 
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export function useChat(options: UseChatOptions) {
   const { spriteName, chatId, workingDirectory, provider } = options;
 
@@ -179,6 +182,12 @@ export function useChat(options: UseChatOptions) {
   const serviceEventsSeenRef = useRef(0);
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
+  // A turn is "active" from send until it genuinely finishes or is interrupted —
+  // a dropped network connection (e.g. app backgrounded) does NOT end it, since
+  // the service keeps running on the sprite.
+  const turnActiveRef = useRef(false);
+  const sawExitRef = useRef(false);
+  const resumingRef = useRef(false);
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -661,6 +670,9 @@ export function useChat(options: UseChatOptions) {
           break;
         }
         case 'exit': {
+          // The service process finished — this turn is genuinely done (vs. a
+          // mere connection drop), so it's safe to stop reconnecting.
+          sawExitRef.current = true;
           const remaining =
             provider === 'claude'
               ? claudeParserRef.current.flush()
@@ -691,6 +703,122 @@ export function useChat(options: UseChatOptions) {
     },
     [handleClaudeEvent, handleCodexEvent, provider, setStatusTracked]
   );
+
+  // Pull the authoritative on-disk Claude transcript from the sprite and merge
+  // it in. This is the source of truth: it recovers the full answer even if the
+  // live stream was missed entirely (app closed/backgrounded during the turn).
+  const reconcileTranscript = useCallback(async () => {
+    if (provider !== 'claude') return;
+    const sessionId = claudeSessionIdRef.current;
+    if (!sessionId) return;
+    try {
+      const transcript = await readClaudeSessionMessages(spriteName, sessionId);
+      if (transcript.length === 0) return;
+      const local = messagesRef.current;
+      // Don't drop newer local turns; signature check avoids needless churn.
+      if (local.length !== 0 && countUserMessages(transcript) < countUserMessages(local)) return;
+      const merged = mergeTranscript(local, transcript);
+      if (conversationSignature(merged) === conversationSignature(local)) return;
+      messagesRef.current = merged;
+      setMessages(merged);
+      await saveChatMessages(chatId, merged);
+    } catch {
+      // Offline / no transcript yet — keep the local copy.
+    }
+  }, [provider, spriteName, chatId]);
+
+  // End-of-turn cleanup: flush parser tail, stop the (now-finished) service so
+  // Sprites doesn't respawn it, and return to idle.
+  const finalizeTurn = useCallback(
+    async (controller: AbortController) => {
+      const remaining =
+        provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
+      if (provider === 'claude') {
+        for (const parsed of remaining as ClaudeStreamEvent[]) {
+          if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
+          if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
+          handleClaudeEvent(parsed);
+        }
+      } else {
+        for (const parsed of remaining as CodexStreamEvent[]) {
+          handleCodexEvent(parsed);
+        }
+      }
+      if (provider === 'codex' && !codexSawAssistantRef.current) {
+        reportCodexAuthIssue(codexStderrRef.current);
+      }
+      if (abortRef.current === controller) {
+        api.deleteService(spriteName, serviceNameRef.current).catch(() => {});
+        abortRef.current = null;
+      }
+      turnActiveRef.current = false;
+      activeUserMessageIdRef.current = undefined;
+      activeAssistantMessageIdRef.current = undefined;
+      assistantTextSeenRef.current = false;
+      setStatusTracked('idle');
+      await persistMessages();
+    },
+    [
+      provider,
+      handleClaudeEvent,
+      handleCodexEvent,
+      reportCodexAuthIssue,
+      spriteName,
+      setStatusTracked,
+      persistMessages,
+    ]
+  );
+
+  // Re-attach to a still-running service's logs after a dropped connection.
+  // Dedup (by UUID) makes replay safe. Retries with backoff while foregrounded;
+  // when backgrounded it bails and the AppState listener resumes it on return.
+  const resumeTurn = useCallback(async () => {
+    if (!turnActiveRef.current || resumingRef.current) return;
+    const controller = abortRef.current;
+    if (!controller) return;
+    resumingRef.current = true;
+    const serviceName = serviceNameRef.current;
+    try {
+      let attempt = 0;
+      while (turnActiveRef.current && !controller.signal.aborted) {
+        setStatusTracked('reconnecting');
+        try {
+          await api.streamServiceLogs(spriteName, serviceName, processServiceEvent, controller.signal);
+          if (sawExitRef.current) {
+            // Process genuinely finished — sync the transcript and wrap up.
+            await reconcileTranscript();
+            await finalizeTurn(controller);
+            return;
+          }
+          // Logs stream ended but the process is still alive — re-attach shortly.
+          if (AppState.currentState !== 'active') return;
+          await delay(1000);
+          continue;
+        } catch (err: any) {
+          if (err?.name === 'AbortError' || controller.signal.aborted) return;
+          const code = err?.name === 'AppError' ? err.code : undefined;
+          if (code === 'notFound') {
+            // Service already cleaned up — recover the answer from the transcript.
+            await reconcileTranscript();
+            await finalizeTurn(controller);
+            return;
+          }
+          if (code === 'unauthorized') {
+            setErrorMessage(err.message ?? 'Unauthorized');
+            await finalizeTurn(controller);
+            return;
+          }
+          // Network drop. If backgrounded, stop — AppState 'active' will retry.
+          if (AppState.currentState !== 'active') return;
+          attempt += 1;
+          if (attempt > 5) return;
+          await delay(Math.min(1000 * attempt, 5000));
+        }
+      }
+    } finally {
+      resumingRef.current = false;
+    }
+  }, [spriteName, processServiceEvent, reconcileTranscript, finalizeTurn, setStatusTracked]);
 
   const sendMessage = useCallback(
     async (text?: string) => {
@@ -814,6 +942,9 @@ export function useChat(options: UseChatOptions) {
         args: ['-c', fullCommand],
       };
 
+      turnActiveRef.current = true;
+      sawExitRef.current = false;
+
       try {
         await api.streamService(
           spriteName,
@@ -831,62 +962,48 @@ export function useChat(options: UseChatOptions) {
             abortController.signal
           );
         }
+        // Stream ended cleanly → the service process finished.
+        await finalizeTurn(abortController);
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
+        if (err?.name === 'AbortError' || abortController.signal.aborted) {
+          // User interrupted; interrupt() handles cleanup.
+          return;
+        }
+        const code = err?.name === 'AppError' ? err.code : undefined;
+        if (code === 'unauthorized' || code === 'serverError') {
+          // A real failure that reconnecting won't fix.
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
           setErrorMessage(message);
           if (provider === 'codex') {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
+          await finalizeTurn(abortController);
+          return;
         }
-      } finally {
-        const remaining =
-          provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
-
-        if (provider === 'claude') {
-          for (const parsed of remaining as ClaudeStreamEvent[]) {
-            if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
-            if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
-            handleClaudeEvent(parsed);
-          }
-        } else {
-          for (const parsed of remaining as CodexStreamEvent[]) {
-            handleCodexEvent(parsed);
-          }
+        if (sawExitRef.current) {
+          // The turn finished right before the socket closed.
+          await finalizeTurn(abortController);
+          return;
         }
-
-        if (provider === 'codex' && !codexSawAssistantRef.current) {
-          reportCodexAuthIssue(codexStderrRef.current);
-        }
-
-        if (abortRef.current === abortController) {
-          // Stream finished (normally or with error) without being interrupted.
-          // Delete the service so Sprites doesn't restart it and respawn Claude,
-          // which would create orphan ~/.claude/projects/*/*.jsonl sessions.
-          // interrupt() already deletes the service on abort.
-          api.deleteService(spriteName, serviceNameRef.current).catch(() => {});
-          abortRef.current = null;
-        }
-        activeUserMessageIdRef.current = undefined;
-        activeAssistantMessageIdRef.current = undefined;
-        assistantTextSeenRef.current = false;
-        setStatusTracked('idle');
-        persistMessages();
+        // Network drop (e.g. app backgrounded): the service keeps running on the
+        // sprite. Don't show an error and don't delete it — reconnect to its logs.
+        // If we're backgrounded the resume fails fast; AppState 'active' retries.
+        debugChat('stream dropped; reconnecting', provider, err?.message);
+        await resumeTurn();
       }
     },
     [
       inputText,
-      persistMessages,
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
       setStatusTracked,
       spriteName,
-      handleClaudeEvent,
-      handleCodexEvent,
       updateMessages,
       workingDirectory,
+      finalizeTurn,
+      resumeTurn,
     ]
   );
 
@@ -895,6 +1012,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current.abort();
       abortRef.current = null;
     }
+    turnActiveRef.current = false;
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
@@ -907,6 +1025,23 @@ export function useChat(options: UseChatOptions) {
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
   }, []);
+
+  // On returning to the foreground: resume an in-flight turn that lost its socket
+  // while backgrounded, or — if no turn is active — pull in anything that
+  // finished on the sprite while we were away. Guarantees the full conversation.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      if (turnActiveRef.current && statusRef.current === 'reconnecting') {
+        // A turn whose socket dropped while we were away — resume it.
+        resumeTurn();
+      } else if (statusRef.current === 'idle') {
+        // Nothing in flight — pull anything that finished on the sprite while away.
+        reconcileTranscript();
+      }
+    });
+    return () => sub.remove();
+  }, [resumeTurn, reconcileTranscript]);
 
   return {
     messages,
