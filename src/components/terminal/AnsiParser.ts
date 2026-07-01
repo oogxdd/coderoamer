@@ -130,12 +130,14 @@ export class AnsiParser {
    * EscapeSequenceParser.parse().
    */
   parse(data: string): void {
-    for (let i = 0; i < data.length; i++) {
+    let i = 0;
+    while (i < data.length) {
       const code = data.charCodeAt(i);
+      let consumed = 1;
 
       switch (this._state) {
         case ParserState.GROUND:
-          this._handleGround(data, i, code);
+          consumed = this._handleGround(data, i, code);
           break;
         case ParserState.ESCAPE:
           this._handleEscape(data, i, code);
@@ -147,13 +149,15 @@ export class AnsiParser {
           this._handleCsiIntermediate(data, i, code);
           break;
         case ParserState.OSC_STRING:
-          this._handleOscString(data, i, code);
+          consumed = this._handleOscString(data, i, code);
           break;
       }
+
+      i += consumed;
     }
   }
 
-  private _handleGround(data: string, i: number, code: number): void {
+  private _handleGround(data: string, i: number, code: number): number {
     if (code === 0x1b) {
       // ESC
       this._state = ParserState.ESCAPE;
@@ -164,12 +168,17 @@ export class AnsiParser {
     } else {
       // Printable character
       const cp = data.codePointAt(i)!;
+      if (code >= 0xd800 && code <= 0xdfff && cp <= 0xffff) {
+        this._callbacks.print('\uFFFD', 1);
+        return 1;
+      }
       const ch = String.fromCodePoint(cp);
       const w = charWidth(cp);
       this._callbacks.print(ch, w);
       // Skip surrogate pair if needed
-      if (cp > 0xffff) i++;
+      if (cp > 0xffff) return 2;
     }
+    return 1;
   }
 
   private _handleEscape(data: string, i: number, code: number): void {
@@ -248,7 +257,7 @@ export class AnsiParser {
     }
   }
 
-  private _handleOscString(data: string, i: number, code: number): void {
+  private _handleOscString(data: string, i: number, code: number): number {
     if (code === 0x07 || (code === 0x1b && i + 1 < data.length && data.charCodeAt(i + 1) === 0x5c)) {
       // BEL or ESC \ — terminate OSC
       if (this._oscId === -1) {
@@ -260,11 +269,12 @@ export class AnsiParser {
       }
       this._callbacks.executeOsc(this._oscId, this._oscData);
       this._state = ParserState.GROUND;
-      if (code === 0x1b) i++; // skip the backslash
+      if (code === 0x1b) return 2; // skip the backslash
     } else if (this._oscData.length < MAX_OSC_LENGTH) {
       // Cap payload — an unterminated OSC must not grow this string forever.
       this._oscData += String.fromCharCode(code);
     }
+    return 1;
   }
 
   reset(): void {
