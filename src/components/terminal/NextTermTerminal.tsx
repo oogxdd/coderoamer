@@ -49,7 +49,7 @@ import {
   VTParser,
   DEFAULT_THEME as CORE_DEFAULT_THEME,
 } from '@/vendor/next-term/core';
-import type { Theme as CoreTheme } from '@/vendor/next-term/core';
+import type { Buffer, Theme as CoreTheme } from '@/vendor/next-term/core';
 import { SkiaRenderer } from '@/vendor/next-term/SkiaRenderer';
 import type { RenderCommand } from '@/vendor/next-term/SkiaRenderer';
 import type { TerminalTheme } from './SkiaTerminalRenderer';
@@ -151,6 +151,63 @@ function useMonoFonts(fontSize: number) {
   return { regular, bold, italic, boldItalic };
 }
 
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+function copyBufferRows(source: Buffer, target: Buffer): void {
+  const rowsToCopy = Math.min(source.rows, target.rows);
+  const maxSourceStart = source.rows - rowsToCopy;
+  const sourceStart = source.cursor.row < target.rows
+    ? 0
+    : clamp(source.cursor.row - target.rows + 1, 0, maxSourceStart);
+  const targetStart = 0;
+
+  for (let i = 0; i < rowsToCopy; i++) {
+    const sourceRow = sourceStart + i;
+    const targetRow = targetStart + i;
+    target.grid.pasteRow(
+      targetRow,
+      source.grid.copyRow(sourceRow),
+      source.grid.isWrapped(sourceRow),
+    );
+  }
+
+  const rowDelta = targetStart - sourceStart;
+  target.cursor = {
+    ...source.cursor,
+    row: clamp(source.cursor.row + rowDelta, 0, target.rows - 1),
+    col: clamp(source.cursor.col, 0, target.cols - 1),
+  };
+  if (source.scrollTop === 0 && source.scrollBottom === source.rows - 1) {
+    target.scrollTop = 0;
+    target.scrollBottom = target.rows - 1;
+  } else {
+    target.scrollTop = clamp(source.scrollTop + rowDelta, 0, target.rows - 1);
+    target.scrollBottom = clamp(source.scrollBottom + rowDelta, target.scrollTop, target.rows - 1);
+  }
+  for (const col of source.tabStops) {
+    if (col >= 0 && col < target.cols) target.tabStops.add(col);
+  }
+  target.grid.markAllDirty();
+}
+
+function copyScrollback(source: BufferSet, target: BufferSet): void {
+  const start = Math.max(0, source.scrollback.length - target.maxScrollback);
+  target.scrollback = source.scrollback.slice(start);
+  target.scrollbackWrap = source.scrollbackWrap.slice(start);
+  target.scrollbackCompact = source.scrollbackCompact.slice(start);
+}
+
+function resizeBufferSet(source: BufferSet, cols: number, rows: number, scrollback: number): BufferSet {
+  const target = new BufferSet(cols, rows, scrollback);
+  copyBufferRows(source.normal, target.normal);
+  copyBufferRows(source.alternate, target.alternate);
+  copyScrollback(source, target);
+  target.setActive(source.isAlternate);
+  return target;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Component
 // ────────────────────────────────────────────────────────────────────────────
@@ -239,12 +296,17 @@ export const NextTermTerminal = forwardRef<NextTermTerminalHandle, NextTermTermi
     useEffect(() => { rendererRef.current?.setTheme(coreTheme); scheduleRender(); }, [coreTheme, scheduleRender]);
     useEffect(() => { rendererRef.current?.setFont(fontSize, 'monospace'); scheduleRender(); }, [fontSize, scheduleRender]);
 
-    // ── Resize: the lib has no in-place resize, so rebuild the engine ──
+    // ── Resize: the lib has no in-place resize, so rebuild while preserving
+    // the visible grid. Focusing the hidden input changes keyboard height,
+    // which otherwise created a fresh blank terminal.
     const sizeRef = useRef({ cols, rows });
     useEffect(() => {
       if (cols === sizeRef.current.cols && rows === sizeRef.current.rows) return;
       sizeRef.current = { cols, rows };
-      const bs = new BufferSet(cols, rows, scrollback);
+      const previous = bufferSetRef.current;
+      const bs = previous
+        ? resizeBufferSet(previous, cols, rows, scrollback)
+        : new BufferSet(cols, rows, scrollback);
       bufferSetRef.current = bs;
       const parser = new VTParser(bs);
       if (onTitleChange) parser.setTitleChangeCallback(onTitleChange);
