@@ -295,7 +295,7 @@ export default function ExecPocScreen() {
         initialInput,
       });
       setShowSetup(false);
-      termRef.current?.focus();
+      focusActiveTerminal();
     } catch (error) {
       appendLog({ timestamp: Date.now(), source: 'error', text: `Connect failed: ${(error as Error).message}` });
     }
