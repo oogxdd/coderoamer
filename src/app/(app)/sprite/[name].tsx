@@ -264,8 +264,9 @@ export default function SpriteDetailScreen() {
   };
 
   const createChat = useCallback(async (config: NewSessionConfig) => {
-    // Stop any in-flight stream before switching away (one shared useChat instance).
-    if (chat.isStreaming) chat.interrupt();
+    // One useChat instance is shared across sessions. Detach the local stream
+    // before switching so the remote exec can keep running and be reattached later.
+    if (chat.isStreaming) chat.detachStream();
     const chats = chatListRef.current;
     const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
     const newNumber = maxNumber + 1;
@@ -294,7 +295,7 @@ export default function SpriteDetailScreen() {
     setActiveRun(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
-  }, [chat.isStreaming, chat.interrupt, spriteName]);
+  }, [chat.detachStream, chat.isStreaming, spriteName]);
 
   // Change the directory of the *current* session (only allowed before its first message).
   const updateCurrentDirectory = useCallback(async (config: NewSessionConfig) => {
@@ -309,30 +310,31 @@ export default function SpriteDetailScreen() {
   }, [chatId, spriteName]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
-    if (selectedChat.id === chatId) {
+    const latestChat = chatListRef.current.find((c) => c.id === selectedChat.id) ?? selectedChat;
+    if (latestChat.id === chatId) {
       setReloadNonce((n) => n + 1);
       setChatListVisible(false);
       return;
     }
-    // One useChat instance is shared across sessions, so stop any in-flight stream
-    // before switching — otherwise its messages would persist under the new chat id.
-    if (chat.isStreaming) chat.interrupt();
-    setChatId(selectedChat.id);
-    setChatName(selectedChat.customName ?? `Session ${selectedChat.chatNumber}`);
-    setChatProvider(normalizeProvider(selectedChat.provider));
-    setClaudeSessionId(selectedChat.claudeSessionId);
-    setCodexSessionId(selectedChat.codexSessionId);
-    setActiveRun(selectedChat.activeRun);
-    setWorkingDirectory(selectedChat.workingDirectory || defaultDirectory);
+    // One useChat instance is shared across sessions, so detach any in-flight stream
+    // before switching. The exec stays alive and is reattached when its chat reopens.
+    if (chat.isStreaming) chat.detachStream();
+    setChatId(latestChat.id);
+    setChatName(latestChat.customName ?? `Session ${latestChat.chatNumber}`);
+    setChatProvider(normalizeProvider(latestChat.provider));
+    setClaudeSessionId(latestChat.claudeSessionId);
+    setCodexSessionId(latestChat.codexSessionId);
+    setActiveRun(latestChat.activeRun);
+    setWorkingDirectory(latestChat.workingDirectory || defaultDirectory);
     setReloadNonce((n) => n + 1);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
-      c.id === selectedChat.id ? { ...c, lastUsed: Date.now() } : c
+      c.id === latestChat.id ? { ...c, lastUsed: Date.now() } : c
     );
     chatListRef.current = updated;
     saveChatList(spriteName, updated);
     setChatListVisible(false);
-  }, [chat.isStreaming, chat.interrupt, chatId, spriteName, defaultDirectory]);
+  }, [chat.detachStream, chat.isStreaming, chatId, spriteName, defaultDirectory]);
 
   // Resume a session discovered on the sprite (its on-disk transcript).
   // Reuses an existing local chat bound to the same session id, or creates one,
@@ -340,7 +342,7 @@ export default function SpriteDetailScreen() {
   // resume id with the session's original cwd when available.
   const handleResumeSession = useCallback(
     async (session: AgentSessionSummary, messages: ChatMessage[]) => {
-      if (chat.isStreaming) chat.interrupt();
+      if (chat.isStreaming) chat.detachStream();
       const dir = normalizeWorkingDirectory(session.cwd || defaultDirectory);
       const chats = chatListRef.current;
       const existing = chats.find((c) =>
@@ -397,7 +399,7 @@ export default function SpriteDetailScreen() {
       // Force a reload even if chatId didn't change (resuming the open chat).
       setReloadNonce((n) => n + 1);
     },
-    [chat.isStreaming, chat.interrupt, defaultDirectory, spriteName]
+    [chat.detachStream, chat.isStreaming, defaultDirectory, spriteName]
   );
 
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
@@ -608,11 +610,11 @@ export default function SpriteDetailScreen() {
               )
             }
           />
-          {chat.isStreaming && chat.status === 'connecting' && (
+          {chat.isStreaming && (chat.status === 'connecting' || chat.status === 'reconnecting') && (
             <View style={styles.connectingBar}>
               <ActivityIndicator size="small" color={colors.tint} />
               <Text style={[styles.connectingText, { color: colors.textSecondary }]}>
-                Connecting to {providerDisplayName(chatProvider)}...
+                {chat.status === 'reconnecting' ? 'Reconnecting to' : 'Connecting to'} {providerDisplayName(chatProvider)}...
               </Text>
             </View>
           )}
@@ -653,6 +655,7 @@ export default function SpriteDetailScreen() {
         <ChatListSheet
           spriteName={spriteName}
           currentChatId={chatId}
+          chats={chatListRef.current}
           onSelectChat={handleSelectChat}
           onNewChat={() => {
             setChatListVisible(false);

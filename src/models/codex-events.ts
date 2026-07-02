@@ -23,7 +23,7 @@ export type CodexStreamEvent =
   | { type: 'todoList'; listId: string; items: TodoEntry[] }
   | { type: 'turnCompleted' }
   | { type: 'error'; message: string }
-  | { type: 'unknown' };
+  | { type: 'unknown'; rawType?: string; itemType?: string; keys?: string[] };
 
 function readItemId(value: unknown): string | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -273,8 +273,17 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
       });
       break;
     }
-    default:
-      events.push({ type: 'unknown' });
+    default: {
+      const item = jsonGet(json, 'item');
+      events.push({
+        type: 'unknown',
+        rawType: type || undefined,
+        itemType: item && typeof item === 'object' && !Array.isArray(item)
+          ? readItemType(item)
+          : undefined,
+        keys: Object.keys(json).slice(0, 12),
+      });
+    }
   }
 
   return events;

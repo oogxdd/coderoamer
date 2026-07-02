@@ -17,6 +17,7 @@ import { shortWorkingDirectory } from '@/constants/session';
 interface ChatListSheetProps {
   spriteName: string;
   currentChatId: string;
+  chats?: PersistedChat[];
   onSelectChat: (chat: PersistedChat) => void;
   onNewChat: () => void;
   onClose: () => void;
@@ -25,6 +26,7 @@ interface ChatListSheetProps {
 export function ChatListSheet({
   spriteName,
   currentChatId,
+  chats: providedChats,
   onSelectChat,
   onNewChat,
   onClose,
@@ -33,8 +35,12 @@ export function ChatListSheet({
   const [chats, setChats] = useState<PersistedChat[]>([]);
 
   useEffect(() => {
+    if (providedChats) {
+      setChats(providedChats);
+      return;
+    }
     loadChatList(spriteName).then(setChats);
-  }, [spriteName]);
+  }, [providedChats, spriteName]);
 
   const handleDelete = (chat: PersistedChat) => {
     Alert.alert(
@@ -140,6 +146,7 @@ export function ChatListSheet({
                   >
                     {providerDisplayName(item.provider)}
                     {item.workingDirectory ? ` · ${shortWorkingDirectory(item.workingDirectory)}` : ''}
+                    {item.activeRun ? ' · Running' : ''}
                   </Text>
                 </View>
                 {isActive && (

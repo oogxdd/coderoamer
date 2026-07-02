@@ -27,6 +27,7 @@ import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
+const DEBUG_SNIPPET_MAX = 240;
 
 interface SessionIds {
   claudeSessionId?: string;
@@ -176,6 +177,70 @@ function debugChat(...args: unknown[]) {
   console.log('[chat-debug]', ...args);
 }
 
+function elapsedSince(startedAt: number | undefined): string {
+  return startedAt ? `+${Date.now() - startedAt}ms` : '+?ms';
+}
+
+function redactDebugText(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/sk-[A-Za-z0-9_-]{10,}/g, 'sk-[redacted]')
+    .replace(/(OPENAI_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=\S+/g, '$1=[redacted]');
+}
+
+function compactDebugChunk(value: string, max = DEBUG_SNIPPET_MAX): string {
+  const cleaned = redactDebugText(stripLogTimestamps(value))
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max)}…`;
+}
+
+function isHeartbeatStderr(value: string): boolean {
+  const compact = stripLogTimestamps(value).replace(/\s/g, '');
+  return compact.length > 0 && /^\.+$/.test(compact);
+}
+
+function codexEventDebugLabel(event: CodexStreamEvent): string {
+  switch (event.type) {
+    case 'unknown':
+      return [
+        'unknown',
+        event.rawType ? `raw=${event.rawType}` : undefined,
+        event.itemType ? `item=${event.itemType}` : undefined,
+        event.keys?.length ? `keys=${event.keys.join('|')}` : undefined,
+      ].filter(Boolean).join(' ');
+    case 'assistantDelta':
+      return `assistantDelta chars=${event.text.length}`;
+    case 'reasoning':
+      return `reasoning chars=${event.text.length}`;
+    case 'commandBegin':
+      return `commandBegin id=${event.commandId}`;
+    case 'commandEnd':
+      return `commandEnd id=${event.commandId} exit=${event.exitCode ?? '?'}`;
+    case 'fileChange':
+      return `fileChange files=${event.files.length}`;
+    case 'mcpToolBegin':
+      return `mcpToolBegin tool=${event.server ? `${event.server}.` : ''}${event.tool}`;
+    case 'mcpToolEnd':
+      return `mcpToolEnd tool=${event.server ? `${event.server}.` : ''}${event.tool} error=${event.isError}`;
+    case 'todoList':
+      return `todoList items=${event.items.length}`;
+    default:
+      return event.type;
+  }
+}
+
+type ChatTurnTiming = {
+  startedAt?: number;
+  firstStdoutAt?: number;
+  firstStderrAt?: number;
+  firstParsedAt?: number;
+  firstAssistantAt?: number;
+};
+
 export function useChat(options: UseChatOptions) {
   const { spriteName, chatId, workingDirectory, provider } = options;
 
@@ -206,6 +271,8 @@ export function useChat(options: UseChatOptions) {
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
   const agentTurnCompleteRef = useRef(false);
+  const turnTimingRef = useRef<ChatTurnTiming>({});
+  const detachingControllersRef = useRef<Set<AbortController>>(new Set());
   const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
@@ -338,6 +405,7 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      turnTimingRef.current = {};
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
       claudeSessionIdRef.current = options.initialClaudeSessionId;
@@ -392,6 +460,7 @@ export function useChat(options: UseChatOptions) {
       codexSawAssistantRef.current = false;
       agentTurnCompleteRef.current = false;
       serviceEventsSeenRef.current = 0;
+      turnTimingRef.current = { startedAt: Date.now() };
       setStatusTracked('reconnecting');
 
       (async () => {
@@ -402,7 +471,10 @@ export function useChat(options: UseChatOptions) {
           await api.streamExec(
             spriteName,
             [],
-            (event) => processServiceEventRef.current(event),
+            (event) => {
+              if (abortRef.current !== controller) return;
+              processServiceEvent(event);
+            },
             controller.signal,
             {
               attachSessionId: activeRun.execSessionId,
@@ -416,11 +488,19 @@ export function useChat(options: UseChatOptions) {
             debugChat('active exec attach failed', provider, err.message ?? err);
           }
         } finally {
-          if (abortRef.current === controller) {
+          const wasDetaching = detachingControllersRef.current.delete(controller);
+          const isCurrentStream = abortRef.current === controller;
+          if (isCurrentStream) {
             abortRef.current = null;
           }
-          if (disconnectedBeforeExit && activeRunRef.current && !agentTurnCompleteRef.current) {
-            setStatusTracked('idle');
+          if (wasDetaching && !agentTurnCompleteRef.current) {
+            debugChat('active exec detached', provider, activeRun.execSessionId);
+            if (isCurrentStream) setStatusTracked('idle');
+            await persistMessages();
+            return;
+          }
+          if (disconnectedBeforeExit && activeRunRef.current?.execSessionId === activeRun.execSessionId && !agentTurnCompleteRef.current) {
+            if (isCurrentStream) setStatusTracked('idle');
             await persistMessages();
             return;
           }
@@ -428,8 +508,10 @@ export function useChat(options: UseChatOptions) {
           activeUserMessageIdRef.current = undefined;
           activeAssistantMessageIdRef.current = undefined;
           assistantTextSeenRef.current = false;
-          setActiveRun(undefined);
-          setStatusTracked('idle');
+          if (activeRunRef.current?.execSessionId === activeRun.execSessionId) {
+            setActiveRun(undefined);
+          }
+          if (isCurrentStream) setStatusTracked('idle');
           await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
           await syncCodexTranscript(loadRequest, options.initialCodexSessionId);
           await persistMessages();
@@ -560,7 +642,7 @@ export function useChat(options: UseChatOptions) {
         return newContent;
       });
     },
-    [updateActiveAssistant]
+    [provider, updateActiveAssistant]
   );
 
   const ensureTurnAssistantText = useCallback(
@@ -715,16 +797,30 @@ export function useChat(options: UseChatOptions) {
     (event: CodexStreamEvent) => {
       switch (event.type) {
         case 'threadStarted':
+          debugChat('codex thread started', elapsedSince(turnTimingRef.current.startedAt), event.threadId);
           setCodexSessionId(event.threadId);
           setModelName((prev) => prev ?? CODEX_DEFAULT_MODEL_LABEL);
           break;
         case 'assistantDelta':
           codexSawAssistantRef.current = true;
-          debugChat('codex assistant delta', 'len', event.text.length);
+          if (!turnTimingRef.current.firstAssistantAt) {
+            turnTimingRef.current.firstAssistantAt = Date.now();
+          }
+          debugChat(
+            'codex assistant delta',
+            elapsedSince(turnTimingRef.current.startedAt),
+            'chars',
+            event.text.length
+          );
           appendAssistantText(event.text);
           break;
         case 'reasoning':
-          debugChat('codex reasoning', 'len', event.text.length);
+          debugChat(
+            'codex reasoning',
+            elapsedSince(turnTimingRef.current.startedAt),
+            'chars',
+            event.text.length
+          );
           updateActiveAssistant((newContent) => {
             const last = newContent[newContent.length - 1];
             if (last && last.type === 'reasoning') {
@@ -891,12 +987,15 @@ export function useChat(options: UseChatOptions) {
           });
           break;
         case 'turnCompleted':
+          debugChat('codex turn completed', elapsedSince(turnTimingRef.current.startedAt));
           agentTurnCompleteRef.current = true;
           break;
         case 'error':
+          debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);
           setErrorMessage(event.message);
           break;
         case 'unknown':
+          debugChat('codex unknown event', elapsedSince(turnTimingRef.current.startedAt), codexEventDebugLabel(event));
           break;
       }
     },
@@ -916,11 +1015,15 @@ export function useChat(options: UseChatOptions) {
   const processServiceEvent = useCallback(
     (event: ServiceLogEvent) => {
       serviceEventsSeenRef.current += 1;
-      debugChat('exec event', provider, event.type);
+      debugChat('exec event', provider, event.type, elapsedSince(turnTimingRef.current.startedAt));
       switch (event.type) {
         case 'stdout': {
           if (!event.data) return;
           if (statusRef.current === 'connecting') setStatusTracked('streaming');
+          if (!turnTimingRef.current.firstStdoutAt) {
+            turnTimingRef.current.firstStdoutAt = Date.now();
+            debugChat('first stdout', provider, elapsedSince(turnTimingRef.current.startedAt));
+          }
 
           let dataStr = stripLogTimestamps(event.data);
           if (!dataStr.endsWith('\n')) dataStr += '\n';
@@ -928,7 +1031,15 @@ export function useChat(options: UseChatOptions) {
           if (provider === 'claude') {
             const events = claudeParserRef.current.parse(dataStr);
             if (events.length > 0) {
-              debugChat('stdout parsed', provider, events.map((e) => e.type).join(','));
+              if (!turnTimingRef.current.firstParsedAt) {
+                turnTimingRef.current.firstParsedAt = Date.now();
+              }
+              debugChat(
+                'stdout parsed',
+                provider,
+                elapsedSince(turnTimingRef.current.startedAt),
+                events.map((e) => e.type).join(',')
+              );
             }
             for (const parsed of events) {
               if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
@@ -938,7 +1049,15 @@ export function useChat(options: UseChatOptions) {
           } else {
             const events = codexParserRef.current.parse(dataStr);
             if (events.length > 0) {
-              debugChat('stdout parsed', provider, events.map((e) => e.type).join(','));
+              if (!turnTimingRef.current.firstParsedAt) {
+                turnTimingRef.current.firstParsedAt = Date.now();
+              }
+              debugChat(
+                'stdout parsed',
+                provider,
+                elapsedSince(turnTimingRef.current.startedAt),
+                events.map(codexEventDebugLabel).join(', ')
+              );
             }
             for (const parsed of events) {
               handleCodexEvent(parsed);
@@ -948,8 +1067,24 @@ export function useChat(options: UseChatOptions) {
         }
         case 'stderr': {
           if (statusRef.current === 'connecting') setStatusTracked('streaming');
+          if (!turnTimingRef.current.firstStderrAt) {
+            turnTimingRef.current.firstStderrAt = Date.now();
+            debugChat('first stderr', provider, elapsedSince(turnTimingRef.current.startedAt));
+          }
           if (provider === 'codex' && event.data) {
             codexStderrRef.current += `\n${event.data}`;
+          }
+          if (event.data) {
+            if (isHeartbeatStderr(event.data)) {
+              debugChat('stderr heartbeat', provider, elapsedSince(turnTimingRef.current.startedAt));
+            } else {
+              debugChat(
+                'stderr',
+                provider,
+                elapsedSince(turnTimingRef.current.startedAt),
+                compactDebugChunk(event.data)
+              );
+            }
           }
           break;
         }
@@ -1023,6 +1158,7 @@ export function useChat(options: UseChatOptions) {
       const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
       updateMessages(() => pendingMessages);
       await saveChatMessages(chatId, pendingMessages);
+      turnTimingRef.current = { startedAt: Date.now() };
       debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
 
       const commandParts: string[] = [];
@@ -1097,6 +1233,7 @@ export function useChat(options: UseChatOptions) {
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
       agentTurnCompleteRef.current = false;
+      turnTimingRef.current = { startedAt: turnTimingRef.current.startedAt ?? Date.now() };
       setStatusTracked('connecting');
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
@@ -1106,12 +1243,16 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = abortController;
       execSessionIdRef.current = undefined;
       let disconnectedBeforeExit = false;
+      const streamActiveRunRef: { current?: ActiveChatRun } = {};
 
       try {
         await api.streamExec(
           spriteName,
           ['bash', '-c', fullCommand],
-          processServiceEvent,
+          (event) => {
+            if (abortRef.current !== abortController) return;
+            processServiceEvent(event);
+          },
           abortController.signal,
           {
             path: '/bin/bash',
@@ -1121,7 +1262,7 @@ export function useChat(options: UseChatOptions) {
             },
             onSessionId: (sessionId) => {
               execSessionIdRef.current = sessionId;
-              setActiveRun({
+              const nextRun: ActiveChatRun = {
                 execSessionId: sessionId,
                 taskName,
                 provider,
@@ -1129,7 +1270,9 @@ export function useChat(options: UseChatOptions) {
                 assistantMessageId: assistantMessage.id,
                 workingDirectory,
                 startedAt: Date.now(),
-              });
+              };
+              streamActiveRunRef.current = nextRun;
+              setActiveRun(nextRun);
             },
           }
         );
@@ -1143,6 +1286,23 @@ export function useChat(options: UseChatOptions) {
           }
         }
       } finally {
+        const wasDetaching = detachingControllersRef.current.delete(abortController);
+        const isCurrentStream = abortRef.current === abortController;
+        if (isCurrentStream) {
+          abortRef.current = null;
+        }
+        const streamActiveRun = streamActiveRunRef.current;
+        if (wasDetaching) {
+          if (streamActiveRun) {
+            debugChat('stream detached', provider, streamActiveRun.execSessionId);
+          } else {
+            debugChat('stream detached before session id', provider);
+          }
+          if (isCurrentStream) setStatusTracked('idle');
+          await persistMessages();
+          return;
+        }
+
         const remaining =
           provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
 
@@ -1162,20 +1322,21 @@ export function useChat(options: UseChatOptions) {
           reportCodexAuthIssue(codexStderrRef.current);
         }
 
-        if (abortRef.current === abortController) {
-          abortRef.current = null;
-        }
-        if (disconnectedBeforeExit && activeRunRef.current && !agentTurnCompleteRef.current) {
-          setStatusTracked('idle');
+        if (disconnectedBeforeExit && streamActiveRun && !agentTurnCompleteRef.current) {
+          if (isCurrentStream) setStatusTracked('idle');
           await persistMessages();
           return;
         }
-        setActiveRun(undefined);
+        const streamExecSessionId = streamActiveRunRef.current?.execSessionId;
+        const currentActiveRun = activeRunRef.current as ActiveChatRun | undefined;
+        if (!streamExecSessionId || currentActiveRun?.execSessionId === streamExecSessionId) {
+          setActiveRun(undefined);
+        }
         execSessionIdRef.current = undefined;
         activeUserMessageIdRef.current = undefined;
         activeAssistantMessageIdRef.current = undefined;
         assistantTextSeenRef.current = false;
-        setStatusTracked('idle');
+        if (isCurrentStream) setStatusTracked('idle');
         await persistMessages();
       }
     },
@@ -1214,6 +1375,16 @@ export function useChat(options: UseChatOptions) {
     setStatusTracked('idle');
   }, [setActiveRun, setStatusTracked, spriteName]);
 
+  const detachStream = useCallback(() => {
+    const controller = abortRef.current;
+    if (controller) {
+      detachingControllersRef.current.add(controller);
+      controller.abort();
+      abortRef.current = null;
+    }
+    setStatusTracked('idle');
+  }, [setStatusTracked]);
+
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
   }, []);
@@ -1228,6 +1399,7 @@ export function useChat(options: UseChatOptions) {
     setInputText,
     sendMessage,
     interrupt,
+    detachStream,
     loadSession,
     sessionId: provider === 'codex' ? codexSessionIdRef.current : claudeSessionIdRef.current,
     codexAuthIssue,

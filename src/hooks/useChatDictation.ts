@@ -1,4 +1,4 @@
-import { Dispatch, SetStateAction, useCallback, useRef, useState } from 'react';
+import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import {
@@ -7,10 +7,7 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from 'expo-audio';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
+import { requireOptionalNativeModule } from 'expo';
 import { transcribeAudioOnSprite } from '@/services/audio-transcription';
 
 export type DictationMode =
@@ -25,6 +22,28 @@ interface UseChatDictationOptions {
   workingDirectory: string;
   inputText: string;
   setInputText: Dispatch<SetStateAction<string>>;
+}
+
+type SpeechRecognitionModule = {
+  addListener: (eventName: string, listener: (event: any) => void) => { remove: () => void };
+  requestPermissionsAsync: () => Promise<{ granted: boolean }>;
+  start: (options: Record<string, unknown>) => void;
+  stop: () => void;
+};
+
+let speechRecognitionModule: SpeechRecognitionModule | null | undefined;
+
+function getSpeechRecognitionModule(): SpeechRecognitionModule | null {
+  if (speechRecognitionModule !== undefined) return speechRecognitionModule ?? null;
+  if (Platform.OS === 'web') {
+    // The package registers a web shim; native builds must avoid importing it
+    // unless the actual native module is present in the dev app.
+    speechRecognitionModule = require('expo-speech-recognition').ExpoSpeechRecognitionModule;
+  } else {
+    speechRecognitionModule =
+      requireOptionalNativeModule<SpeechRecognitionModule>('ExpoSpeechRecognition');
+  }
+  return speechRecognitionModule ?? null;
 }
 
 function appendTranscript(current: string, transcript: string): string {
@@ -70,32 +89,47 @@ export function useChatDictation({
     [setInputText]
   );
 
-  useSpeechRecognitionEvent('start', () => {
-    setError(undefined);
-    setMode('client-listening');
-  });
+  useEffect(() => {
+    const module = getSpeechRecognitionModule();
+    if (!module) return;
 
-  useSpeechRecognitionEvent('end', () => {
-    if (modeRef.current === 'client-listening') {
-      setMode('idle');
-    }
-  });
+    const subscriptions = [
+      module.addListener('start', () => {
+        setError(undefined);
+        setMode('client-listening');
+      }),
+      module.addListener('end', () => {
+        if (modeRef.current === 'client-listening') {
+          setMode('idle');
+        }
+      }),
+      module.addListener('result', (event: any) => {
+        if (modeRef.current !== 'client-listening') return;
+        const transcript = event.results?.[0]?.transcript ?? '';
+        if (!transcript.trim()) return;
+        setInputText(appendTranscript(clientBaseTextRef.current, transcript));
+      }),
+      module.addListener('error', (event: any) => {
+        setError(event.message ?? event.error ?? 'Speech recognition failed.');
+        setMode('idle');
+      }),
+    ];
 
-  useSpeechRecognitionEvent('result', (event: any) => {
-    if (modeRef.current !== 'client-listening') return;
-    const transcript = event.results?.[0]?.transcript ?? '';
-    if (!transcript.trim()) return;
-    setInputText(appendTranscript(clientBaseTextRef.current, transcript));
-  });
-
-  useSpeechRecognitionEvent('error', (event: any) => {
-    setError(event.message ?? event.error ?? 'Speech recognition failed.');
-    setMode('idle');
-  });
+    return () => {
+      subscriptions.forEach((subscription) => subscription.remove());
+    };
+  }, [setInputText]);
 
   const toggleClientDictation = useCallback(async () => {
+    const module = getSpeechRecognitionModule();
+    if (!module) {
+      setError('Live speech recognition requires rebuilding the iOS dev app.');
+      setMode('idle');
+      return;
+    }
+
     if (modeRef.current === 'client-listening') {
-      ExpoSpeechRecognitionModule.stop();
+      module.stop();
       setMode('idle');
       return;
     }
@@ -103,14 +137,14 @@ export function useChatDictation({
 
     try {
       setError(undefined);
-      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      const permission = await module.requestPermissionsAsync();
       if (!permission.granted) {
         setError('Microphone or speech recognition permission was denied.');
         return;
       }
 
       clientBaseTextRef.current = inputText;
-      ExpoSpeechRecognitionModule.start({
+      module.start({
         lang: 'en-US',
         interimResults: true,
         continuous: true,

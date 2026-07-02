@@ -20,6 +20,7 @@ import * as Clipboard from 'expo-clipboard';
 import { TerminalErrorBoundary } from '@/components/terminal';
 import type { SkiaTerminalHandle, NextTermTerminalHandle } from '@/components/terminal';
 import { terror, tinfo, errInfo, dumpTerminalLog, clearTerminalLog } from '@/components/terminal/terminalLog';
+import WebTerminal from '@/components/terminal/WebTerminal';
 
 // On native, statically import. On web, defer until CanvasKit loads.
 const SkiaTerminalNative =
@@ -96,67 +97,6 @@ const STATE_COLORS: Record<ExecConnectionState, string> = {
   closed: '#6e7681',
   error: '#ff7b72',
 };
-
-// ── Web Terminal (deferred Skia loading) ────────────────────────────────
-function WebTerminal({
-  termRef,
-  onData,
-  onResize,
-}: {
-  termRef: React.RefObject<SkiaTerminalHandle | null>;
-  onData: (data: string) => void;
-  onResize: (cols: number, rows: number) => void;
-}) {
-  const [skiaReady, setSkiaReady] = useState(false);
-  const [Terminal, setTerminal] = useState<React.ComponentType<any> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const { LoadSkiaWeb } = require('@shopify/react-native-skia/lib/module/web');
-    LoadSkiaWeb()
-      .then(async () => {
-        if (cancelled) return;
-        setSkiaReady(true);
-        const mod = await import('@/components/terminal/SkiaTerminalView');
-        if (!cancelled) setTerminal(() => mod.default);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
-      });
-    return () => { cancelled = true; };
-  }, []);
-
-  if (error) {
-    return (
-      <View style={styles.terminalPlaceholder}>
-        <Text style={{ color: '#ff7b72', fontSize: 13 }}>Failed to load: {error}</Text>
-      </View>
-    );
-  }
-
-  if (!Terminal) {
-    return (
-      <View style={styles.terminalPlaceholder}>
-        <View style={styles.loadingDot} />
-        <Text style={{ color: '#6e7681', fontSize: 13, marginTop: 8 }}>
-          {skiaReady ? 'Initializing terminal...' : 'Loading CanvasKit...'}
-        </Text>
-      </View>
-    );
-  }
-
-  return (
-    <Terminal
-      ref={termRef}
-      onData={onData}
-      onResize={onResize}
-      fontSize={13}
-      cursorBlinkInterval={600}
-      theme={TERMINAL_THEME}
-    />
-  );
-}
 
 // ── Main Screen ─────────────────────────────────────────────────────────
 export default function ExecPocScreen() {
@@ -478,6 +418,7 @@ export default function ExecPocScreen() {
                   if (client.getState() === 'open') client.send(data, false);
                 }}
                 onResize={(cols, rows) => client.resize(cols, rows)}
+                theme={TERMINAL_THEME}
               />
             ) : engine === 'next-term' ? (
               <NextTermTerminalNative
@@ -613,17 +554,5 @@ const styles = StyleSheet.create({
   terminalContainer: {
     flex: 1,
     backgroundColor: '#0d1117',
-  },
-  terminalPlaceholder: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#0d1117',
-  },
-  loadingDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#484f58',
   },
 });
