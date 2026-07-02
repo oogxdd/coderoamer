@@ -18,6 +18,7 @@ import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
 import { AgentProvider, ChatMessage, providerDisplayName, toolUseActivityLabel } from '@/models/chat';
 import * as api from '@/services/api';
 import { useChat } from '@/hooks/useChat';
+import { useChatDictation } from '@/hooks/useChatDictation';
 import { useTheme } from '@/hooks/use-theme';
 import { ChatMessageView } from '@/components/chat/ChatMessageView';
 import { ChatInputBar } from '@/components/chat/ChatInputBar';
@@ -119,6 +120,12 @@ export default function SpriteDetailScreen() {
       chatListRef.current = updated;
       saveChatList(spriteName, updated);
     },
+  });
+  const dictation = useChatDictation({
+    spriteName,
+    workingDirectory,
+    inputText: chat.inputText,
+    setInputText: chat.setInputText,
   });
   const isProviderLocked = chat.messages.some((message) => message.role === 'user');
 
@@ -614,9 +621,19 @@ export default function SpriteDetailScreen() {
             onSend={handleSend}
             onInterrupt={chat.interrupt}
             isStreaming={chat.isStreaming}
+            disabled={dictation.isTranscribing}
             provider={chatProvider}
             providerLocked={isProviderLocked}
             onProviderChange={handleProviderChange}
+            onToggleClientDictation={dictation.toggleClientDictation}
+            onToggleSpriteRecording={dictation.toggleSpriteRecording}
+            onPickAudioFile={dictation.pickAudioFile}
+            isClientDictating={dictation.isClientDictating}
+            isSpriteRecording={dictation.isSpriteRecording}
+            isTranscribingAudio={dictation.isTranscribing}
+            dictationStatus={dictation.status}
+            dictationError={dictation.error}
+            onClearDictationError={dictation.clearDictationError}
           />
         </KeyboardAvoidingView>
       )}

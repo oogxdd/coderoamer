@@ -204,6 +204,7 @@ export function useChat(options: UseChatOptions) {
   const serviceEventsSeenRef = useRef(0);
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
+  const agentTurnCompleteRef = useRef(false);
   const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
@@ -336,6 +337,7 @@ export function useChat(options: UseChatOptions) {
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
+    agentTurnCompleteRef.current = false;
 
     setClaudeSessionId(options.initialClaudeSessionId);
     setCodexSessionId(options.initialCodexSessionId);
@@ -366,6 +368,7 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      agentTurnCompleteRef.current = false;
       serviceEventsSeenRef.current = 0;
       setStatusTracked('reconnecting');
 
@@ -394,7 +397,7 @@ export function useChat(options: UseChatOptions) {
           if (abortRef.current === controller) {
             abortRef.current = null;
           }
-          if (disconnectedBeforeExit && activeRunRef.current) {
+          if (disconnectedBeforeExit && activeRunRef.current && !agentTurnCompleteRef.current) {
             setStatusTracked('idle');
             await persistMessages();
             return;
@@ -671,6 +674,7 @@ export function useChat(options: UseChatOptions) {
         }
         case 'result': {
           const res = event.event as ClaudeResultEvent;
+          agentTurnCompleteRef.current = true;
           setClaudeSessionId(res.session_id);
           if (typeof res.result === 'string' && res.result.trim()) {
             debugChat('claude result event', 'len', res.result.length);
@@ -865,6 +869,7 @@ export function useChat(options: UseChatOptions) {
           });
           break;
         case 'turnCompleted':
+          agentTurnCompleteRef.current = true;
           break;
         case 'error':
           setErrorMessage(event.message);
@@ -1069,6 +1074,7 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      agentTurnCompleteRef.current = false;
       setStatusTracked('connecting');
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
@@ -1137,7 +1143,7 @@ export function useChat(options: UseChatOptions) {
         if (abortRef.current === abortController) {
           abortRef.current = null;
         }
-        if (disconnectedBeforeExit && activeRunRef.current) {
+        if (disconnectedBeforeExit && activeRunRef.current && !agentTurnCompleteRef.current) {
           setStatusTracked('idle');
           await persistMessages();
           return;
