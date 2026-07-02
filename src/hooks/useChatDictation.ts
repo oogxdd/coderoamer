@@ -12,6 +12,10 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
 import { transcribeAudioOnSprite } from '@/services/audio-transcription';
+import {
+  TranscriptionProvider,
+  transcribeAudioWithCloudProvider,
+} from '@/services/client-transcription';
 
 export type DictationMode =
   | 'idle'
@@ -25,6 +29,7 @@ interface UseChatDictationOptions {
   workingDirectory: string;
   inputText: string;
   setInputText: Dispatch<SetStateAction<string>>;
+  transcriptionProvider: TranscriptionProvider;
 }
 
 function appendTranscript(current: string, transcript: string): string {
@@ -49,11 +54,29 @@ function statusForMode(mode: DictationMode): string | undefined {
   }
 }
 
+async function transcribeAudio({
+  provider,
+  spriteName,
+  workingDirectory,
+  audio,
+}: {
+  provider: TranscriptionProvider;
+  spriteName: string;
+  workingDirectory: string;
+  audio: Parameters<typeof transcribeAudioOnSprite>[0]['audio'];
+}): Promise<string> {
+  if (provider === 'sprite') {
+    return transcribeAudioOnSprite({ spriteName, workingDirectory, audio });
+  }
+  return transcribeAudioWithCloudProvider(provider, audio);
+}
+
 export function useChatDictation({
   spriteName,
   workingDirectory,
   inputText,
   setInputText,
+  transcriptionProvider,
 }: UseChatDictationOptions) {
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [mode, setMode] = useState<DictationMode>('idle');
@@ -161,7 +184,8 @@ export function useChatDictation({
         throw new Error('Recording did not produce an audio file.');
       }
 
-      const transcript = await transcribeAudioOnSprite({
+      const transcript = await transcribeAudio({
+        provider: transcriptionProvider,
         spriteName,
         workingDirectory,
         audio: {
@@ -177,7 +201,7 @@ export function useChatDictation({
       setError((err as Error).message);
       setMode('idle');
     }
-  }, [audioRecorder, insertTranscript, spriteName, workingDirectory]);
+  }, [audioRecorder, insertTranscript, spriteName, transcriptionProvider, workingDirectory]);
 
   const toggleSpriteRecording = useCallback(async () => {
     if (modeRef.current === 'sprite-recording') {
@@ -203,7 +227,8 @@ export function useChatDictation({
       if (!asset?.uri) return;
 
       setMode('file-transcribing');
-      const transcript = await transcribeAudioOnSprite({
+      const transcript = await transcribeAudio({
+        provider: transcriptionProvider,
         spriteName,
         workingDirectory,
         audio: {
@@ -220,7 +245,7 @@ export function useChatDictation({
     } finally {
       setMode('idle');
     }
-  }, [insertTranscript, spriteName, workingDirectory]);
+  }, [insertTranscript, spriteName, transcriptionProvider, workingDirectory]);
 
   const clearDictationError = useCallback(() => {
     setError(undefined);

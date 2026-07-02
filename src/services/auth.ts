@@ -6,6 +6,8 @@ const KEYS = {
   claudeToken: 'claude_oauth_token',
   claudeCreds: 'claude_credentials_json',
   githubToken: 'github_token',
+  assemblyAiToken: 'assemblyai_api_key',
+  openAiToken: 'openai_api_key',
 } as const;
 
 export type TokenKey = keyof typeof KEYS;
@@ -39,13 +41,15 @@ export async function hasToken(key: TokenKey): Promise<boolean> {
 }
 
 export async function loadAllTokens() {
-  const [spritesToken, claudeToken, claudeCreds, githubToken] = await Promise.all([
+  const [spritesToken, claudeToken, claudeCreds, githubToken, assemblyAiToken, openAiToken] = await Promise.all([
     loadToken('spritesToken'),
     loadToken('claudeToken'),
     loadToken('claudeCreds'),
     loadToken('githubToken'),
+    loadToken('assemblyAiToken'),
+    loadToken('openAiToken'),
   ]);
-  return { spritesToken, claudeToken, claudeCreds, githubToken };
+  return { spritesToken, claudeToken, claudeCreds, githubToken, assemblyAiToken, openAiToken };
 }
 
 export async function clearAllTokens(): Promise<void> {
@@ -54,5 +58,7 @@ export async function clearAllTokens(): Promise<void> {
     deleteToken('claudeToken'),
     deleteToken('claudeCreds'),
     deleteToken('githubToken'),
+    deleteToken('assemblyAiToken'),
+    deleteToken('openAiToken'),
   ]);
 }

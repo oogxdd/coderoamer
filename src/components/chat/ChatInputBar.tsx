@@ -10,6 +10,7 @@ import {
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
 import { AgentProvider, providerDisplayName } from '@/models/chat';
+import { TranscriptionProvider } from '@/services/client-transcription';
 
 interface ChatInputBarProps {
   value: string;
@@ -30,7 +31,15 @@ interface ChatInputBarProps {
   dictationStatus?: string;
   dictationError?: string;
   onClearDictationError?: () => void;
+  transcriptionProvider: TranscriptionProvider;
+  onTranscriptionProviderChange: (provider: TranscriptionProvider) => void;
 }
+
+const TRANSCRIPTION_PROVIDER_OPTIONS: { label: string; value: TranscriptionProvider }[] = [
+  { label: 'Sprite', value: 'sprite' },
+  { label: 'Assembly', value: 'assemblyai' },
+  { label: 'OpenAI', value: 'openai' },
+];
 
 export function ChatInputBar({
   value,
@@ -51,6 +60,8 @@ export function ChatInputBar({
   dictationStatus,
   dictationError,
   onClearDictationError,
+  transcriptionProvider,
+  onTranscriptionProviderChange,
 }: ChatInputBarProps) {
   const colors = useTheme();
 
@@ -93,6 +104,37 @@ export function ChatInputBar({
           Session model is locked after the first message.
         </Text>
       )}
+
+      <View style={styles.transcriptionProviderRow}>
+        <Text style={[styles.providerLabel, { color: colors.textSecondary }]}>Transcribe</Text>
+        <View style={[styles.providerControl, { backgroundColor: colors.backgroundElement }]}>
+          {TRANSCRIPTION_PROVIDER_OPTIONS.map((option) => (
+            <Pressable
+              key={option.value}
+              style={[
+                styles.providerButton,
+                transcriptionProvider === option.value && { backgroundColor: colors.card },
+              ]}
+              onPress={() => onTranscriptionProviderChange(option.value)}
+              disabled={dictationBusy || isStreaming}
+            >
+              <Text
+                style={[
+                  styles.providerButtonText,
+                  {
+                    color:
+                      transcriptionProvider === option.value
+                        ? colors.tint
+                        : colors.textSecondary,
+                  },
+                ]}
+              >
+                {option.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
 
       <View style={styles.dictationRow}>
         <View style={styles.dictationButtons}>
@@ -248,6 +290,12 @@ const styles = StyleSheet.create({
   providerLockHint: {
     fontSize: FontSize.xs,
     marginBottom: Spacing.xs,
+  },
+  transcriptionProviderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
   },
   providerButton: {
     borderRadius: 6,
