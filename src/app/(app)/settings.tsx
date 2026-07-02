@@ -15,6 +15,7 @@ import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
+import { deleteToken, hasToken, saveToken } from '@/services/auth';
 import { FontSize, Spacing } from '@/constants/theme';
 import { AgentProvider } from '@/models/chat';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
@@ -66,6 +67,14 @@ export default function SettingsScreen() {
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [savingGitHub, setSavingGitHub] = useState(false);
 
+  // Client-side transcription provider keys
+  const [assemblyAiTokenInput, setAssemblyAiTokenInput] = useState('');
+  const [openAiTokenInput, setOpenAiTokenInput] = useState('');
+  const [hasAssemblyAiToken, setHasAssemblyAiToken] = useState(false);
+  const [hasOpenAiToken, setHasOpenAiToken] = useState(false);
+  const [savingAssemblyAi, setSavingAssemblyAi] = useState(false);
+  const [savingOpenAi, setSavingOpenAi] = useState(false);
+
   const handleSaveGitHubToken = useCallback(async () => {
     const trimmed = githubTokenInput.trim();
     if (!trimmed) return;
@@ -80,11 +89,62 @@ export default function SettingsScreen() {
     setSavingGitHub(false);
   }, [githubTokenInput, auth]);
 
+  const handleSaveAssemblyAiToken = useCallback(async () => {
+    const trimmed = assemblyAiTokenInput.trim();
+    if (!trimmed) return;
+    setSavingAssemblyAi(true);
+    try {
+      await saveToken('assemblyAiToken', trimmed);
+      setAssemblyAiTokenInput('');
+      setHasAssemblyAiToken(true);
+      Alert.alert('Saved', 'AssemblyAI API key saved for client-side transcription.');
+    } catch {
+      Alert.alert('Error', 'Failed to save AssemblyAI API key.');
+    }
+    setSavingAssemblyAi(false);
+  }, [assemblyAiTokenInput]);
+
+  const handleSaveOpenAiToken = useCallback(async () => {
+    const trimmed = openAiTokenInput.trim();
+    if (!trimmed) return;
+    setSavingOpenAi(true);
+    try {
+      await saveToken('openAiToken', trimmed);
+      setOpenAiTokenInput('');
+      setHasOpenAiToken(true);
+      Alert.alert('Saved', 'OpenAI API key saved for client-side transcription.');
+    } catch {
+      Alert.alert('Error', 'Failed to save OpenAI API key.');
+    }
+    setSavingOpenAi(false);
+  }, [openAiTokenInput]);
+
+  const handleDeleteAssemblyAiToken = useCallback(async () => {
+    await deleteToken('assemblyAiToken');
+    setHasAssemblyAiToken(false);
+  }, []);
+
+  const handleDeleteOpenAiToken = useCallback(async () => {
+    await deleteToken('openAiToken');
+    setHasOpenAiToken(false);
+  }, []);
+
   // Load all settings on mount
   useEffect(() => {
     (async () => {
       try {
-        const [providerSetting, model, turns, instructions, name, email, checkpoint, workdir] =
+        const [
+          providerSetting,
+          model,
+          turns,
+          instructions,
+          name,
+          email,
+          checkpoint,
+          workdir,
+          assemblyAiSaved,
+          openAiSaved,
+        ] =
           await Promise.all([
             getSetting('defaultProvider'),
             getSetting('claudeModel'),
@@ -94,6 +154,8 @@ export default function SettingsScreen() {
             getSetting('gitEmail'),
             getSettingBool('autoCheckpoint'),
             getSetting('defaultWorkingDirectory'),
+            hasToken('assemblyAiToken'),
+            hasToken('openAiToken'),
           ]);
 
         if (providerSetting === 'claude' || providerSetting === 'codex') {
@@ -112,6 +174,8 @@ export default function SettingsScreen() {
         if (name !== null) setGitName(name);
         if (email !== null) setGitEmail(email);
         if (workdir) setDefaultWorkingDirectory(workdir);
+        setHasAssemblyAiToken(assemblyAiSaved);
+        setHasOpenAiToken(openAiSaved);
         setAutoCheckpoint(checkpoint);
       } catch {
         // Settings load failed silently
@@ -288,6 +352,113 @@ export default function SettingsScreen() {
             {savingGitHub ? 'Saving…' : 'Save Token'}
           </Text>
         </Pressable>
+      </View>
+
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>TRANSCRIPTION</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>AssemblyAI</Text>
+          <View style={styles.statusContainer}>
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: hasAssemblyAiToken ? colors.success : colors.warning },
+              ]}
+            />
+            <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+              {hasAssemblyAiToken ? 'Saved' : 'Not Set'}
+            </Text>
+          </View>
+        </View>
+        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Key</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={assemblyAiTokenInput}
+            onChangeText={setAssemblyAiTokenInput}
+            placeholder="AssemblyAI API key"
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+        </View>
+        <View style={[styles.actionRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Pressable
+            style={({ pressed }) => [styles.inlineAction, { opacity: pressed ? 0.6 : 1 }]}
+            disabled={savingAssemblyAi || !assemblyAiTokenInput.trim()}
+            onPress={handleSaveAssemblyAiToken}
+          >
+            <Text
+              style={[
+                styles.rowLabel,
+                { color: assemblyAiTokenInput.trim() ? colors.tint : colors.textSecondary },
+              ]}
+            >
+              {savingAssemblyAi ? 'Saving…' : 'Save AssemblyAI Key'}
+            </Text>
+          </Pressable>
+          {hasAssemblyAiToken && (
+            <Pressable
+              style={({ pressed }) => [styles.inlineActionRight, { opacity: pressed ? 0.6 : 1 }]}
+              onPress={handleDeleteAssemblyAiToken}
+            >
+              <Text style={[styles.statusText, { color: colors.destructive }]}>Remove</Text>
+            </Pressable>
+          )}
+        </View>
+
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>OpenAI</Text>
+          <View style={styles.statusContainer}>
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: hasOpenAiToken ? colors.success : colors.warning },
+              ]}
+            />
+            <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+              {hasOpenAiToken ? 'Saved' : 'Not Set'}
+            </Text>
+          </View>
+        </View>
+        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Key</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={openAiTokenInput}
+            onChangeText={setOpenAiTokenInput}
+            placeholder="sk-..."
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+        </View>
+        <View style={styles.actionRow}>
+          <Pressable
+            style={({ pressed }) => [styles.inlineAction, { opacity: pressed ? 0.6 : 1 }]}
+            disabled={savingOpenAi || !openAiTokenInput.trim()}
+            onPress={handleSaveOpenAiToken}
+          >
+            <Text
+              style={[
+                styles.rowLabel,
+                { color: openAiTokenInput.trim() ? colors.tint : colors.textSecondary },
+              ]}
+            >
+              {savingOpenAi ? 'Saving…' : 'Save OpenAI Key'}
+            </Text>
+          </Pressable>
+          {hasOpenAiToken && (
+            <Pressable
+              style={({ pressed }) => [styles.inlineActionRight, { opacity: pressed ? 0.6 : 1 }]}
+              onPress={handleDeleteOpenAiToken}
+            >
+              <Text style={[styles.statusText, { color: colors.destructive }]}>Remove</Text>
+            </Pressable>
+          )}
+        </View>
       </View>
 
       <Pressable
@@ -680,6 +851,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
     minHeight: 44,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: Spacing.lg,
+    minHeight: 44,
+  },
+  inlineAction: {
+    flex: 1,
+    paddingVertical: Spacing.md,
+  },
+  inlineActionRight: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
   },
   inputLabel: {
     fontSize: FontSize.md,

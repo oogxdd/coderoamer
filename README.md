@@ -47,6 +47,26 @@ The default is **Chat**; the terminals and the session browser are reached from 
 A chat you reopen also auto-syncs from its transcript, so turns that completed (or were started from
 a terminal) while the app was closed show up when you come back.
 
+### Dictation and audio transcription
+
+The chat input has three experimental audio paths:
+
+- **Mic** uses device speech recognition and streams interim text into the input while you speak.
+  It does not send the message automatically.
+- **Rec** records audio on the phone, then transcribes it with the selected **Transcribe** backend.
+- **File** lets you pick an audio file, then transcribes it with the selected **Transcribe** backend.
+
+`Rec` and `File` can use one of three backends:
+
+- **Sprite** uploads the audio to the sprite and runs a local backend there. Install one inside the
+  sprite, for example `pip install -U faster-whisper` or `pipx install openai-whisper`.
+- **Assembly** uploads directly from the client to AssemblyAI. Save an AssemblyAI API key under
+  **Settings → Transcription** first.
+- **OpenAI** uploads directly from the client to OpenAI's transcription API. Save an OpenAI API key
+  under **Settings → Transcription** first.
+
+Transcripts are appended to the input box for review/editing; tap send yourself when it looks right.
+
 ### Session working directory
 
 Claude is always launched after `cd`-ing into the session's **working directory**. This matters
@@ -90,7 +110,8 @@ First launch walks you through three steps:
    `CLAUDE_CODE_OAUTH_TOKEN` when it launches Claude in the sprite, so you never log in there.
 3. **GitHub** (optional) — device-flow login used to auto-fill your git commit name/email.
 
-Tokens are stored with `expo-secure-store`.
+Tokens are stored with `expo-secure-store`. Optional AssemblyAI and OpenAI transcription keys are
+added later in **Settings → Transcription**; they are also stored with `expo-secure-store`.
 
 ### What to enter on the sign-in screen
 
@@ -139,7 +160,7 @@ src/
       _layout.tsx               # Authenticated stack
       index.tsx                 # Dashboard (sprite list) + Guides/Settings
       guide.tsx                 # In-app guides & setup walkthrough
-      settings.tsx              # Defaults (working dir, model, turns, instructions, git id)
+      settings.tsx              # Defaults, git id, transcription provider keys
       sprite/[name].tsx         # Overview / Chat / Checkpoints, + "sessions & terminals"
       exec-poc.tsx              # Stream terminal (WebSocket exec → Skia terminal)
       ttyd-terminal.tsx         # Web Terminal (ttyd in a WebView, legacy)
@@ -152,8 +173,11 @@ src/
     terminal/                   # Skia-based terminal (ANSI parser, buffer, renderer)
 
   hooks/        useChat.ts        # Streaming, two-level NDJSON parsing, persistence, resume
+                useChatDictation.ts# Mic/record/file dictation and transcription routing
   services/     api.ts            # REST client: sprites, checkpoints, services, exec
                 auth.ts           # Secure token storage
+                audio-transcription.ts # Sprite-side audio upload + Whisper/faster-whisper runner
+                client-transcription.ts# AssemblyAI/OpenAI client-side transcription
                 claude-stream.ts  # NDJSON parser for Claude events
                 claude-sessions.ts# Discover & render on-disk Claude transcripts from a sprite
                 exec-poc.ts       # WebSocket exec client
