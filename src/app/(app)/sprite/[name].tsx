@@ -27,7 +27,8 @@ import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionS
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages, setSetting } from '@/services/storage';
+import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
+import { getSetting, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
@@ -115,7 +116,10 @@ export default function SpriteDetailScreen() {
           : chatMeta
       );
       chatListRef.current = updated;
-      saveChatList(spriteName, updated);
+      chatRepository.updateSessionIds(chatId, {
+        claudeSessionId: sessionIds.claudeSessionId,
+        codexSessionId: sessionIds.codexSessionId,
+      });
     },
     onActiveRunChange: (nextActiveRun) => {
       setActiveRun(nextActiveRun);
@@ -124,7 +128,7 @@ export default function SpriteDetailScreen() {
         chatMeta.id === chatId ? { ...chatMeta, activeRun: nextActiveRun } : chatMeta
       );
       chatListRef.current = updated;
-      saveChatList(spriteName, updated);
+      chatRepository.setActiveRun(chatId, nextActiveRun ?? undefined);
     },
   });
   const dictation = useChatDictation({
@@ -141,7 +145,7 @@ export default function SpriteDetailScreen() {
     let mounted = true;
     (async () => {
       const [chats, savedDefaultDir, savedTranscriptionProvider] = await Promise.all([
-        loadChatList(spriteName),
+        chatRepository.listBySprite(spriteName),
         getSetting('defaultWorkingDirectory'),
         getSetting('transcriptionProvider'),
       ]);
@@ -181,7 +185,7 @@ export default function SpriteDetailScreen() {
           processedEventUUIDs: [],
         };
         chatListRef.current = [firstChat];
-        await saveChatList(spriteName, [firstChat]);
+        await chatRepository.upsert(firstChat);
         setChatId(firstChat.id);
         setChatName('Session 1');
         setChatProvider(defaultProvider);
@@ -264,7 +268,10 @@ export default function SpriteDetailScreen() {
             : c
         );
         chatListRef.current = updated;
-        saveChatList(spriteName, updated);
+        chatRepository.patch(chatId, {
+          lastUsed: Date.now(),
+          firstMessagePreview: preview || undefined,
+        });
       }
     }
   }, [chat.messages.length, chatId]);
@@ -300,7 +307,7 @@ export default function SpriteDetailScreen() {
     };
     const updated = [...chats, newChat];
     chatListRef.current = updated;
-    await saveChatList(spriteName, updated);
+    await chatRepository.upsert(newChat);
     setChatId(newChat.id);
     setChatName(`Session ${newNumber}`);
     setChatProvider(config.provider);
@@ -320,7 +327,7 @@ export default function SpriteDetailScreen() {
       c.id === chatId ? { ...c, workingDirectory: dir } : c
     );
     chatListRef.current = updated;
-    await saveChatList(spriteName, updated);
+    await chatRepository.patch(chatId, { workingDirectory: dir });
     setSessionSheetMode(null);
   }, [chatId, spriteName]);
 
@@ -347,7 +354,7 @@ export default function SpriteDetailScreen() {
       c.id === latestChat.id ? { ...c, lastUsed: Date.now() } : c
     );
     chatListRef.current = updated;
-    saveChatList(spriteName, updated);
+    chatRepository.patch(latestChat.id, { lastUsed: Date.now() });
     setChatListVisible(false);
   }, [chat.detachStream, chat.isStreaming, chatId, spriteName, defaultDirectory]);
 
@@ -399,8 +406,8 @@ export default function SpriteDetailScreen() {
         ? chats.map((c) => (c.id === target.id ? target : c))
         : [...chats, target];
       chatListRef.current = updated;
-      await saveChatList(spriteName, updated);
-      await saveChatMessages(target.id, messages);
+      await chatRepository.upsert(target);
+      await chatRepository.setMessages(target.id, messages);
 
       setChatProvider(session.provider);
       setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
@@ -424,7 +431,7 @@ export default function SpriteDetailScreen() {
       c.id === chatId ? { ...c, provider: nextProvider } : c
     );
     chatListRef.current = updated;
-    saveChatList(spriteName, updated);
+    chatRepository.patch(chatId, { provider: nextProvider });
   }, [chat.isStreaming, chatId, isProviderLocked, spriteName]);
 
   useEffect(() => {
