@@ -214,6 +214,52 @@ export async function restoreCheckpoint(spriteName: string, checkpointId: string
   }
 }
 
+// MARK: - Filesystem
+
+export interface SpriteFileWriteResult {
+  path: string;
+  size: number;
+  mode: string;
+}
+
+export async function writeSpriteFile(
+  spriteName: string,
+  path: string,
+  workingDir: string,
+  bytes: Uint8Array,
+  options: { mode?: string; mkdir?: boolean; contentType?: string } = {}
+): Promise<SpriteFileWriteResult> {
+  const token = await getToken();
+  const params = new URLSearchParams({
+    path,
+    workingDir,
+  });
+  if (options.mode) params.set('mode', options.mode);
+  if (options.mkdir) params.set('mkdir', 'true');
+
+  const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const response = await fetch(
+    `${BASE_URL}/sprites/${encodeURIComponent(spriteName)}/fs/write?${params.toString()}`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': options.contentType ?? 'application/octet-stream',
+      },
+      body: body as BodyInit,
+    }
+  );
+
+  if (response.status === 401) throw new AppError('unauthorized', 'Unauthorized');
+  if (response.status === 404) throw new AppError('notFound', 'Not found');
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new AppError('serverError', text || `Write file error ${response.status}`, response.status);
+  }
+
+  return response.json() as Promise<SpriteFileWriteResult>;
+}
+
 // MARK: - Auth Validation
 
 export async function validateToken(): Promise<void> {
