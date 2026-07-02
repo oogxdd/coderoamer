@@ -24,9 +24,8 @@ import { ChatInputBar } from '@/components/chat/ChatInputBar';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
-import { SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
+import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { ClaudeSessionSummary } from '@/services/claude-sessions';
 import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages } from '@/services/storage';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
@@ -304,6 +303,7 @@ export default function SpriteDetailScreen() {
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
     if (selectedChat.id === chatId) {
+      setReloadNonce((n) => n + 1);
       setChatListVisible(false);
       return;
     }
@@ -317,6 +317,7 @@ export default function SpriteDetailScreen() {
     setCodexSessionId(selectedChat.codexSessionId);
     setActiveRun(selectedChat.activeRun);
     setWorkingDirectory(selectedChat.workingDirectory || defaultDirectory);
+    setReloadNonce((n) => n + 1);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
       c.id === selectedChat.id ? { ...c, lastUsed: Date.now() } : c
@@ -326,22 +327,28 @@ export default function SpriteDetailScreen() {
     setChatListVisible(false);
   }, [chat.isStreaming, chat.interrupt, chatId, spriteName, defaultDirectory]);
 
-  // Resume a Claude session discovered on the sprite (its on-disk transcript).
+  // Resume a session discovered on the sprite (its on-disk transcript).
   // Reuses an existing local chat bound to the same session id, or creates one,
-  // seeds it with the rendered transcript, and points the chat at `--resume <id>`
-  // with the session's original cwd (resume requires the matching directory).
+  // seeds it with the rendered transcript, and points the chat at provider-specific
+  // resume id with the session's original cwd when available.
   const handleResumeSession = useCallback(
-    async (session: ClaudeSessionSummary, messages: ChatMessage[]) => {
+    async (session: AgentSessionSummary, messages: ChatMessage[]) => {
       if (chat.isStreaming) chat.interrupt();
       const dir = normalizeWorkingDirectory(session.cwd || defaultDirectory);
       const chats = chatListRef.current;
-      const existing = chats.find((c) => c.claudeSessionId === session.id);
+      const existing = chats.find((c) =>
+        session.provider === 'codex'
+          ? c.provider === 'codex' && c.codexSessionId === session.id
+          : c.provider === 'claude' && c.claudeSessionId === session.id
+      );
 
       let target: PersistedChat;
       if (existing) {
         target = {
           ...existing,
-          provider: 'claude',
+          provider: session.provider,
+          claudeSessionId: session.provider === 'claude' ? session.id : existing.claudeSessionId,
+          codexSessionId: session.provider === 'codex' ? session.id : existing.codexSessionId,
           workingDirectory: dir,
           lastUsed: Date.now(),
         };
@@ -351,8 +358,9 @@ export default function SpriteDetailScreen() {
           id: `${spriteName}-chat-${maxNumber + 1}`,
           spriteName,
           chatNumber: maxNumber + 1,
-          provider: 'claude',
-          claudeSessionId: session.id,
+          provider: session.provider,
+          claudeSessionId: session.provider === 'claude' ? session.id : undefined,
+          codexSessionId: session.provider === 'codex' ? session.id : undefined,
           workingDirectory: dir,
           createdAt: Date.now(),
           lastUsed: Date.now(),
@@ -370,9 +378,9 @@ export default function SpriteDetailScreen() {
       await saveChatList(spriteName, updated);
       await saveChatMessages(target.id, messages);
 
-      setChatProvider('claude');
-      setClaudeSessionId(session.id);
-      setCodexSessionId(undefined);
+      setChatProvider(session.provider);
+      setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
+      setCodexSessionId(session.provider === 'codex' ? session.id : target.codexSessionId);
       setActiveRun(undefined);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
@@ -659,7 +667,7 @@ export default function SpriteDetailScreen() {
         />
       )}
 
-      {/* Session Browser (resume Claude sessions from the sprite's transcripts) */}
+      {/* Session Browser (resume Claude/Codex sessions from the sprite's transcripts) */}
       {sessionBrowserVisible && (
         <SessionBrowserSheet
           spriteName={spriteName}
@@ -800,11 +808,10 @@ function OverviewTab({
         onPress={onBrowseSessions}
       >
         <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>Resume a Claude session</Text>
+          <Text style={[styles.connectTitle, { color: colors.text }]}>Resume a chat session</Text>
           <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Browse every Claude session that ever ran on this sprite (read from
-            ~/.claude/projects), view its full history, and continue it — like
-            `claude --resume`, natively.
+            Browse Claude and Codex transcripts on this sprite, view the full history,
+            and continue it in the native chat UI.
           </Text>
         </View>
         <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>

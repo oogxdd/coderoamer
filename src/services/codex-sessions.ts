@@ -21,6 +21,19 @@ import { runExec } from './api';
 
 const SESSION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,200}$/;
 
+export interface CodexSessionSummary {
+  /** Codex thread id — the value passed to `codex exec resume <id>`. */
+  id: string;
+  /** Working directory recorded in the rollout, when Codex wrote one. */
+  cwd?: string;
+  /** First user prompt, trimmed — used as the list preview. */
+  preview: string;
+  /** Number of JSONL lines in the rollout. */
+  messageCount: number;
+  /** File mtime in ms since epoch. */
+  modified: number;
+}
+
 /** Rollout line types we keep; everything else is preamble/usage/encrypted noise. */
 const KEPT = `new Set([
   'event_msg:user_message',
@@ -31,6 +44,88 @@ const KEPT = `new Set([
   'response_item:custom_tool_call_output',
   'response_item:web_search_call',
 ])`;
+
+const LIST_SCRIPT = String.raw`
+const fs = require('fs'), os = require('os'), path = require('path');
+const root = path.join(os.homedir(), '.codex', 'sessions');
+const out = [];
+const UUID_RE = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+function walk(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) walk(full);
+    else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) readRollout(full, e.name);
+  }
+}
+function findString(value, keys) {
+  if (!value || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = findString(item, keys);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  for (const key of keys) {
+    if (typeof value[key] === 'string' && value[key]) return value[key];
+  }
+  for (const key of Object.keys(value)) {
+    const hit = findString(value[key], keys);
+    if (hit) return hit;
+  }
+  return null;
+}
+function userPreview(o) {
+  const p = o && o.payload;
+  if (o && o.type === 'event_msg' && p && p.type === 'user_message') {
+    if (typeof p.message === 'string') return p.message;
+    return findString(p.message, ['text', 'content']) || '';
+  }
+  if (o && (o.type === 'user_message' || o.type === 'user')) {
+    return findString(o, ['message', 'text', 'content']) || '';
+  }
+  return '';
+}
+function threadId(o) {
+  const p = o && o.payload;
+  return findString(o, ['thread_id', 'threadId']) || (p && findString(p, ['thread_id', 'threadId'])) || null;
+}
+function fileId(name) {
+  const uuid = name.match(UUID_RE);
+  if (uuid) return uuid[1];
+  return name.replace(/^rollout-/, '').replace(/\.jsonl$/, '').split('-').pop();
+}
+function readRollout(fp, name) {
+  let stat, content;
+  try { stat = fs.statSync(fp); content = fs.readFileSync(fp, 'utf8'); } catch { return; }
+  const lines = content.split('\n').filter((l) => l.trim());
+  if (lines.length === 0) return;
+  let id = fileId(name);
+  let cwd = null;
+  let preview = '';
+  for (const line of lines) {
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (!id) id = threadId(o);
+    if (!cwd) cwd = findString(o, ['cwd', 'working_directory', 'workingDirectory']);
+    if (!preview) preview = userPreview(o);
+    if (id && cwd && preview) break;
+  }
+  if (!id) return;
+  out.push({
+    id,
+    cwd,
+    preview: (preview || '').slice(0, 240),
+    messageCount: lines.length,
+    modified: Math.floor(stat.mtimeMs),
+  });
+}
+try { walk(root); } catch (e) {}
+out.sort((a, b) => b.modified - a.modified);
+process.stdout.write('@@WISP@@' + JSON.stringify(out) + '@@WISP@@');
+`;
 
 /**
  * Node script (run on the sprite) that locates the rollout for a thread id and
@@ -93,6 +188,27 @@ function extractSentinel(output: string): string | null {
   const end = output.indexOf('@@WISP@@', start + 8);
   if (end === -1) return null;
   return output.slice(start + 8, end);
+}
+
+export async function listCodexSessions(spriteName: string): Promise<CodexSessionSummary[]> {
+  const { output } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+  const payload = extractSentinel(output);
+  if (!payload) return [];
+  try {
+    const parsed = JSON.parse(payload);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x): x is CodexSessionSummary => !!x && typeof x.id === 'string')
+      .map((x) => ({
+        id: x.id,
+        cwd: typeof x.cwd === 'string' ? x.cwd : undefined,
+        preview: typeof x.preview === 'string' ? x.preview.trim() : '',
+        messageCount: Number(x.messageCount) || 0,
+        modified: Number(x.modified) || 0,
+      }));
+  } catch {
+    return [];
+  }
 }
 
 async function readSessionRaw(spriteName: string, sessionId: string): Promise<string> {
