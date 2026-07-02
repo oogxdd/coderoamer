@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -12,22 +12,29 @@ import {
 import { router } from 'expo-router';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
-import { ChatMessage } from '@/models/chat';
+import { AgentProvider, ChatMessage, providerDisplayName } from '@/models/chat';
 import { shortWorkingDirectory } from '@/constants/session';
 import {
   ClaudeSessionSummary,
   listClaudeSessions,
   readClaudeSessionMessages,
 } from '@/services/claude-sessions';
+import {
+  CodexSessionSummary,
+  listCodexSessions,
+  readCodexSessionMessages,
+} from '@/services/codex-sessions';
 import { ExecSession, listExecSessions } from '@/services/api';
 import { ChatMessageView } from './ChatMessageView';
 
 type BrowserTab = 'history' | 'live';
+export type AgentSessionSummary =
+  (ClaudeSessionSummary | CodexSessionSummary) & { provider: AgentProvider };
 
 interface SessionBrowserSheetProps {
   spriteName: string;
-  /** Resume the chosen session: seeds a chat with its transcript + `--resume <id>`. */
-  onResume: (session: ClaudeSessionSummary, messages: ChatMessage[]) => void;
+  /** Resume the chosen session: seeds a chat with its transcript + provider-specific resume id. */
+  onResume: (session: AgentSessionSummary, messages: ChatMessage[]) => void;
   onClose: () => void;
 }
 
@@ -49,16 +56,18 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
   const [activeTab, setActiveTab] = useState<BrowserTab>('history');
 
   // History tab state
-  const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([]);
+  const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const [lastLoadedAt, setLastLoadedAt] = useState<number | undefined>();
 
   // Detail (history) view state
-  const [selected, setSelected] = useState<ClaudeSessionSummary | null>(null);
+  const [selected, setSelected] = useState<AgentSessionSummary | null>(null);
   const [detailMessages, setDetailMessages] = useState<ChatMessage[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | undefined>();
+  const detailRequestRef = useRef(0);
 
   // Live tab state
   const [liveSessions, setLiveSessions] = useState<ExecSession[]>([]);
@@ -67,10 +76,20 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
   const [liveError, setLiveError] = useState<string | undefined>();
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError(undefined);
     try {
-      const list = await listClaudeSessions(spriteName);
-      setSessions(list);
+      const [claudeList, codexList] = await Promise.all([
+        listClaudeSessions(spriteName),
+        listCodexSessions(spriteName),
+      ]);
+      setSessions(
+        [
+          ...claudeList.map((session) => ({ ...session, provider: 'claude' as const })),
+          ...codexList.map((session) => ({ ...session, provider: 'codex' as const })),
+        ].sort((a, b) => b.modified - a.modified)
+      );
+      setLastLoadedAt(Date.now());
     } catch (e: any) {
       setError(e?.message ?? 'Failed to load sessions');
     } finally {
@@ -104,17 +123,24 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
   }, [activeTab, liveLoading, liveSessions.length, liveError, loadLive]);
 
   const openDetail = useCallback(
-    async (session: ClaudeSessionSummary) => {
+    async (session: AgentSessionSummary) => {
+      const request = ++detailRequestRef.current;
       setSelected(session);
       setDetailMessages([]);
       setDetailError(undefined);
       setDetailLoading(true);
       try {
-        const msgs = await readClaudeSessionMessages(spriteName, session.id);
+        const msgs =
+          session.provider === 'codex'
+            ? await readCodexSessionMessages(spriteName, session.id)
+            : await readClaudeSessionMessages(spriteName, session.id);
+        if (request !== detailRequestRef.current) return;
         setDetailMessages(msgs);
       } catch (e: any) {
+        if (request !== detailRequestRef.current) return;
         setDetailError(e?.message ?? 'Failed to load transcript');
       } finally {
+        if (request !== detailRequestRef.current) return;
         setDetailLoading(false);
       }
     },
@@ -142,23 +168,39 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
           onPress={() => openDetail(item)}
         >
           <View style={styles.rowContent}>
+            <View style={styles.rowTopLine}>
+              <Text style={[styles.providerPill, { color: colors.tint, borderColor: colors.border }]}>
+                {providerDisplayName(item.provider)}
+              </Text>
+              <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                {item.cwd ? shortWorkingDirectory(item.cwd) : 'unknown dir'}
+              </Text>
+            </View>
             <Text style={[styles.rowPreview, { color: colors.text }]} numberOfLines={2}>
               {item.preview || '(no prompt recorded)'}
             </Text>
             <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1}>
-              {item.cwd ? shortWorkingDirectory(item.cwd) : 'unknown dir'} · {item.messageCount} msgs ·{' '}
-              {relativeTime(item.modified)}
+              {item.messageCount} events · updated {relativeTime(item.modified)}
             </Text>
           </View>
           <Text style={[styles.chevron, { color: colors.tint }]}>›</Text>
         </Pressable>
       )}
+      ListHeaderComponent={
+        <View style={[styles.sourceHeader, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.sourceTitle, { color: colors.text }]}>Sprite Chat History</Text>
+          <Text style={[styles.sourceMeta, { color: colors.textSecondary }]} numberOfLines={2}>
+            Pulled from Claude and Codex transcript files on {spriteName}
+            {lastLoadedAt ? ` · refreshed ${relativeTime(lastLoadedAt)}` : ''}
+          </Text>
+        </View>
+      }
       ListEmptyComponent={
         loading ? (
           <View style={styles.centerView}>
             <ActivityIndicator size="small" color={colors.tint} />
             <Text style={[styles.dimText, { color: colors.textSecondary }]}>
-              Scanning ~/.claude/projects on {spriteName}…
+              Scanning chat transcripts on {spriteName}…
             </Text>
           </View>
         ) : (
@@ -166,7 +208,7 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
             <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
               {error
                 ? error
-                : 'No Claude sessions found on this sprite yet. Start one from Chat, or run claude in the terminal.'}
+                : 'No Claude or Codex sessions found on this sprite yet.'}
             </Text>
           </View>
         )
@@ -278,8 +320,8 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
                     styles.tabText,
                     { color: activeTab === tab ? colors.tint : colors.textSecondary },
                   ]}
-                >
-                  {tab === 'history' ? 'History' : 'Live'}
+                  >
+                  {tab === 'history' ? 'History' : 'Live Terminal'}
                 </Text>
               </Pressable>
             ))}
@@ -313,6 +355,9 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
                   )}
                   ListHeaderComponent={
                     <View style={styles.detailHeader}>
+                      <Text style={[styles.detailProvider, { color: colors.tint }]}>
+                        {providerDisplayName(selected.provider)}
+                      </Text>
                       <Text style={[styles.detailMeta, { color: colors.textSecondary }]} numberOfLines={1}>
                         {selected.cwd ?? 'unknown dir'}
                       </Text>
@@ -367,6 +412,20 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   rowContent: { flex: 1, marginRight: Spacing.sm },
+  rowTopLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    marginBottom: 6,
+  },
+  providerPill: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
   rowPreview: { fontSize: FontSize.md, fontWeight: '500', lineHeight: 20 },
   rowMeta: { fontSize: FontSize.xs, marginTop: 4 },
   chevron: { fontSize: FontSize.xl, fontWeight: '400' },
@@ -382,8 +441,16 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 22 },
   detailContent: { paddingVertical: Spacing.sm, paddingBottom: 80 },
   detailHeader: { paddingHorizontal: Spacing.lg, paddingBottom: Spacing.sm },
+  detailProvider: { fontSize: FontSize.xs, fontWeight: '700', marginBottom: 4 },
   detailMeta: { fontSize: FontSize.xs },
   detailId: { fontSize: FontSize.xs, marginTop: 2 },
+  sourceHeader: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  sourceTitle: { fontSize: FontSize.md, fontWeight: '700' },
+  sourceMeta: { fontSize: FontSize.xs, marginTop: 4, lineHeight: 16 },
   continueBar: {
     position: 'absolute',
     bottom: Spacing.lg,

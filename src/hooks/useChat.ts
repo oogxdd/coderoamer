@@ -194,6 +194,7 @@ export function useChat(options: UseChatOptions) {
   const claudeParserRef = useRef(new ClaudeStreamParser());
   const codexParserRef = useRef(new CodexStreamParser());
   const loadRequestRef = useRef(0);
+  const loadedChatIdRef = useRef<string | undefined>(undefined);
   const messagesRef = useRef<ChatMessage[]>([]);
   const activeUserMessageIdRef = useRef<string | undefined>(undefined);
   const activeAssistantMessageIdRef = useRef<string | undefined>(undefined);
@@ -323,6 +324,26 @@ export function useChat(options: UseChatOptions) {
 
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
+    const isDifferentChat = loadedChatIdRef.current !== chatId;
+    if (isDifferentChat && statusRef.current === 'idle') {
+      messagesRef.current = [];
+      setMessages([]);
+      toolUseIndexRef.current = new Map();
+      activeUserMessageIdRef.current = undefined;
+      activeAssistantMessageIdRef.current = undefined;
+      assistantTextSeenRef.current = false;
+      serviceEventsSeenRef.current = 0;
+      claudeParserRef.current.reset();
+      codexParserRef.current.reset();
+      codexStderrRef.current = '';
+      codexSawAssistantRef.current = false;
+      setErrorMessage(undefined);
+      setCodexAuthIssue(undefined);
+      claudeSessionIdRef.current = options.initialClaudeSessionId;
+      codexSessionIdRef.current = options.initialCodexSessionId;
+      activeRunRef.current = options.initialActiveRun;
+      execSessionIdRef.current = undefined;
+    }
     const initialMessageCount = messagesRef.current.length;
     const saved = await loadChatMessages(chatId);
     if (loadRequest !== loadRequestRef.current) return;
@@ -331,6 +352,7 @@ export function useChat(options: UseChatOptions) {
     if (messagesRef.current.length > initialMessageCount || statusRef.current !== 'idle') return;
 
     messagesRef.current = saved;
+    loadedChatIdRef.current = chatId;
     setMessages(saved);
     activeRunRef.current = options.initialActiveRun;
     activeUserMessageIdRef.current = undefined;
