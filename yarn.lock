@@ -2584,6 +2584,11 @@ expo-asset@~55.0.8:
     "@expo/image-utils" "^0.8.12"
     expo-constants "~55.0.7"
 
+expo-audio@~55.0.15:
+  version "55.0.15"
+  resolved "https://registry.npmjs.org/expo-audio/-/expo-audio-55.0.15.tgz"
+  integrity sha512-VS5112dO7sUivJpqLjAJLsP4Cv1c4o92wrMqkUCPA/879f8hy6RUQI7t2NVTnK5qkVzp1MtzkWhArwAtjVuVHg==
+
 expo-clipboard@^55.0.8:
   version "55.0.8"
   resolved "https://registry.npmjs.org/expo-clipboard/-/expo-clipboard-55.0.8.tgz"
@@ -2604,10 +2609,15 @@ expo-device@~55.0.9:
   dependencies:
     ua-parser-js "^0.7.33"
 
-expo-file-system@~55.0.10:
-  version "55.0.10"
-  resolved "https://registry.npmjs.org/expo-file-system/-/expo-file-system-55.0.10.tgz"
-  integrity sha512-ysFdVdUgtfj2ApY0Cn+pBg+yK4xp+SNwcaH8j2B91JJQ4OXJmnyCSmrNZYz7J4mdYVuv2GzxIP+N/IGlHQG3Yw==
+expo-document-picker@~55.0.14:
+  version "55.0.14"
+  resolved "https://registry.npmjs.org/expo-document-picker/-/expo-document-picker-55.0.14.tgz"
+  integrity sha512-Jfw7q5evNc1ebM/gZQ0bmG1t56QdHurbZ6IF8NwSnf/F5B4qjS97OeCfdsq+Q5JLrTmqSIkvYhCZwRYZzuX0Fw==
+
+expo-file-system@~55.0.10, expo-file-system@~55.0.23:
+  version "55.0.23"
+  resolved "https://registry.npmjs.org/expo-file-system/-/expo-file-system-55.0.23.tgz"
+  integrity sha512-XNV/NaPc7Tvd2JIsWkPW8s2vfJUI/Oe4UMX9TmOGpc6cn5BckDw/nn2Qre9lq4btT4FWHJw4SAOHmATShLC0og==
 
 expo-font@~55.0.4:
   version "55.0.4"
@@ -2699,6 +2709,11 @@ expo-server@^55.0.6:
   version "55.0.6"
   resolved "https://registry.npmjs.org/expo-server/-/expo-server-55.0.6.tgz"
   integrity sha512-xI72FTm469FfuuBL2R5aNtthgH+GR7ygOpsx/KcPS0K8AZaZd7VjtEExbzn9/qyyYkWW3T+3dAmCDKOMX8gdmQ==
+
+expo-speech-recognition@^56.0.1:
+  version "56.0.1"
+  resolved "https://registry.npmjs.org/expo-speech-recognition/-/expo-speech-recognition-56.0.1.tgz"
+  integrity sha512-TpP1KCiq3vYfSQF0XpUkWLXp4mTw6MLuyMGPzVVKwqzs7oiKlJ/e0q3PNNjfqs058X47ftqT+31lTaWRWRbmPg==
 
 expo-splash-screen@~55.0.10:
   version "55.0.10"
@@ -3305,7 +3320,17 @@ lighthouse-logger@^1.0.0:
 lightningcss-darwin-arm64@1.32.0:
   version "1.32.0"
   resolved "https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.32.0.tgz"
-  integrity sha512-RzeG9Ju5bag2Bv1/lwlVJvBE3q6TtXskdZLLCyfg5pt+HLz9BqlICO7LZM7VHNTTn/5PRhHFBSjk5lc4cmscPQ==
+  integrity sha512-RzeG9Ju5bag2Bv1/lwlVJvBE3q6TtXskdZLLCyfg5pt+HLz9BqlICO7LZM7VHNTn/5PRhHFBSjk5lc4cmscPQ==
+
+lightningcss-linux-x64-gnu@1.32.0:
+  version "1.32.0"
+  resolved "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.32.0.tgz"
+  integrity sha512-V7Qr52IhZmdKPVr+Vtw8o+WLsQJYCTd8loIfpDaMRWGUZfBOYEJeyJIkqGIDMZPwPx24pUMfwSxxI8phr/MbOA==
+
+lightningcss-linux-x64-musl@1.32.0:
+  version "1.32.0"
+  resolved "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.32.0.tgz"
+  integrity sha512-bYcLp+Vb0awsiXg/80uCRezCYHNg1/l3mt0gzHnWV9XP1W5sKa5/TCdGWaR/zBM2PeF/HbsQv/j2URNOiVuxWg==
 
 lightningcss@^1.30.1:
   version "1.32.0"
