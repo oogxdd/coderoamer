@@ -27,7 +27,8 @@ import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionS
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages } from '@/services/storage';
+import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages, setSetting } from '@/services/storage';
+import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
@@ -35,6 +36,10 @@ type Tab = 'overview' | 'chat' | 'checkpoints';
 
 function normalizeProvider(provider: unknown): AgentProvider {
   return provider === 'codex' ? 'codex' : 'claude';
+}
+
+function normalizeTranscriptionProvider(provider: unknown): TranscriptionProvider {
+  return provider === 'assemblyai' || provider === 'openai' ? provider : 'sprite';
 }
 
 /** Find the active tool label from the last assistant message's content */
@@ -85,6 +90,8 @@ export default function SpriteDetailScreen() {
   const spriteName = name ?? '';
   const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
+  const [transcriptionProvider, setTranscriptionProvider] =
+    useState<TranscriptionProvider>('sprite');
 
   const chat = useChat({
     spriteName,
@@ -125,6 +132,7 @@ export default function SpriteDetailScreen() {
     workingDirectory,
     inputText: chat.inputText,
     setInputText: chat.setInputText,
+    transcriptionProvider,
   });
   const isProviderLocked = chat.messages.some((message) => message.role === 'user');
 
@@ -132,9 +140,10 @@ export default function SpriteDetailScreen() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [chats, savedDefaultDir] = await Promise.all([
+      const [chats, savedDefaultDir, savedTranscriptionProvider] = await Promise.all([
         loadChatList(spriteName),
         getSetting('defaultWorkingDirectory'),
+        getSetting('transcriptionProvider'),
       ]);
       if (!mounted) return;
 
@@ -142,6 +151,7 @@ export default function SpriteDetailScreen() {
         ? normalizeWorkingDirectory(savedDefaultDir)
         : DEFAULT_WORKING_DIRECTORY;
       setDefaultDirectory(fallbackDir);
+      setTranscriptionProvider(normalizeTranscriptionProvider(savedTranscriptionProvider));
 
       if (chats.length > 0) {
         chatListRef.current = chats;
@@ -262,6 +272,11 @@ export default function SpriteDetailScreen() {
   const handleSend = () => {
     chat.sendMessage();
   };
+
+  const handleTranscriptionProviderChange = useCallback(async (provider: TranscriptionProvider) => {
+    setTranscriptionProvider(provider);
+    await setSetting('transcriptionProvider', provider);
+  }, []);
 
   const createChat = useCallback(async (config: NewSessionConfig) => {
     // Stop any in-flight stream before switching away (one shared useChat instance).
@@ -642,6 +657,8 @@ export default function SpriteDetailScreen() {
             dictationStatus={dictation.status}
             dictationError={dictation.error}
             onClearDictationError={dictation.clearDictationError}
+            transcriptionProvider={transcriptionProvider}
+            onTranscriptionProviderChange={handleTranscriptionProviderChange}
           />
         </KeyboardAvoidingView>
       )}

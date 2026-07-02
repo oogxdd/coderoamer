@@ -8,8 +8,8 @@ Guide for AI agents working in this repository. Read this before making changes.
 [Fly.io Sprites](https://sprites.dev) (cloud dev VMs). It lets you run
 **Claude Code** (and **Codex**) inside a Sprite and drive coding sessions from
 your phone: a streaming chat, a native session browser that reads Claude's
-on-disk transcripts, a Skia-rendered TTY terminal over WebSocket, and
-filesystem checkpoints.
+on-disk transcripts, client/sprite audio transcription experiments, a
+Skia-rendered TTY terminal over WebSocket, and filesystem checkpoints.
 
 The app does **not** run Claude locally. It launches Claude *inside the sprite*
 as a one-shot Sprites "service" and streams the NDJSON output back over HTTP.
@@ -87,7 +87,8 @@ api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
   index.tsx        Dashboard — sprite list, create sprite, links to Guides/Settings
   guide.tsx        In-app setup walkthrough
   settings.tsx     Defaults: provider, claude model, max turns, instructions,
-                   working directory, git name/email, auto-checkpoint
+                   working directory, git name/email, transcription keys,
+                   auto-checkpoint
   sprite/[name].tsx  The main screen: tabs Overview / Chat / Checkpoints,
                      plus session browser + terminals entry points
   exec-poc.tsx     Stream terminal (WebSocket exec → Skia terminal)
@@ -147,6 +148,33 @@ sentinel markers (extracted by `extractSentinel` to tolerate shell noise).
 `transcriptToMessages` converts a raw transcript into the app's `ChatMessage[]`
 so the existing chat UI renders it natively.
 
+### Dictation and audio transcription
+
+`src/hooks/useChatDictation.ts` owns the chat input's audio paths:
+
+- `Mic` uses `expo-speech-recognition` directly on the device with interim
+  results enabled. It streams text into the input box as the user speaks.
+- `Rec` uses `expo-audio` to record locally, then transcribes the recording.
+- `File` uses `expo-document-picker` to select an audio file, then transcribes
+  the file.
+
+`Rec` and `File` route through the persisted `transcriptionProvider` setting:
+
+- `sprite` (default): `src/services/audio-transcription.ts` uploads to the
+  sprite and runs a local backend (`whisper`, Python `whisper`, or
+  `faster_whisper`). This needs a backend installed inside each target sprite.
+- `assemblyai`: `src/services/client-transcription.ts` uploads directly from
+  the client to AssemblyAI, creates a transcript, and polls it. The request sets
+  language detection with expected languages `en` and `ru`.
+- `openai`: `src/services/client-transcription.ts` uploads directly from the
+  client to OpenAI's `/v1/audio/transcriptions` endpoint with
+  `gpt-4o-mini-transcribe`.
+
+All transcription paths append text to the chat input only; they do **not**
+auto-send the chat message. AssemblyAI and OpenAI keys are stored via
+`src/services/auth.ts` (`assemblyAiToken`, `openAiToken`) and configured in
+Settings → Transcription.
+
 ### Terminal (`src/components/terminal/`)
 
 A from-scratch Skia terminal (not xterm.js): `AnsiParser` → `TerminalBuffer`
@@ -162,7 +190,8 @@ and `exec-poc.tsx` `require()`s the native component conditionally.
 - **Tokens** (`src/services/auth.ts`): `expo-secure-store` on native, `localStorage`
   on web. Three keys: `spritesToken` (Sprites API), `claudeToken`
   (`CLAUDE_CODE_OAUTH_TOKEN`, injected at launch time), `githubToken` (device flow,
-  optional — used to auto-fill git name/email). `AuthContext` exposes state.
+  optional — used to auto-fill git name/email), plus optional `assemblyAiToken`
+  and `openAiToken` for client-side audio transcription. `AuthContext` exposes state.
 - **Chats & settings** (`src/services/storage.ts`): AsyncStorage with prefixes
   `sprite_chats_<spriteName>` (the list of `PersistedChat`), `chat_meta_<chatId>`
   (the `ChatMessage[]`), `setting_<key>` (string settings) / `setting_<key>`=`'true'|'false'`
