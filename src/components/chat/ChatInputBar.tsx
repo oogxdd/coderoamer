@@ -21,6 +21,15 @@ interface ChatInputBarProps {
   provider: AgentProvider;
   providerLocked?: boolean;
   onProviderChange: (provider: AgentProvider) => void;
+  onToggleClientDictation?: () => void;
+  onToggleSpriteRecording?: () => void;
+  onPickAudioFile?: () => void;
+  isClientDictating?: boolean;
+  isSpriteRecording?: boolean;
+  isTranscribingAudio?: boolean;
+  dictationStatus?: string;
+  dictationError?: string;
+  onClearDictationError?: () => void;
 }
 
 export function ChatInputBar({
@@ -33,10 +42,24 @@ export function ChatInputBar({
   provider,
   providerLocked,
   onProviderChange,
+  onToggleClientDictation,
+  onToggleSpriteRecording,
+  onPickAudioFile,
+  isClientDictating,
+  isSpriteRecording,
+  isTranscribingAudio,
+  dictationStatus,
+  dictationError,
+  onClearDictationError,
 }: ChatInputBarProps) {
   const colors = useTheme();
 
   const canSend = value.trim().length > 0 && !disabled;
+  const dictationBusy = Boolean(isClientDictating || isSpriteRecording || isTranscribingAudio);
+  const dictationUnavailable = Boolean(disabled || isStreaming);
+  const clientDisabled = dictationUnavailable || Boolean(isTranscribingAudio || isSpriteRecording);
+  const recordDisabled = dictationUnavailable || Boolean(isTranscribingAudio || isClientDictating);
+  const fileDisabled = dictationUnavailable || dictationBusy;
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background, borderTopColor: colors.border }]}>
@@ -70,6 +93,87 @@ export function ChatInputBar({
           Session model is locked after the first message.
         </Text>
       )}
+
+      <View style={styles.dictationRow}>
+        <View style={styles.dictationButtons}>
+          <Pressable
+            style={[
+              styles.dictationButton,
+              { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+              isClientDictating && { backgroundColor: colors.tint, borderColor: colors.tint },
+            ]}
+            onPress={onToggleClientDictation}
+            disabled={!onToggleClientDictation || clientDisabled}
+            hitSlop={6}
+          >
+            <Text
+              style={[
+                styles.dictationButtonText,
+                { color: isClientDictating ? '#FFFFFF' : colors.textSecondary },
+                (!onToggleClientDictation || clientDisabled) && styles.disabledText,
+              ]}
+            >
+              {isClientDictating ? 'Stop' : 'Mic'}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.dictationButton,
+              { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+              isSpriteRecording && { backgroundColor: colors.destructive, borderColor: colors.destructive },
+            ]}
+            onPress={onToggleSpriteRecording}
+            disabled={!onToggleSpriteRecording || recordDisabled}
+            hitSlop={6}
+          >
+            <Text
+              style={[
+                styles.dictationButtonText,
+                { color: isSpriteRecording ? '#FFFFFF' : colors.textSecondary },
+                (!onToggleSpriteRecording || recordDisabled) && styles.disabledText,
+              ]}
+            >
+              {isSpriteRecording ? 'Stop' : 'Rec'}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.dictationButton,
+              { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+            ]}
+            onPress={onPickAudioFile}
+            disabled={!onPickAudioFile || fileDisabled}
+            hitSlop={6}
+          >
+            <Text
+              style={[
+                styles.dictationButtonText,
+                { color: colors.textSecondary },
+                (!onPickAudioFile || fileDisabled) && styles.disabledText,
+              ]}
+            >
+              File
+            </Text>
+          </Pressable>
+        </View>
+        {(dictationStatus || dictationError) && (
+          <Pressable
+            style={styles.dictationMessageWrap}
+            onPress={dictationError ? onClearDictationError : undefined}
+            disabled={!dictationError}
+          >
+            <Text
+              style={[
+                styles.dictationMessage,
+                { color: dictationError ? colors.destructive : colors.textSecondary },
+              ]}
+              numberOfLines={1}
+            >
+              {dictationError ?? dictationStatus}
+            </Text>
+          </Pressable>
+        )}
+      </View>
 
       <View style={styles.inputRow}>
         <TextInput
@@ -153,6 +257,41 @@ const styles = StyleSheet.create({
   providerButtonText: {
     fontSize: FontSize.sm,
     fontWeight: '600',
+  },
+  dictationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  dictationButtons: {
+    flexDirection: 'row',
+    gap: Spacing.xs,
+  },
+  dictationButton: {
+    minWidth: 44,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.sm,
+  },
+  dictationButtonText: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+  },
+  disabledText: {
+    opacity: 0.4,
+  },
+  dictationMessageWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  dictationMessage: {
+    fontSize: FontSize.xs,
+    textAlign: 'right',
   },
   inputRow: {
     flexDirection: 'row',
