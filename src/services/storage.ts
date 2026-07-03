@@ -30,6 +30,7 @@ export interface ActiveChatRun {
   execSessionId: string;
   taskName: string;
   provider: AgentProvider;
+  transport?: 'exec' | 'codexAppServer';
   userMessageId: string;
   assistantMessageId: string;
   workingDirectory: string;
@@ -91,6 +92,7 @@ function normalizeActiveRun(value: unknown): ActiveChatRun | undefined {
     execSessionId: raw.execSessionId,
     taskName: raw.taskName,
     provider: normalizeProvider(raw.provider),
+    transport: raw.transport === 'codexAppServer' ? 'codexAppServer' : 'exec',
     userMessageId: raw.userMessageId,
     assistantMessageId: raw.assistantMessageId,
     workingDirectory: typeof raw.workingDirectory === 'string' ? raw.workingDirectory : '',

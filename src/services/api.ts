@@ -385,12 +385,18 @@ export async function streamServiceLogs(
 
 // MARK: - Exec Streaming
 
-interface StreamExecOptions {
+export interface ExecStdinWriter {
+  write: (text: string) => void;
+  writeBytes: (bytes: Uint8Array) => void;
+}
+
+export interface StreamExecOptions {
   attachSessionId?: string;
   path?: string;
   maxRunAfterDisconnect?: string;
   tty?: boolean;
   stdin?: boolean;
+  onStdinReady?: (writer: ExecStdinWriter) => void;
   onSessionId?: (sessionId: string) => void;
   onDisconnectBeforeExit?: () => void;
 }
@@ -471,6 +477,20 @@ function stringToBytes(text: string): Uint8Array {
   return Uint8Array.from(Array.from(text, (ch) => ch.charCodeAt(0) & 0xff));
 }
 
+function textToUtf8Bytes(text: string): Uint8Array {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text);
+
+  const encoded = unescape(encodeURIComponent(text));
+  return Uint8Array.from(Array.from(encoded, (ch) => ch.charCodeAt(0) & 0xff));
+}
+
+function makeExecStdinFrame(payload: Uint8Array): ArrayBuffer {
+  const frame = new Uint8Array(payload.length + 1);
+  frame[0] = 0;
+  frame.set(payload, 1);
+  return frame.buffer;
+}
+
 /**
  * Stream a one-shot command through the Exec API.
  *
@@ -527,6 +547,18 @@ export async function streamExec(
       if (!socket) return;
       if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) return;
       socket.close();
+    };
+
+    const writeStdinBytes = (bytes: Uint8Array) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new AppError('networkError', 'Exec WebSocket is not open');
+      }
+      socket.send(makeExecStdinFrame(bytes));
+    };
+
+    const stdinWriter: ExecStdinWriter = {
+      write: (text: string) => writeStdinBytes(textToUtf8Bytes(text)),
+      writeBytes: writeStdinBytes,
     };
 
     function handleAbort() {
@@ -606,6 +638,11 @@ export async function streamExec(
 
     socket.onopen = () => {
       onEvent({ type: 'started' });
+      try {
+        options.onStdinReady?.(stdinWriter);
+      } catch (err) {
+        settle(err as Error);
+      }
     };
 
     socket.onmessage = async (event) => {

@@ -19,6 +19,7 @@ import { CodexStreamEvent } from '@/models/codex-events';
 import { ServiceLogEvent } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
+import { streamCodexAppServerTurn } from '@/services/codex-app-server';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import { readCodexSessionMessages } from '@/services/codex-sessions';
 import * as api from '@/services/api';
@@ -989,6 +990,12 @@ export function useChat(options: UseChatOptions) {
         case 'turnCompleted':
           debugChat('codex turn completed', elapsedSince(turnTimingRef.current.startedAt));
           agentTurnCompleteRef.current = true;
+          if (activeRunRef.current?.transport === 'codexAppServer') {
+            const sessionId = execSessionIdRef.current ?? activeRunRef.current.execSessionId;
+            if (sessionId) {
+              api.killExecSession(spriteName, sessionId).catch(() => {});
+            }
+          }
           break;
         case 'error':
           debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);
@@ -999,7 +1006,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [appendAssistantText, updateActiveAssistant, setCodexSessionId]
+    [appendAssistantText, updateActiveAssistant, setCodexSessionId, spriteName]
   );
 
   const reportCodexAuthIssue = useCallback(
@@ -1025,8 +1032,7 @@ export function useChat(options: UseChatOptions) {
             debugChat('first stdout', provider, elapsedSince(turnTimingRef.current.startedAt));
           }
 
-          let dataStr = stripLogTimestamps(event.data);
-          if (!dataStr.endsWith('\n')) dataStr += '\n';
+          const dataStr = stripLogTimestamps(event.data);
 
           if (provider === 'claude') {
             const events = claudeParserRef.current.parse(dataStr);
@@ -1162,6 +1168,9 @@ export function useChat(options: UseChatOptions) {
       debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
 
       const commandParts: string[] = [];
+      let codexAppServerPrompt: string | undefined;
+      let codexAppServerModel: string | undefined;
+      let transport: ActiveChatRun['transport'] = 'exec';
 
       // Credentials (git identity, GitHub HTTPS auth, Claude OAuth) are written
       // to the sprite once — at creation, or lazily here on first use this
@@ -1213,15 +1222,10 @@ export function useChat(options: UseChatOptions) {
           ? prompt
           : buildFallbackPrompt(historyBeforeSend, prompt);
 
-        let codexCmd = codexSessionIdRef.current
-          ? `codex exec resume ${shellQuote(codexSessionIdRef.current)} --json`
-          : 'codex exec --json';
-        if (codexModel) {
-          codexCmd += ` --model ${shellQuote(codexModel)}`;
-        }
-        codexCmd += ` --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote(codexPrompt)}`;
-
-        commandParts.push(codexCmd);
+        codexAppServerPrompt = codexPrompt;
+        codexAppServerModel = codexModel || undefined;
+        transport = 'codexAppServer';
+        commandParts.push('codex app-server --stdio');
       }
 
       const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
@@ -1246,36 +1250,60 @@ export function useChat(options: UseChatOptions) {
       const streamActiveRunRef: { current?: ActiveChatRun } = {};
 
       try {
-        await api.streamExec(
-          spriteName,
-          ['bash', '-c', fullCommand],
-          (event) => {
-            if (abortRef.current !== abortController) return;
-            processServiceEvent(event);
-          },
-          abortController.signal,
-          {
+        const onSessionId = (sessionId: string) => {
+          execSessionIdRef.current = sessionId;
+          const nextRun: ActiveChatRun = {
+            execSessionId: sessionId,
+            taskName,
+            provider,
+            transport,
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantMessage.id,
+            workingDirectory,
+            startedAt: Date.now(),
+          };
+          streamActiveRunRef.current = nextRun;
+          setActiveRun(nextRun);
+        };
+
+        const onDisconnectBeforeExit = () => {
+          disconnectedBeforeExit = true;
+        };
+
+        const onEvent = (event: ServiceLogEvent) => {
+          if (abortRef.current !== abortController) return;
+          processServiceEvent(event);
+        };
+
+        if (provider === 'codex' && codexAppServerPrompt !== undefined) {
+          await streamCodexAppServerTurn({
+            spriteName,
+            command: ['bash', '-c', fullCommand],
             path: '/bin/bash',
+            workingDirectory,
+            prompt: codexAppServerPrompt,
+            threadId: codexSessionIdRef.current,
+            model: codexAppServerModel,
             maxRunAfterDisconnect: CHAT_MAX_RUN_AFTER_DISCONNECT,
-            onDisconnectBeforeExit: () => {
-              disconnectedBeforeExit = true;
-            },
-            onSessionId: (sessionId) => {
-              execSessionIdRef.current = sessionId;
-              const nextRun: ActiveChatRun = {
-                execSessionId: sessionId,
-                taskName,
-                provider,
-                userMessageId: userMessage.id,
-                assistantMessageId: assistantMessage.id,
-                workingDirectory,
-                startedAt: Date.now(),
-              };
-              streamActiveRunRef.current = nextRun;
-              setActiveRun(nextRun);
-            },
-          }
-        );
+            signal: abortController.signal,
+            onEvent,
+            onDisconnectBeforeExit,
+            onSessionId,
+          });
+        } else {
+          await api.streamExec(
+            spriteName,
+            ['bash', '-c', fullCommand],
+            onEvent,
+            abortController.signal,
+            {
+              path: '/bin/bash',
+              maxRunAfterDisconnect: CHAT_MAX_RUN_AFTER_DISCONNECT,
+              onDisconnectBeforeExit,
+              onSessionId,
+            }
+          );
+        }
       } catch (err: any) {
         if (err.name !== 'AbortError') {
           const message = err.message ?? 'Stream error';
