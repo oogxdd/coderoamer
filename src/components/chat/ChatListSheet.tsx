@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
-import { PersistedChat, loadChatList, saveChatList, deleteChatMessages } from '@/services/storage';
+import { PersistedChat, chatRepository } from '@/services/chat-repository';
 import { providerDisplayName } from '@/models/chat';
 import { shortWorkingDirectory } from '@/constants/session';
 
@@ -39,7 +39,7 @@ export function ChatListSheet({
       setChats(providedChats);
       return;
     }
-    loadChatList(spriteName).then(setChats);
+    chatRepository.listBySprite(spriteName).then(setChats);
   }, [providedChats, spriteName]);
 
   const handleDelete = (chat: PersistedChat) => {
@@ -54,8 +54,7 @@ export function ChatListSheet({
           onPress: async () => {
             const updated = chats.filter((c) => c.id !== chat.id);
             setChats(updated);
-            await saveChatList(spriteName, updated);
-            await deleteChatMessages(chat.id);
+            await chatRepository.remove(chat.id);
           },
         },
       ]
