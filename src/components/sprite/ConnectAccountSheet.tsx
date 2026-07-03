@@ -17,7 +17,7 @@ import {
   ProviderId,
   providerMeta,
   parseLoginPrompt,
-  checkAccounts,
+  getAccountSignatures,
   startLogin,
   LoginStream,
   LoginPrompt,
@@ -53,6 +53,10 @@ export function ConnectAccountSheet({
   const bufferRef = useRef('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const settledRef = useRef(false);
+  // Credential signature (mtime:size) captured before login begins. Success is a
+  // *change* from this baseline, so pre-existing creds (Reconnect) don't count
+  // and Codex — which clears its auth file at login start — can't false-succeed.
+  const baselineRef = useRef<string | undefined>(undefined);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -70,17 +74,29 @@ export function ConnectAccountSheet({
     setTimeout(() => onConnected(provider), 900);
   }, [onConnected, provider, stopPolling]);
 
-  const checkNow = useCallback(async () => {
-    const status = await checkAccounts(spriteName);
-    if (status[provider]) finishSuccess();
-    return status[provider];
+  const poll = useCallback(async () => {
+    if (baselineRef.current === undefined) return;
+    const sig = (await getAccountSignatures(spriteName))[provider];
+    if (sig && sig !== baselineRef.current) finishSuccess();
   }, [spriteName, provider, finishSuccess]);
 
-  // Drive the login: open the stream, parse prompts, poll for completion.
+  // Drive the login: capture the baseline, open the stream, parse prompts, and
+  // poll the credential signature for a fresh login.
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      try {
+        baselineRef.current = (await getAccountSignatures(spriteName))[provider];
+      } catch {
+        baselineRef.current = '';
+      }
+      if (cancelled) return;
+
+      pollRef.current = setInterval(() => {
+        poll().catch(() => {});
+      }, POLL_INTERVAL_MS);
+
       try {
         const stream = await startLogin(spriteName, provider, {
           onData: (chunk) => {
@@ -96,10 +112,10 @@ export function ConnectAccountSheet({
           },
           onExit: () => {
             // The CLI finished — confirm against the credential files.
-            if (!cancelled) checkNow();
+            if (!cancelled) poll().catch(() => {});
           },
           onError: () => {
-            /* transient; polling is the source of truth */
+            /* transient; the signature poll is the source of truth */
           },
         });
         if (cancelled) {
@@ -114,13 +130,6 @@ export function ConnectAccountSheet({
         }
       }
     })();
-
-    // In case the sprite was already authenticated (or gets there), poll.
-    pollRef.current = setInterval(() => {
-      checkNow().catch(() => {});
-    }, POLL_INTERVAL_MS);
-    // Immediate first check so an already-connected provider resolves fast.
-    checkNow().catch(() => {});
 
     return () => {
       cancelled = true;
@@ -152,9 +161,9 @@ export function ConnectAccountSheet({
     streamRef.current.send(`${value}\r`);
     setCodeInput('');
     setPhase('submitting');
-    // Poll faster right after submitting so success shows promptly.
-    checkNow().catch(() => {});
-  }, [codeInput, checkNow]);
+    // Check right after submitting so success shows promptly.
+    poll().catch(() => {});
+  }, [codeInput, poll]);
 
   const handleClose = useCallback(() => {
     if (!settledRef.current) {
