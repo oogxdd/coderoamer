@@ -23,7 +23,8 @@ import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import { readCodexSessionMessages } from '@/services/codex-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
-import { ActiveChatRun, getSetting, loadChatMessages, saveChatMessages } from '@/services/storage';
+import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
+import { getSetting } from '@/services/storage';
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
@@ -329,7 +330,7 @@ export function useChat(options: UseChatOptions) {
 
   const persistMessages = useCallback(
     async (msgs?: ChatMessage[]) => {
-      await saveChatMessages(chatId, msgs ?? messagesRef.current);
+      await chatRepository.setMessages(chatId, msgs ?? messagesRef.current);
     },
     [chatId]
   );
@@ -354,7 +355,7 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await saveChatMessages(chatId, merged);
+        await chatRepository.setMessages(chatId, merged);
       } catch {
         // Offline / no transcript yet — keep the local copy.
       }
@@ -382,7 +383,7 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await saveChatMessages(chatId, merged);
+        await chatRepository.setMessages(chatId, merged);
       } catch {
         // Offline / no rollout yet — keep the local copy.
       }
@@ -414,7 +415,7 @@ export function useChat(options: UseChatOptions) {
       execSessionIdRef.current = undefined;
     }
     const initialMessageCount = messagesRef.current.length;
-    const saved = await loadChatMessages(chatId);
+    const saved = await chatRepository.getMessages(chatId);
     if (loadRequest !== loadRequestRef.current) return;
 
     // Avoid clobbering live in-memory messages if a send started while loading persisted history.
@@ -1157,7 +1158,7 @@ export function useChat(options: UseChatOptions) {
       assistantTextSeenRef.current = false;
       const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
       updateMessages(() => pendingMessages);
-      await saveChatMessages(chatId, pendingMessages);
+      await chatRepository.setMessages(chatId, pendingMessages);
       turnTimingRef.current = { startedAt: Date.now() };
       debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
 
