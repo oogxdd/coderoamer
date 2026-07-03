@@ -332,12 +332,16 @@ export class TerminalBuffer implements IParserCallbacks {
         this.cursor.x = 0;
         this.cursor.y = 0;
         break;
-      case 'S': // SU — Scroll Up
-        for (let i = 0; i < (p0 || 1); i++) this._scrollUp();
+      case 'S': { // SU — Scroll Up
+        const n = Math.min(p0 || 1, this.rows);
+        for (let i = 0; i < n; i++) this._scrollUp();
         break;
-      case 'T': // SD — Scroll Down
-        for (let i = 0; i < (p0 || 1); i++) this._scrollDown();
+      }
+      case 'T': { // SD — Scroll Down
+        const n = Math.min(p0 || 1, this.rows);
+        for (let i = 0; i < n; i++) this._scrollDown();
         break;
+      }
       case 'X': // ECH — Erase Characters
         this._eraseChars(p0 || 1);
         break;
@@ -680,6 +684,9 @@ export class TerminalBuffer implements IParserCallbacks {
   }
 
   private _insertLines(count: number): void {
+    // Clamp to the scroll region: a huge count (e.g. from a misparsed binary
+    // stream) would otherwise splice millions of times and OOM-crash the app.
+    count = Math.max(0, Math.min(count, this._scrollBottom - this.cursor.y + 1));
     for (let i = 0; i < count; i++) {
       this.lines.splice(this.ybase + this._scrollBottom, 1);
       this.lines.splice(this.ybase + this.cursor.y, 0, this._createEmptyLine());
@@ -688,6 +695,7 @@ export class TerminalBuffer implements IParserCallbacks {
   }
 
   private _deleteLines(count: number): void {
+    count = Math.max(0, Math.min(count, this._scrollBottom - this.cursor.y + 1));
     for (let i = 0; i < count; i++) {
       this.lines.splice(this.ybase + this.cursor.y, 1);
       this.lines.splice(this.ybase + this._scrollBottom, 0, this._createEmptyLine());
@@ -697,15 +705,17 @@ export class TerminalBuffer implements IParserCallbacks {
 
   private _deleteChars(count: number): void {
     const line = this._getActiveLine(this.cursor.y);
+    count = Math.max(0, Math.min(count, this.cols - this.cursor.x));
     line.splice(this.cursor.x, count);
-    for (let i = 0; i < count; i++) {
-      line.push(emptyCell());
-    }
+    // Pad back to the line width — only what we removed, not `count` (which used
+    // to push unbounded cells and grow the line without limit).
+    while (line.length < this.cols) line.push(emptyCell());
     this._dirty.add(this.cursor.y);
   }
 
   private _insertChars(count: number): void {
     const line = this._getActiveLine(this.cursor.y);
+    count = Math.max(0, Math.min(count, this.cols - this.cursor.x));
     for (let i = 0; i < count; i++) {
       line.splice(this.cursor.x, 0, emptyCell());
     }

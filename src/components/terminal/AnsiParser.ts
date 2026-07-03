@@ -93,6 +93,19 @@ function charWidth(codePoint: number): number {
   return 1;
 }
 
+/**
+ * Hard limits to keep a corrupted or hostile stream (e.g. binary output
+ * misparsed as a CSI sequence) from growing parser state without bound. These
+ * mirror xterm.js, which clamps params to 32 and caps payload length — without
+ * them a long digit run becomes a parseInt in the billions and the buffer's CSI
+ * handlers loop billions of times, taking down the native process (OOM/ANR)
+ * before the JS error boundary can see it.
+ */
+const MAX_PARAMS = 32;
+const MAX_PARAM_DIGITS = 7; // up to 9,999,999 — far beyond any real terminal need
+const MAX_INTERMEDIATES = 8;
+const MAX_OSC_LENGTH = 1 << 16; // 64 KiB
+
 export class AnsiParser {
   private _state: ParserState = ParserState.GROUND;
   private _params: number[] = [];
@@ -102,6 +115,14 @@ export class AnsiParser {
   private _oscData: string = '';
 
   constructor(private _callbacks: IParserCallbacks) {}
+
+  /** Finalize the current param into the params array, clamped to MAX_PARAMS. */
+  private _pushParam(): void {
+    if (this._params.length < MAX_PARAMS) {
+      this._params.push(this._currentParam ? parseInt(this._currentParam, 10) : 0);
+    }
+    this._currentParam = '';
+  }
 
   /**
    * Parse a chunk of data — this is the main entry point.
@@ -165,7 +186,9 @@ export class AnsiParser {
       this._oscData = '';
     } else if (code >= 0x20 && code <= 0x2f) {
       // Intermediate bytes
-      this._intermediates += String.fromCharCode(code);
+      if (this._intermediates.length < MAX_INTERMEDIATES) {
+        this._intermediates += String.fromCharCode(code);
+      }
     } else if (code >= 0x30 && code <= 0x7e) {
       // Final byte — dispatch ESC sequence
       this._callbacks.executeEsc(this._intermediates, String.fromCharCode(code));
@@ -178,30 +201,32 @@ export class AnsiParser {
 
   private _handleCsiParam(data: string, i: number, code: number): void {
     if (code >= 0x30 && code <= 0x39) {
-      // Digit
-      this._currentParam += String.fromCharCode(code);
+      // Digit — cap length so a corrupted stream can't build a giant integer.
+      if (this._currentParam.length < MAX_PARAM_DIGITS) {
+        this._currentParam += String.fromCharCode(code);
+      }
     } else if (code === 0x3b) {
       // ; — parameter separator
-      this._params.push(this._currentParam ? parseInt(this._currentParam, 10) : 0);
-      this._currentParam = '';
+      this._pushParam();
     } else if (code === 0x3a) {
       // : — sub-parameter separator (used in SGR underline styles etc.)
       // For simplicity, treat as regular separator
-      this._params.push(this._currentParam ? parseInt(this._currentParam, 10) : 0);
-      this._currentParam = '';
+      this._pushParam();
     } else if (code >= 0x3c && code <= 0x3f) {
       // Private mode indicator (<, =, >, ?)
-      this._intermediates += String.fromCharCode(code);
+      if (this._intermediates.length < MAX_INTERMEDIATES) {
+        this._intermediates += String.fromCharCode(code);
+      }
     } else if (code >= 0x20 && code <= 0x2f) {
       // Intermediate bytes
-      this._params.push(this._currentParam ? parseInt(this._currentParam, 10) : 0);
-      this._currentParam = '';
-      this._intermediates += String.fromCharCode(code);
+      this._pushParam();
+      if (this._intermediates.length < MAX_INTERMEDIATES) {
+        this._intermediates += String.fromCharCode(code);
+      }
       this._state = ParserState.CSI_INTERMEDIATE;
     } else if (code >= 0x40 && code <= 0x7e) {
       // Final byte — dispatch CSI
-      this._params.push(this._currentParam ? parseInt(this._currentParam, 10) : 0);
-      this._currentParam = '';
+      this._pushParam();
       this._callbacks.executeCsi(this._params, this._intermediates, String.fromCharCode(code));
       this._state = ParserState.GROUND;
     } else {
@@ -212,7 +237,9 @@ export class AnsiParser {
 
   private _handleCsiIntermediate(data: string, i: number, code: number): void {
     if (code >= 0x20 && code <= 0x2f) {
-      this._intermediates += String.fromCharCode(code);
+      if (this._intermediates.length < MAX_INTERMEDIATES) {
+        this._intermediates += String.fromCharCode(code);
+      }
     } else if (code >= 0x40 && code <= 0x7e) {
       this._callbacks.executeCsi(this._params, this._intermediates, String.fromCharCode(code));
       this._state = ParserState.GROUND;
@@ -234,7 +261,8 @@ export class AnsiParser {
       this._callbacks.executeOsc(this._oscId, this._oscData);
       this._state = ParserState.GROUND;
       if (code === 0x1b) i++; // skip the backslash
-    } else {
+    } else if (this._oscData.length < MAX_OSC_LENGTH) {
+      // Cap payload — an unterminated OSC must not grow this string forever.
       this._oscData += String.fromCharCode(code);
     }
   }
@@ -244,5 +272,7 @@ export class AnsiParser {
     this._params = [];
     this._currentParam = '';
     this._intermediates = '';
+    this._oscId = -1;
+    this._oscData = '';
   }
 }
