@@ -72,28 +72,40 @@ export function providerMeta(id: ProviderId): ProviderMeta {
 
 // ── Detection ───────────────────────────────────────────────────────────────
 
-const EMPTY_STATUS: AccountStatus = { codex: false, github: false, claude: false };
+export type AccountSignatures = Record<ProviderId, string>;
+
+const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '' };
 
 /**
- * Check which providers are already authenticated on a sprite. Runs a single
- * cheap shell command that inspects each provider's on-disk credentials. Never
- * throws — returns all-false if the sprite can't be reached.
+ * Return a per-provider "signature" of the on-sprite credentials — the mtime and
+ * size of the underlying file (or a marker for the env-token case), and empty
+ * string when absent. A provider is connected iff its signature is non-empty,
+ * and a *fresh* login is detected when the signature changes. Never throws.
+ *
+ * Codex writes ~/.codex/auth.json; gh writes ~/.config/gh/hosts.yml; Claude
+ * writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env).
  */
-export async function checkAccounts(spriteName: string): Promise<AccountStatus> {
-  // Codex writes ~/.codex/auth.json; gh writes ~/.config/gh/hosts.yml; Claude
-  // writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env).
+export async function getAccountSignatures(spriteName: string): Promise<AccountSignatures> {
   const command = [
-    'c=0; [ -s "$HOME/.codex/auth.json" ] && c=1',
-    'g=0; { grep -qs oauth_token "$HOME/.config/gh/hosts.yml" || [ -s "$HOME/.git-credentials" ]; } && g=1',
-    'l=0; { [ -s "$HOME/.claude/.credentials.json" ] || grep -qs CLAUDE_CODE_OAUTH_TOKEN "$HOME/.sprite_env"; } && l=1',
-    'echo "codex=$c github=$g claude=$l"',
+    `sig() { stat -c '%Y:%s' "$1" 2>/dev/null || true; }`,
+    `co="$(sig "$HOME/.codex/auth.json")"`,
+    `gh="$(sig "$HOME/.config/gh/hosts.yml")"; [ -n "$gh" ] || gh="$(sig "$HOME/.git-credentials")"`,
+    `cl="$(sig "$HOME/.claude/.credentials.json")"; [ -n "$cl" ] || { grep -qs CLAUDE_CODE_OAUTH_TOKEN "$HOME/.sprite_env" && cl=env; }`,
+    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"`,
   ].join('; ');
 
   const { output, success } = await runExec(spriteName, command, 20);
-  if (!success && !output.includes('codex=')) return { ...EMPTY_STATUS };
+  if (!success && !output.includes('codex=')) return { ...EMPTY_SIGS };
 
-  const read = (key: ProviderId) => new RegExp(`${key}=([01])`).exec(output)?.[1] === '1';
+  const read = (key: ProviderId) =>
+    new RegExp(`^${key}=(.*)$`, 'm').exec(output)?.[1]?.trim() ?? '';
   return { codex: read('codex'), github: read('github'), claude: read('claude') };
+}
+
+/** Whether each provider is authenticated on the sprite (signature non-empty). */
+export async function checkAccounts(spriteName: string): Promise<AccountStatus> {
+  const sigs = await getAccountSignatures(spriteName);
+  return { codex: !!sigs.codex, github: !!sigs.github, claude: !!sigs.claude };
 }
 
 // ── Output parsing ────────────────────────────────────────────────────────────
@@ -249,6 +261,15 @@ export async function startLogin(
     socket = new RNWebSocket(url, undefined, { headers: { Authorization: `Bearer ${token}` } });
   }
   socket.binaryType = 'arraybuffer';
+
+  // Explicitly resize once open: Claude's TUI wraps the authorize URL at the
+  // terminal width, so we must guarantee a wide PTY even if the exec endpoint
+  // ignores the cols/rows query params.
+  socket.onopen = () => {
+    if (spec.tty && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  };
 
   const stdoutDecoder = new TextDecoder();
   const stderrDecoder = new TextDecoder();
