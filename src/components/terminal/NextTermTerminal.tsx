@@ -246,6 +246,13 @@ function resizeBufferSet(source: BufferSet, cols: number, rows: number, scrollba
  * Compose the last `rows` lines of the virtual stream `[...scrollback, active]`
  * offset `scrollOffset` lines up from the live bottom into a scratch grid, so
  * the existing per-grid renderer can paint scrolled-back history unchanged.
+ *
+ * KNOWN LIMITATION (deliberate first pass, not a bug): `scrollOffset` counts
+ * lines from the *live bottom*, so while output streams and `scrollback` grows,
+ * `maxTop` grows too and the visible content drifts upward under the user —
+ * you stay "N lines from the bottom" rather than pinned to an absolute line.
+ * To anchor strictly, track an absolute scrollback index (or bump scrollOffset
+ * by the number of newly-pushed scrollback lines each frame) instead.
  */
 function fillViewport(
   vp: CellGrid,
