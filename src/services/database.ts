@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS active_runs (
   exec_session_id TEXT NOT NULL,
   task_name TEXT NOT NULL,
   provider TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'exec',
   user_message_id TEXT NOT NULL,
   assistant_message_id TEXT NOT NULL,
   working_directory TEXT NOT NULL,
