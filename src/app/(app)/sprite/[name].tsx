@@ -27,12 +27,13 @@ import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionS
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
+import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
 import { ActiveChatRun, PersistedChat, getSetting, loadChatList, saveChatList, saveChatMessages, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
-type Tab = 'overview' | 'chat' | 'checkpoints';
+type Tab = 'overview' | 'chat' | 'accounts' | 'checkpoints';
 
 function normalizeProvider(provider: unknown): AgentProvider {
   return provider === 'codex' ? 'codex' : 'claude';
@@ -468,6 +469,7 @@ export default function SpriteDetailScreen() {
   const tabItems: { key: Tab; label: string }[] = [
     { key: 'overview', label: 'Overview' },
     { key: 'chat', label: 'Chat' },
+    { key: 'accounts', label: 'Accounts' },
     { key: 'checkpoints', label: 'Checkpoints' },
   ];
 
@@ -663,6 +665,10 @@ export default function SpriteDetailScreen() {
             onTranscriptionProviderChange={handleTranscriptionProviderChange}
           />
         </KeyboardAvoidingView>
+      )}
+
+      {tab === 'accounts' && (
+        <SpriteAccountsTab spriteName={spriteName} isActive={tab === 'accounts'} />
       )}
 
       {tab === 'checkpoints' && <CheckpointsList spriteName={spriteName} />}
