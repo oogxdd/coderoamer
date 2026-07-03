@@ -130,6 +130,179 @@ function readTodoItems(item: unknown): TodoEntry[] {
     .filter((entry) => entry.text.length > 0);
 }
 
+function readAppServerThreadId(params: unknown): string | undefined {
+  const thread = jsonGet(params as any, 'thread');
+  return jsonString(jsonGet(thread as any, 'id')) ?? jsonString(jsonGet(params as any, 'threadId'));
+}
+
+function readAppServerItem(params: unknown): unknown {
+  return jsonGet(params as any, 'item');
+}
+
+function readAppServerFileChanges(item: unknown): FileChangeEntry[] {
+  const changes = jsonGet(item as any, 'changes');
+  if (!Array.isArray(changes)) return [];
+  return changes
+    .map((change) => ({
+      path: jsonString(jsonGet(change as any, 'path')) ?? '',
+      kind: jsonString(jsonGet(change as any, 'kind')) ?? 'update',
+    }))
+    .filter((change) => change.path.length > 0);
+}
+
+function readAppServerMcpOutput(item: unknown): { output: string | null; isError: boolean } {
+  const error = jsonGet(item as any, 'error');
+  if (error) {
+    return {
+      output: jsonString(jsonGet(error as any, 'message')) ?? readMessage(error) ?? 'MCP tool error',
+      isError: true,
+    };
+  }
+
+  const result = jsonGet(item as any, 'result');
+  const content = jsonGet(result as any, 'content');
+  if (Array.isArray(content)) {
+    const text = content
+      .map((block) => {
+        if (typeof block === 'string') return block;
+        return (
+          jsonString(jsonGet(block as any, 'text')) ??
+          jsonString(jsonGet(block as any, 'content')) ??
+          ''
+        );
+      })
+      .filter((x) => x.length > 0)
+      .join('\n');
+    if (text) return { output: text, isError: false };
+  }
+
+  return { output: null, isError: false };
+}
+
+function parseCodexAppServerNotification(method: string, params: unknown): CodexStreamEvent[] {
+  const events: CodexStreamEvent[] = [];
+
+  switch (method) {
+    case 'thread/started': {
+      const threadId = readAppServerThreadId(params);
+      if (threadId) events.push({ type: 'threadStarted', threadId });
+      break;
+    }
+    case 'item/agentMessage/delta': {
+      const text = jsonString(jsonGet(params as any, 'delta'));
+      if (text) events.push({ type: 'assistantDelta', text });
+      break;
+    }
+    case 'item/reasoning/textDelta':
+    case 'item/reasoning/summaryTextDelta': {
+      const text = jsonString(jsonGet(params as any, 'delta'));
+      if (text) events.push({ type: 'reasoning', text });
+      break;
+    }
+    case 'turn/plan/updated': {
+      const plan = jsonGet(params as any, 'plan');
+      if (Array.isArray(plan)) {
+        events.push({
+          type: 'todoList',
+          listId: jsonString(jsonGet(params as any, 'turnId')) ?? 'plan',
+          items: plan
+            .map((step) => ({
+              text: jsonString(jsonGet(step as any, 'step')) ?? '',
+              completed: jsonString(jsonGet(step as any, 'status')) === 'completed',
+            }))
+            .filter((step) => step.text.length > 0),
+        });
+      }
+      break;
+    }
+    case 'item/started': {
+      const item = readAppServerItem(params);
+      switch (readItemType(item)) {
+        case 'commandExecution': {
+          const command = jsonString(jsonGet(item as any, 'command'));
+          if (command) {
+            events.push({
+              type: 'commandBegin',
+              commandId: readItemId(item) ?? `cmd-${Date.now().toString(36)}`,
+              command,
+            });
+          }
+          break;
+        }
+        case 'mcpToolCall': {
+          events.push({
+            type: 'mcpToolBegin',
+            callId: readItemId(item) ?? `mcp-${Date.now().toString(36)}`,
+            server: jsonString(jsonGet(item as any, 'server')) ?? '',
+            tool: jsonString(jsonGet(item as any, 'tool')) ?? 'tool',
+            args: jsonGet(item as any, 'arguments') ?? null,
+          });
+          break;
+        }
+        case 'webSearch': {
+          const query = jsonString(jsonGet(item as any, 'query'));
+          if (query) events.push({ type: 'webSearch', query });
+          break;
+        }
+      }
+      break;
+    }
+    case 'item/completed': {
+      const item = readAppServerItem(params);
+      switch (readItemType(item)) {
+        case 'commandExecution': {
+          events.push({
+            type: 'commandEnd',
+            commandId: readItemId(item) ?? `cmd-${Date.now().toString(36)}`,
+            command: jsonString(jsonGet(item as any, 'command')) ?? 'command',
+            output: jsonString(jsonGet(item as any, 'aggregatedOutput')) ?? null,
+            exitCode: jsonNumber(jsonGet(item as any, 'exitCode')),
+          });
+          break;
+        }
+        case 'fileChange': {
+          events.push({
+            type: 'fileChange',
+            changeId: readItemId(item) ?? `patch-${Date.now().toString(36)}`,
+            files: readAppServerFileChanges(item),
+            status: jsonString(jsonGet(item as any, 'status')) ?? 'completed',
+          });
+          break;
+        }
+        case 'mcpToolCall': {
+          const { output, isError } = readAppServerMcpOutput(item);
+          events.push({
+            type: 'mcpToolEnd',
+            callId: readItemId(item) ?? `mcp-${Date.now().toString(36)}`,
+            server: jsonString(jsonGet(item as any, 'server')) ?? '',
+            tool: jsonString(jsonGet(item as any, 'tool')) ?? 'tool',
+            output,
+            isError,
+          });
+          break;
+        }
+      }
+      break;
+    }
+    case 'turn/completed': {
+      events.push({ type: 'turnCompleted' });
+      break;
+    }
+    case 'error': {
+      const error = jsonGet(params as any, 'error');
+      events.push({
+        type: 'error',
+        message: readMessage(error) ?? 'Codex app-server turn failed',
+      });
+      break;
+    }
+    default:
+      break;
+  }
+
+  return events;
+}
+
 function readMcpResult(item: unknown): { output: string | null; isError: boolean } {
   const error = jsonGet(item as any, 'error');
   if (error) {
@@ -149,6 +322,15 @@ function readMcpResult(item: unknown): { output: string | null; isError: boolean
 
 export function parseCodexEvent(json: any): CodexStreamEvent[] {
   if (!json || typeof json !== 'object') return [{ type: 'unknown' }];
+  if (typeof json.method === 'string') {
+    const events = parseCodexAppServerNotification(json.method, json.params);
+    if (events.length > 0) return events;
+    return [];
+  }
+  if ('id' in json && ('result' in json || 'error' in json)) {
+    return [];
+  }
+
   const type = typeof json.type === 'string' ? json.type : '';
   const events: CodexStreamEvent[] = [];
 
