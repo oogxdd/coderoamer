@@ -4,8 +4,28 @@
 > одноразового exec-процесса). Главное ограничение — **нет streaming'а** текста
 > ассистента: `agent_message` приходит целиком в `item.completed` в конце хода.
 > Claude же стримит токен-за-токеном через `claude -p --output-format stream-json`.
-> Чтобы догнать Claude по «живости», нужен Codex **app-server** (он же `codex proto` /
-> `@openai/codex-sdk`) — долгоживущий процесс с JSON-RPC и инкрементальными событиями.
+> Чтобы догнать Claude по «живости», нужен Codex **app-server**
+> (`codex app-server --stdio`, раньше обсуждался как `codex proto`) — процесс с
+> JSON-RPC и инкрементальными событиями.
+
+## Статус реализации
+
+Ветка `codex-dev-server` реализует **первый practical cut**: cold-per-turn
+`codex app-server --stdio` поверх существующего Exec WebSocket.
+
+- `streamExec` получил stdin writer (`onStdinReady`) и отправляет payload в
+  stream id `0`.
+- `src/services/codex-app-server.ts` делает JSON-RPC handshake:
+  `initialize` → `thread/start`/`thread/resume` → `turn/start`.
+- `CodexStreamParser` теперь понимает app-server notifications
+  (`item/agentMessage/delta`, reasoning deltas, command/file/MCP items,
+  `turn/plan/updated`, `turn/completed`) и старый `codex exec --json` формат.
+- `useChat` маршрутизирует Codex turns через app-server и завершает exec session
+  после `turn/completed`, сохраняя reattach через `ActiveChatRun`.
+
+Это **не** warm daemon и не per-chat service. Процесс остается одноразовым на ход,
+чтобы не конфликтовать со sprite suspend model. Ниже сохранена исходная оценка
+для более крупного persistent/warm эпика.
 
 ## Что даёт app-server (чего нет у `exec --json`)
 
@@ -24,7 +44,7 @@ JSON-RPC поверх длительного процесса** внутри spr
 
 Варианты:
 
-1. **`codex proto` поверх exec-стрима** — запустить `codex proto` как длительный
+1. **`codex app-server --stdio` поверх exec-стрима** — запустить app-server как
    процесс в sprite, писать JSON-RPC в stdin, читать события из stdout. Проблема:
    текущий `streamExec` заточен под «команда → выход», нужен полнодуплексный канал
    (stdin писать в работающую сессию). Надо проверить, поддерживает ли наш sprite
@@ -48,14 +68,13 @@ JSON-RPC поверх длительного процесса** внутри spr
 **Итого: ~1.5–2.5 недели** на одного разработчика для паритета с Claude по streaming,
 **без** approvals-UI. С approvals — +0.5 недели.
 
-**Главный риск и дев-блокер №1:** дуплексный канал в sprite. Если sprite exec-API
-не умеет писать в stdin живого процесса, придётся переиспользовать
-PTY/attach-механику терминала (ttyd) или поднимать сокет внутри sprite — это и есть
-основная неизвестная, которую надо разведать **до** старта.
+**Главный риск и дев-блокер №1 был дуплексный канал в sprite.** Для cold-per-turn
+варианта он закрыт добавлением stdin writer в `streamExec`. Для полноценного warm
+daemon остаются вопросы lifecycle, interrupt/close и UI для approvals.
 
 ## Рекомендация
 
-App-server оправдан, только если streaming-ощущение критично. Большую часть разрыва
-с Claude (reasoning, file edits, план, MCP, web-search) можно закрыть **без** него,
-оставаясь на `exec --json` — это и сделано в рамках этой ветки. App-server — отдельный
-крупный эпик, не блокирующий текущие улучшения.
+App-server оправдан, если streaming-ощущение критично. Текущая реализация берет
+минимальный полезный срез: live text/reasoning deltas без warm process и без
+Services API. Persistent app-server остается отдельным эпиком, если понадобится
+убирать cold-start между быстрыми follow-up ходами.
