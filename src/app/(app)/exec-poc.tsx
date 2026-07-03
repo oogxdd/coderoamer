@@ -277,6 +277,19 @@ export default function ExecPocScreen() {
     }
   }, []);
 
+  // Paste the OS clipboard into the live PTY as if the user typed it.
+  const pasteFromClipboard = useCallback(async () => {
+    try {
+      const text = await Clipboard.getStringAsync();
+      if (text && client.getState() === 'open') {
+        client.send(text, false);
+        focusActiveTerminal();
+      }
+    } catch (e) {
+      Alert.alert('Paste failed', (e as Error).message);
+    }
+  }, [client, focusActiveTerminal]);
+
   const isConnected = state === 'open';
 
   return (
@@ -396,6 +409,12 @@ export default function ExecPocScreen() {
             contentContainerStyle={styles.keysRow}
             showsHorizontalScrollIndicator={false}
           >
+            <Pressable
+              style={({ pressed }) => [styles.keyButton, styles.pasteButton, pressed && { opacity: 0.6 }]}
+              onPress={pasteFromClipboard}
+            >
+              <Text style={[styles.keyLabel, styles.pasteLabel]}>Paste</Text>
+            </Pressable>
             {QUICK_CONTROLS.map((c) => (
               <Pressable
                 key={c.label}
@@ -549,6 +568,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  pasteButton: {
+    backgroundColor: '#1f2d3d',
+    borderColor: '#2f5177',
+  },
+  pasteLabel: {
+    color: '#79c0ff',
   },
   // ── Terminal ──
   terminalContainer: {
