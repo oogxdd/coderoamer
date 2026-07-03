@@ -570,6 +570,10 @@ export const NextTermTerminal = forwardRef<NextTermTerminalHandle, NextTermTermi
       updateSelection({ ...sel, endRow: row, endCol: col });
     }, [cellWidth, cellHeight, updateSelection]);
 
+    const tapGesture = useMemo(
+      () => Gesture.Tap().onEnd(() => { 'worklet'; runOnJS(handleTap)(); }),
+      [handleTap],
+    );
     const panGesture = useMemo(
       () => Gesture.Pan()
         .minDistance(12)
@@ -590,8 +594,12 @@ export const NextTermTerminal = forwardRef<NextTermTerminalHandle, NextTermTermi
       [handleSelectionExtend],
     );
     const composedGestures = useMemo(
-      () => Gesture.Race(selectionPanGesture, longPressGesture, panGesture),
-      [selectionPanGesture, longPressGesture, panGesture],
+      () => Gesture.Race(
+        selectionPanGesture,
+        Gesture.Exclusive(longPressGesture, tapGesture),
+        panGesture,
+      ),
+      [selectionPanGesture, longPressGesture, tapGesture, panGesture],
     );
 
     // ── Paint ─────────────────────────────────────────────────────────
@@ -618,7 +626,7 @@ export const NextTermTerminal = forwardRef<NextTermTerminalHandle, NextTermTermi
       <GestureHandlerRootView style={styles.fill}>
         <View style={styles.fill} onLayout={onLayout}>
           <GestureDetector gesture={composedGestures}>
-            <Pressable style={styles.fill} onPress={handleTap}>
+            <View style={styles.fill}>
               <Canvas style={{ width: safeW, height: safeH }}>
                 <Fill color={bg} />
                 {commands.map((cmd, i) => {
@@ -652,7 +660,7 @@ export const NextTermTerminal = forwardRef<NextTermTerminalHandle, NextTermTermi
                   );
                 })}
               </Canvas>
-            </Pressable>
+            </View>
           </GestureDetector>
 
           {/* Copy menu for the active selection */}
