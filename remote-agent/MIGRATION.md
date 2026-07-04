@@ -1,5 +1,31 @@
 # Connecting the app to any remote machine
 
+> **Status: IMPLEMENTED** (was a plan; landed as part of the multi-provider VMs
+> work — see `docs/custom-vm-providers.md`). What actually shipped, and where it
+> deviated from the plan below:
+>
+> - **Connection model** (`src/models/connection.ts`) uses a `backing`
+>   discriminant `'sprite' | 'existing' | 'aws-ec2'` instead of the original
+>   `type: 'sprites' | 'remote'`, so the lifecycle/UI layers can tell how a
+>   connection is hosted (matters for AWS sleep/wake and setup copy).
+> - **api.ts / exec-poc.ts** resolve base URL + token from an active `Connection`
+>   with a trailing optional `conn?` override — *not* a `conn` threaded through
+>   every caller (Steps 2–3 below). This kept the 11 caller files untouched; the
+>   `conn?` override covers the one cross-connection case (dashboard aggregation).
+> - **Connections screen**: the single auth screen stayed as first-run Sprites
+>   onboarding; connection management (Add Sprite / Add Custom VPS) lives on the
+>   VM list (`ConnectionsContext` + `AddConnectionSheet`).
+> - **The daemon was ported to Go** (single static binary; see `README.md` here),
+>   gained `PUT /sprites/:name/fs/write`, an optional `/v1` path prefix, and
+>   stream-id-framed exec output (the Node version sent raw PTY bytes, which the
+>   app's strict exec parser dropped — so chat-over-remote now works too).
+> - **Exposure** is driven in-app via `install.sh --tunnel=tailscale|cloudflare|none`
+>   (the four manual options in §2 remain valid for advanced setups).
+>
+> The original plan is kept below for reference.
+
+---
+
 This document describes:
 1. How to run `remote-agent` on a Linux machine.
 2. How to expose it securely over HTTPS/WSS.

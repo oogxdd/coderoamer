@@ -210,16 +210,23 @@ service, collects stdout, and cleans up — used by the session browser and
 sprite wake-up. `startBackgroundService` fires a service without awaiting and
 resolves once the first lifecycle event arrives.
 
-### `remote-agent/` (separate Node daemon)
+### `remote-agent/` (separate Go daemon)
 
-A standalone daemon (`node-pty` + `ws`) that implements the *exact same* Sprites
-wire protocol (`/sprites/:name/services/:svc`, `/sprites/:name/exec`, etc.) so
-the app can connect to **any Linux machine**, not just Sprites. The `:name`
-segment is ignored. Install with `bash remote-agent/install.sh` (generates an
-`AGENT_TOKEN`, writes a systemd user service on port 8765). See
-`remote-agent/MIGRATION.md` for the planned app change: base URLs and token
-source become per-connection instead of global. **When that migration lands,
-update this doc.**
+A standalone **single static Go binary** (`creack/pty` + `gorilla/websocket`)
+that implements the *exact same* Sprites wire protocol
+(`/sprites/:name/services/:svc`, `/sprites/:name/exec`, plus `/sprites/:name/fs/write`)
+so the app can connect to **any Linux machine**, not just Sprites. The `:name`
+segment is ignored; an optional leading `/v1` is accepted. Ported from Node so it
+cross-compiles with zero toolchain on the target (`bash build.sh`); install with
+`bash remote-agent/install.sh [--tunnel=tailscale|cloudflare|none]` (generates an
+`AGENT_TOKEN`, writes a systemd user service on port 8765). Exec output is
+stream-id framed (`1`=stdout) as the app's exec parser expects.
+
+The per-connection migration described in `remote-agent/MIGRATION.md` **has
+landed** — base URLs and token now resolve from a `Connection` (see
+`src/models/connection.ts`, `src/services/api.ts`, `src/contexts/ConnectionsContext.tsx`).
+Multi-provider VMs (custom VPS / AWS EC2 / home server) are documented in
+`docs/custom-vm-providers.md` (design) and `docs/custom-vps-setup.md` (setup).
 
 ## Non-obvious conventions & invariants
 
@@ -278,7 +285,11 @@ update this doc.**
 
 ## Further reading
 
-- `README.md` — user-facing workflow and the three connection modes (chat,
+- `README.md` — user-facing workflow and the connection modes (chat,
   session browser, stream terminal, ttyd).
 - `DEPLOYMENT.md` — iOS simulator/device/TestFlight/EAS deep dive.
-- `remote-agent/MIGRATION.md` — plan for per-connection base URLs (remote machines).
+- `docs/custom-vm-providers.md` — design/handoff spec for multi-provider VMs
+  (Sprites + custom VPS / AWS EC2 / home server).
+- `docs/custom-vps-setup.md` — user setup guides for the three custom paths.
+- `docs/aws-iam-policy.json` — the scoped IAM policy for the AWS path.
+- `remote-agent/MIGRATION.md` — per-connection base URLs (implemented) + daemon notes.

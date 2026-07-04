@@ -32,6 +32,25 @@ The same flow is available in-app under **Guides** (dashboard → Guides).
 
 ---
 
+## VMs: Sprites, custom VPS, AWS, and home servers
+
+The home screen is a **list of VMs across all your connections**. **Add** offers:
+
+- **Add Sprite** — a Fly.io Sprite (the original flow).
+- **Add Custom VPS** — any machine running the [`remote-agent`](remote-agent/) daemon,
+  which speaks the exact same wire protocol so chat, terminals, and the session
+  browser work against it unmodified. Two sub-paths:
+  - **Existing machine** (a home server or any VPS you already have) — run the
+    printed one-liner (`install.sh --tunnel=tailscale|cloudflare|none`), then
+    paste back the URL + `AGENT_TOKEN`.
+  - **AWS (create new)** — paste a scoped IAM key ([`docs/aws-iam-policy.json`](docs/aws-iam-policy.json))
+    and the app launches an EC2 instance, sleeps it (StopInstances → billing
+    paused) and wakes it (StartInstances) on demand.
+
+Custom connections are **native-only**. Checkpoints and the ttyd bootstrap are
+Sprites-only and hidden for custom connections. Full setup:
+[`docs/custom-vps-setup.md`](docs/custom-vps-setup.md).
+
 ## Connecting: Chat, sessions, and terminals
 
 The default is **Chat**; the terminals and the session browser are reached from a sprite's
