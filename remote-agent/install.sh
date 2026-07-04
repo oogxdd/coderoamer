@@ -1,23 +1,49 @@
 #!/usr/bin/env bash
-# install.sh — set up the remote-agent daemon on a Linux machine.
+# install.sh — set up the remote-agent daemon on a Linux machine, optionally
+# exposing it over Tailscale Funnel or Cloudflare Tunnel.
 #
 # The daemon is a single static Go binary (no runtime deps). This script obtains
 # it (prefers a prebuilt binary shipped alongside; falls back to building from
-# source if Go is present), generates an AGENT_TOKEN, and installs a systemd user
-# service so it auto-starts on boot — which is what makes "wake" viable: as soon
-# as the machine boots, the API is already listening.
+# source if Go is present), generates an AGENT_TOKEN, installs a systemd user
+# service so it auto-starts on boot, and — if asked — stands up a tunnel and
+# prints the public URL + token to paste into the app.
 #
 # Usage:
-#   bash install.sh                 # install/refresh the daemon on port 8765
+#   bash install.sh                          # LAN-only (prints token, no tunnel)
+#   bash install.sh --tunnel=tailscale       # expose via Tailscale Funnel
+#   bash install.sh --tunnel=cloudflare      # expose via Cloudflare Tunnel (quick)
+#   bash install.sh --tunnel=none            # explicit LAN-only
 #
-# (Tunnel setup — Tailscale / Cloudflare — is layered on in a later revision;
-# see docs/custom-vm-providers.md §3.5.)
+# Non-interactive (used by the AWS EC2 user-data bootstrap, §3.6):
+#   AGENT_TOKEN pre-set so the app already knows it before the box finishes boot:
+#     bash install.sh --tunnel=tailscale --token=<hex> --port=8765
+#   Tailscale without a browser login: export TS_AUTHKEY=tskey-... first.
+#
+# See docs/custom-vm-providers.md §3.5.
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.remote-agent"
 SERVICE_NAME="remote-agent"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$INSTALL_DIR/remote-agent"
+
+# ---- flags ----------------------------------------------------------------
+TUNNEL="none"
+CLI_TOKEN=""
+PORT="8765"
+for arg in "$@"; do
+  case "$arg" in
+    --tunnel=*) TUNNEL="${arg#*=}" ;;
+    --token=*)  CLI_TOKEN="${arg#*=}" ;;
+    --port=*)   PORT="${arg#*=}" ;;
+    -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "Unknown flag: $arg" >&2; exit 1 ;;
+  esac
+done
+case "$TUNNEL" in
+  tailscale|cloudflare|none) ;;
+  *) echo "Invalid --tunnel=$TUNNEL (want tailscale|cloudflare|none)" >&2; exit 1 ;;
+esac
 
 detect_arch() {
   case "$(uname -m)" in
@@ -26,48 +52,59 @@ detect_arch() {
     *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
   esac
 }
-ARCH="$(detect_arch)"
 
-mkdir -p "$INSTALL_DIR"
+need_sudo() {
+  if [ "$(id -u)" -eq 0 ]; then echo ""; else echo "sudo"; fi
+}
+SUDO="$(need_sudo)"
 
-echo "==> Obtaining the remote-agent binary (arch: $ARCH)..."
-if [ -x "$SRC_DIR/dist/remote-agent-linux-$ARCH" ]; then
-  echo "    Using prebuilt dist/remote-agent-linux-$ARCH"
-  cp "$SRC_DIR/dist/remote-agent-linux-$ARCH" "$BIN"
-elif [ -x "$SRC_DIR/remote-agent" ] && [ "$SRC_DIR/remote-agent" != "$BIN" ]; then
-  echo "    Using prebuilt ./remote-agent"
-  cp "$SRC_DIR/remote-agent" "$BIN"
-elif command -v go >/dev/null 2>&1; then
-  echo "    Building from source with $(go version)"
-  ( cd "$SRC_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" . )
-else
-  echo "    No prebuilt binary found and Go is not installed." >&2
-  echo "    On your dev machine run 'bash build.sh' and copy dist/remote-agent-linux-$ARCH next to this script," >&2
-  echo "    or install Go (https://go.dev/dl/) on this machine and re-run." >&2
-  exit 1
-fi
-chmod +x "$BIN"
-echo "    Installed $BIN"
+# ---- 1. daemon binary -----------------------------------------------------
+install_binary() {
+  local arch; arch="$(detect_arch)"
+  mkdir -p "$INSTALL_DIR"
+  echo "==> Obtaining the remote-agent binary (arch: $arch)..."
+  if [ -x "$SRC_DIR/dist/remote-agent-linux-$arch" ]; then
+    echo "    Using prebuilt dist/remote-agent-linux-$arch"
+    cp "$SRC_DIR/dist/remote-agent-linux-$arch" "$BIN"
+  elif [ -x "$SRC_DIR/remote-agent" ] && [ "$SRC_DIR/remote-agent" != "$BIN" ]; then
+    echo "    Using prebuilt ./remote-agent"
+    cp "$SRC_DIR/remote-agent" "$BIN"
+  elif command -v go >/dev/null 2>&1; then
+    echo "    Building from source with $(go version)"
+    ( cd "$SRC_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" . )
+  else
+    echo "    No prebuilt binary and Go is not installed." >&2
+    echo "    Run 'bash build.sh' on your dev machine and copy dist/remote-agent-linux-$arch here," >&2
+    echo "    or install Go (https://go.dev/dl/) and re-run." >&2
+    exit 1
+  fi
+  chmod +x "$BIN"
+  echo "    Installed $BIN"
+}
 
-echo "==> Configuring token..."
-if [ ! -f "$INSTALL_DIR/.env" ]; then
-  TOKEN=$(openssl rand -hex 32)
-  cat > "$INSTALL_DIR/.env" <<EOF
-AGENT_TOKEN=$TOKEN
-PORT=8765
-EOF
-  echo "    Generated token: $TOKEN"
-  echo "    Saved to $INSTALL_DIR/.env — copy this token into the app."
-else
-  echo "    .env already exists — keeping existing token."
-  grep AGENT_TOKEN "$INSTALL_DIR/.env" || true
-fi
+# ---- 2. token + env -------------------------------------------------------
+configure_token() {
+  echo "==> Configuring token..."
+  if [ -n "$CLI_TOKEN" ]; then
+    printf 'AGENT_TOKEN=%s\nPORT=%s\n' "$CLI_TOKEN" "$PORT" > "$INSTALL_DIR/.env"
+    echo "    Using provided token (pre-generated by the app)."
+  elif [ ! -f "$INSTALL_DIR/.env" ]; then
+    local tok; tok="$(openssl rand -hex 32)"
+    printf 'AGENT_TOKEN=%s\nPORT=%s\n' "$tok" "$PORT" > "$INSTALL_DIR/.env"
+    echo "    Generated token: $tok"
+  else
+    echo "    .env already exists — keeping existing token."
+  fi
+  AGENT_TOKEN="$(grep -E '^AGENT_TOKEN=' "$INSTALL_DIR/.env" | cut -d= -f2-)"
+}
 
-echo "==> Setting up systemd user service..."
-if command -v systemctl &>/dev/null && systemctl --user daemon-reload 2>/dev/null; then
-  UNIT_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/$SERVICE_NAME.service" <<EOF
+# ---- 3. systemd service ---------------------------------------------------
+install_service() {
+  echo "==> Setting up systemd user service..."
+  if command -v systemctl &>/dev/null && systemctl --user daemon-reload 2>/dev/null; then
+    local unit_dir="$HOME/.config/systemd/user"
+    mkdir -p "$unit_dir"
+    cat > "$unit_dir/$SERVICE_NAME.service" <<EOF
 [Unit]
 Description=remote-agent (sprites-rn-manager daemon)
 After=network.target
@@ -83,17 +120,107 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+    systemctl --user restart "$SERVICE_NAME"
+    echo "    Enabled + started. Logs: journalctl --user -u $SERVICE_NAME -f"
+  else
+    echo "    systemd not available. Start manually:"
+    echo "      set -a; source $INSTALL_DIR/.env; set +a; $BIN"
+  fi
+}
+
+# ---- 4. tunnels -----------------------------------------------------------
+setup_tailscale() {
+  echo "==> Setting up Tailscale Funnel..."
+  if ! command -v tailscale >/dev/null 2>&1; then
+    echo "    Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+  if [ -n "${TS_AUTHKEY:-}" ]; then
+    $SUDO tailscale up --authkey "$TS_AUTHKEY" --ssh || true
+  else
+    echo "    Bringing Tailscale up (may open a browser login)..."
+    $SUDO tailscale up || true
+  fi
+  # Serve the daemon publicly on 443 → localhost:$PORT.
+  $SUDO tailscale funnel --bg "$PORT" 2>/dev/null || $SUDO tailscale funnel "$PORT" &
+  sleep 2
+  local dns=""
+  if command -v python3 >/dev/null 2>&1; then
+    dns="$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
+  fi
+  if [ -n "$dns" ]; then
+    PUBLIC_URL="https://$dns"
+  else
+    echo "    Could not auto-detect the Funnel hostname. Run: tailscale funnel status" >&2
+    PUBLIC_URL="https://<your-machine>.ts.net"
+  fi
+}
+
+setup_cloudflare() {
+  echo "==> Setting up Cloudflare Tunnel (quick tunnel)..."
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    echo "    Installing cloudflared..."
+    local arch; arch="$(detect_arch)"
+    $SUDO curl -fsSL -o /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
+    $SUDO chmod +x /usr/local/bin/cloudflared
+  fi
+  # Quick tunnels are ephemeral (URL changes on restart). Run under systemd and
+  # scrape the assigned trycloudflare.com URL from its log. For a stable URL,
+  # set up a *named* tunnel (see docs/custom-vm-providers.md §3.5).
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  cat > "$unit_dir/remote-agent-cloudflared.service" <<EOF
+[Unit]
+Description=cloudflared quick tunnel for remote-agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --url http://localhost:$PORT
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
   systemctl --user daemon-reload
-  systemctl --user enable "$SERVICE_NAME"
-  systemctl --user restart "$SERVICE_NAME"
-  echo "    systemd service enabled and started."
-  echo "    Status: systemctl --user status $SERVICE_NAME"
-  echo "    Logs:   journalctl --user -u $SERVICE_NAME -f"
-else
-  echo "    systemd not available. Start the daemon manually:"
-  echo "    set -a; source $INSTALL_DIR/.env; set +a; $BIN"
-fi
+  systemctl --user enable remote-agent-cloudflared
+  systemctl --user restart remote-agent-cloudflared
+  echo "    Waiting for the tunnel URL..."
+  PUBLIC_URL=""
+  for _ in $(seq 1 20); do
+    PUBLIC_URL="$(journalctl --user -u remote-agent-cloudflared --no-pager 2>/dev/null \
+      | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1 || true)"
+    [ -n "$PUBLIC_URL" ] && break
+    sleep 1
+  done
+  [ -z "$PUBLIC_URL" ] && echo "    Could not detect the tunnel URL. Check: journalctl --user -u remote-agent-cloudflared" >&2
+}
+
+# ---- run ------------------------------------------------------------------
+install_binary
+configure_token
+install_service
+
+PUBLIC_URL=""
+case "$TUNNEL" in
+  tailscale) setup_tailscale ;;
+  cloudflare) setup_cloudflare ;;
+  none) : ;;
+esac
 
 echo ""
-echo "Done. The daemon listens on port 8765 (change PORT= in $INSTALL_DIR/.env)."
-echo "Expose it over HTTPS (see docs/custom-vm-providers.md) and add it as a connection in the app."
+echo "============================================================"
+echo " remote-agent is installed and running on port $PORT."
+echo ""
+echo "   AGENT_TOKEN:  $AGENT_TOKEN"
+if [ "$TUNNEL" = "none" ]; then
+  echo "   Base URL:     http://<this-machine-ip>:$PORT   (LAN only — add TLS for the internet)"
+else
+  echo "   Base URL:     ${PUBLIC_URL:-<see messages above>}"
+fi
+echo ""
+echo " In the app: Add Custom VPS → paste the Base URL and AGENT_TOKEN above."
+echo "============================================================"
