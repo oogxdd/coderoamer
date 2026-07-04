@@ -53,6 +53,21 @@ export function newConnectionId(): string {
   return `conn_${Date.now().toString(36)}_${rand}`;
 }
 
+/**
+ * Generate an AGENT_TOKEN (64 hex chars) for the AWS path, where the app
+ * pre-generates the token so it's known before the instance boots (§3.6).
+ *
+ * NOTE: Math.random is not a CSPRNG — a v1 limitation for this path only. The
+ * manual-VPS path generates its token with `openssl rand` on the machine
+ * instead. Harden by swapping in expo-crypto's getRandomBytes when that dep is
+ * added.
+ */
+export function newAgentToken(): string {
+  let s = '';
+  for (let i = 0; i < 64; i++) s += Math.floor(Math.random() * 16).toString(16);
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // Load / save
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ export default function AppLayout() {
     <Stack>
       <Stack.Screen
         name="index"
-        options={{ title: 'Sprites', headerLargeTitle: false }}
+        options={{ title: 'VMs', headerLargeTitle: false }}
       />
       <Stack.Screen
         name="sprite/[name]"

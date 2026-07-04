@@ -7,10 +7,11 @@ import { FontSize, Spacing } from '@/constants/theme';
 interface SpriteRowProps {
   sprite: Sprite;
   onPress: () => void;
+  onLongPress?: () => void;
   isWaking?: boolean;
 }
 
-export function SpriteRow({ sprite, onPress, isWaking }: SpriteRowProps) {
+export function SpriteRow({ sprite, onPress, onLongPress, isWaking }: SpriteRowProps) {
   const colors = useTheme();
   const dotColor = statusColor(sprite.status);
 
@@ -22,6 +23,7 @@ export function SpriteRow({ sprite, onPress, isWaking }: SpriteRowProps) {
         { borderBottomColor: colors.border },
       ]}
       onPress={onPress}
+      onLongPress={onLongPress}
     >
       <View style={styles.row}>
         <View style={styles.left}>

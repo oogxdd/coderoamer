@@ -17,6 +17,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
 import { AgentProvider, ChatMessage, providerDisplayName, toolUseActivityLabel } from '@/models/chat';
 import * as api from '@/services/api';
+import { useConnections } from '@/contexts/ConnectionsContext';
+import { supportsSpriteOnlyFeatures } from '@/models/connection';
 import { useChat } from '@/hooks/useChat';
 import { useChatDictation } from '@/hooks/useChatDictation';
 import { useTheme } from '@/hooks/use-theme';
@@ -68,7 +70,7 @@ function getActiveToolLabel(
 }
 
 export default function SpriteDetailScreen() {
-  const { name } = useLocalSearchParams<{ name: string }>();
+  const { name, connectionId } = useLocalSearchParams<{ name: string; connectionId?: string }>();
   const colors = useTheme();
   const [tab, setTab] = useState<Tab>('chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
@@ -105,6 +107,14 @@ export default function SpriteDetailScreen() {
   }, []);
 
   const spriteName = name ?? '';
+
+  // Keep the active connection in sync with the VM being viewed (robust to
+  // reload / deep-link; the dashboard also sets it before navigating). The
+  // sprite-only tabs below are gated on the active connection's backing.
+  const { setActive } = useConnections();
+  useEffect(() => {
+    if (connectionId) setActive(connectionId);
+  }, [connectionId, setActive]);
   const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [transcriptionProvider, setTranscriptionProvider] =
@@ -832,6 +842,8 @@ function OptionsTab({
   onBrowseSessions: () => void;
 }) {
   const colors = useTheme();
+  const { activeConnection } = useConnections();
+  const spriteOnly = supportsSpriteOnlyFeatures(activeConnection);
   return (
     <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>QUICK ACTIONS</Text>
@@ -867,17 +879,20 @@ function OptionsTab({
           })
         }
       />
-      <ConnectRow
-        title="Web Terminal (ttyd) · legacy"
-        subtitle="Installs & starts ttyd in the sprite and opens it in a WebView. Makes the sprite URL public."
-        muted
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/ttyd-terminal',
-            params: { name: spriteName, cwd: workingDirectory },
-          })
-        }
-      />
+      {/* ttyd bootstrap needs Sprites-only url-auth control; hide for custom VPS. */}
+      {spriteOnly && (
+        <ConnectRow
+          title="Web Terminal (ttyd) · legacy"
+          subtitle="Installs & starts ttyd in the sprite and opens it in a WebView. Makes the sprite URL public."
+          muted
+          onPress={() =>
+            router.push({
+              pathname: '/(app)/ttyd-terminal',
+              params: { name: spriteName, cwd: workingDirectory },
+            })
+          }
+        />
+      )}
     </ScrollView>
   );
 }
@@ -903,6 +918,8 @@ function SettingsTab({
   onSpriteUpdated: (sprite: Sprite) => void;
 }) {
   const colors = useTheme();
+  const { activeConnection } = useConnections();
+  const spriteOnly = supportsSpriteOnlyFeatures(activeConnection);
   const [view, setView] = useState<SettingsView>('menu');
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -984,11 +1001,14 @@ function SettingsTab({
   return (
     <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>CONFIGURATION</Text>
-      <ConnectRow
-        title="Checkpoints"
-        subtitle="Create and restore filesystem checkpoints for this sprite."
-        onPress={() => setView('checkpoints')}
-      />
+      {/* Checkpoints are a Sprites-only REST feature; the daemon doesn't implement them. */}
+      {spriteOnly && (
+        <ConnectRow
+          title="Checkpoints"
+          subtitle="Create and restore filesystem checkpoints for this sprite."
+          onPress={() => setView('checkpoints')}
+        />
+      )}
       <ConnectRow
         title="Accounts"
         subtitle="Connect Claude, Codex, and GitHub accounts for this sprite."
