@@ -1,5 +1,7 @@
 import { Platform } from 'react-native';
 import { loadToken } from '@/services/auth';
+import { Connection } from '@/models/connection';
+import { getActiveConnection } from '@/services/api';
 import { tinfo, tdebug, twarn, terror, hexPreview, errInfo } from '@/components/terminal/terminalLog';
 
 const EXEC_HTTP_BASE = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
@@ -7,6 +9,29 @@ const EXEC_WS_BASE =
   Platform.OS === 'web' ? 'ws://localhost:8082/v1' : 'wss://api.sprites.dev/v1';
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 40;
+
+// Resolve the exec HTTP/WS bases + token for a connection. Sprite (or no)
+// connection → the Sprites defaults (web proxy vs native direct). Remote-backed →
+// the daemon's own origin. Custom connections are native-only (§3.3), so the
+// web-proxy bases are never used for them.
+function toWsOrigin(httpOrigin: string): string {
+  if (/^https:/i.test(httpOrigin)) return httpOrigin.replace(/^https:/i, 'wss:');
+  if (/^http:/i.test(httpOrigin)) return httpOrigin.replace(/^http:/i, 'ws:');
+  return httpOrigin;
+}
+
+function execBasesFor(conn: Connection | null): { httpBase: string; wsBase: string } {
+  if (conn && conn.backing !== 'sprite' && conn.baseUrl) {
+    const origin = conn.baseUrl.replace(/\/+$/, '');
+    return { httpBase: `${origin}/v1`, wsBase: `${toWsOrigin(origin)}/v1` };
+  }
+  return { httpBase: EXEC_HTTP_BASE, wsBase: EXEC_WS_BASE };
+}
+
+async function execTokenFor(conn: Connection | null): Promise<string | null> {
+  if (conn) return conn.token;
+  return loadToken('spritesToken');
+}
 
 export type ExecConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 type RNWebSocketCtor = new (
@@ -25,6 +50,8 @@ export interface ExecConnectOptions {
    */
   initialInput?: string;
   initCommands?: string[];
+  /** Which VM/connection to reach. Defaults to the active connection (api.ts). */
+  connection?: Connection;
 }
 
 export interface ExecEventLog {
@@ -185,6 +212,8 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
   let state: ExecConnectionState = 'idle';
   let currentSpriteName: string | undefined;
   let currentSessionId: string | undefined;
+  let currentConn: Connection | null = null;
+  let currentHttpBase = EXEC_HTTP_BASE;
 
   const setState = (next: ExecConnectionState) => {
     state = next;
@@ -219,11 +248,16 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     attachSessionId,
     initialInput,
     initCommands,
+    connection,
   }: ExecConnectOptions) => {
-    const token = await loadToken('spritesToken');
+    const conn = connection ?? getActiveConnection();
+    const token = await execTokenFor(conn);
     if (!token) {
-      throw new Error('No Sprites API token found. Add it in Auth first.');
+      throw new Error('No API token found. Add a connection first.');
     }
+    currentConn = conn;
+    const bases = execBasesFor(conn);
+    currentHttpBase = bases.httpBase;
 
     close();
     currentSpriteName = spriteName;
@@ -236,8 +270,8 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
     const encodedSprite = encodeURIComponent(spriteName);
     const isWeb = Platform.OS === 'web';
     const wsUrl = attachSessionId
-      ? `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec/${encodeURIComponent(attachSessionId)}${isWeb ? `?token=${encodeURIComponent(token)}` : ''}`
-      : `${EXEC_WS_BASE}/sprites/${encodedSprite}/exec?cmd=${encodeURIComponent(command)}&tty=true&stdin=true&cols=${DEFAULT_COLS}&rows=${DEFAULT_ROWS}${isWeb ? `&token=${encodeURIComponent(token)}` : ''}`;
+      ? `${bases.wsBase}/sprites/${encodedSprite}/exec/${encodeURIComponent(attachSessionId)}${isWeb ? `?token=${encodeURIComponent(token)}` : ''}`
+      : `${bases.wsBase}/sprites/${encodedSprite}/exec?cmd=${encodeURIComponent(command)}&tty=true&stdin=true&cols=${DEFAULT_COLS}&rows=${DEFAULT_ROWS}${isWeb ? `&token=${encodeURIComponent(token)}` : ''}`;
 
     setState('connecting');
     tinfo('exec.conn', 'connecting', { sprite: spriteName, attach: attachSessionId, cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
@@ -451,13 +485,13 @@ export function createExecPocClient(options: CreateExecClientOptions): ExecPocCl
       throw new Error('No exec session ID available yet.');
     }
 
-    const token = await loadToken('spritesToken');
+    const token = await execTokenFor(currentConn);
     if (!token) {
-      throw new Error('No Sprites API token found. Add it in Auth first.');
+      throw new Error('No API token found. Add a connection first.');
     }
 
     const response = await fetch(
-      `${EXEC_HTTP_BASE}/sprites/${encodeURIComponent(currentSpriteName)}/exec/${encodeURIComponent(currentSessionId)}/kill`,
+      `${currentHttpBase}/sprites/${encodeURIComponent(currentSpriteName)}/exec/${encodeURIComponent(currentSessionId)}/kill`,
       {
         method: 'POST',
         headers: {

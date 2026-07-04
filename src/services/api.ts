@@ -3,9 +3,74 @@ import { Checkpoint, CheckpointStreamEvent } from '@/models/checkpoint';
 import { ServiceRequest, ServiceLogEvent, ServiceInfo } from '@/models/service';
 import { Platform } from 'react-native';
 import { loadToken } from './auth';
+import { Connection } from '@/models/connection';
 
-const BASE_URL = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
-const WS_BASE_URL = Platform.OS === 'web' ? 'ws://localhost:8082/v1' : 'wss://api.sprites.dev/v1';
+// Sprites defaults — also the fallback when no custom connection is active. Web
+// stays Sprites-only: custom connections are native-only (§3.3), so the web proxy
+// / ws-proxy bases below are never used for a remote-backed connection.
+const SPRITE_HTTP_BASE = Platform.OS === 'web' ? '/api/v1' : 'https://api.sprites.dev/v1';
+const SPRITE_WS_BASE = Platform.OS === 'web' ? 'ws://localhost:8082/v1' : 'wss://api.sprites.dev/v1';
+
+// The connection all provider-agnostic api calls target when no explicit `conn`
+// is passed. Set by ConnectionsContext when the user enters a VM.
+//
+// Design note (deviation from remote-agent/MIGRATION.md, recorded per §1/§5):
+// MIGRATION.md proposed threading a `conn` param through every api function AND
+// every caller. Instead we keep a module-level active-connection pointer plus a
+// trailing optional `conn?` on each function. Existing call sites (11 files) keep
+// compiling and inherit the active connection; the explicit `conn?` covers the
+// only case that must target a specific connection irrespective of the active one
+// — dashboard aggregation, which lists VMs across all connections at once.
+let activeConnection: Connection | null = null;
+
+export function setActiveConnection(conn: Connection | null): void {
+  activeConnection = conn;
+}
+
+export function getActiveConnection(): Connection | null {
+  return activeConnection;
+}
+
+function isRemoteTarget(conn: Connection | null): conn is Connection {
+  return !!conn && conn.backing !== 'sprite' && !!conn.baseUrl;
+}
+
+function httpBaseFor(conn: Connection | null): string {
+  if (isRemoteTarget(conn)) return `${conn.baseUrl!.replace(/\/+$/, '')}/v1`;
+  return SPRITE_HTTP_BASE;
+}
+
+function wsBaseFor(conn: Connection | null): string {
+  if (isRemoteTarget(conn)) {
+    const origin = conn.baseUrl!.replace(/\/+$/, '');
+    const wsOrigin = /^https:/i.test(origin)
+      ? origin.replace(/^https:/i, 'wss:')
+      : origin.replace(/^http:/i, 'ws:');
+    return `${wsOrigin}/v1`;
+  }
+  return SPRITE_WS_BASE;
+}
+
+/**
+ * Resolve the HTTP base, WS base, and bearer token for a request. Uses the
+ * explicit `conn` when given, else the module-level active connection, else
+ * falls back to the legacy global sprites token (covers the app-startup window
+ * before ConnectionsContext has set an active connection).
+ */
+async function resolveTarget(
+  conn?: Connection
+): Promise<{ httpBase: string; wsBase: string; token: string }> {
+  const c = conn ?? activeConnection;
+  let token: string;
+  if (c) {
+    token = c.token;
+  } else {
+    const legacy = await loadToken('spritesToken');
+    if (!legacy) throw new AppError('noToken', 'No Sprites API token');
+    token = legacy;
+  }
+  return { httpBase: httpBaseFor(c), wsBase: wsBaseFor(c), token };
+}
 
 type RNWebSocketCtor = new (
   url: string,
@@ -43,20 +108,15 @@ function parseServiceEventLine(line: string): ServiceLogEvent | null {
   }
 }
 
-async function getToken(): Promise<string> {
-  const token = await loadToken('spritesToken');
-  if (!token) throw new AppError('noToken', 'No Sprites API token');
-  return token;
-}
-
 async function apiRequest<T>(
   method: string,
   path: string,
   body?: unknown,
-  timeout?: number
+  timeout?: number,
+  conn?: Connection
 ): Promise<T> {
-  const token = await getToken();
-  const url = `${BASE_URL}${path}`;
+  const { httpBase, token } = await resolveTarget(conn);
+  const url = `${httpBase}${path}`;
 
   const controller = new AbortController();
   const timeoutId = timeout
@@ -97,21 +157,21 @@ async function apiRequest<T>(
 
 // MARK: - Sprites
 
-export async function listSprites(): Promise<Sprite[]> {
-  const response = await apiRequest<SpritesListResponse>('GET', '/sprites');
+export async function listSprites(conn?: Connection): Promise<Sprite[]> {
+  const response = await apiRequest<SpritesListResponse>('GET', '/sprites', undefined, undefined, conn);
   return response.sprites;
 }
 
-export async function createSprite(name: string): Promise<Sprite> {
-  return apiRequest<Sprite>('POST', '/sprites', { name });
+export async function createSprite(name: string, conn?: Connection): Promise<Sprite> {
+  return apiRequest<Sprite>('POST', '/sprites', { name }, undefined, conn);
 }
 
-export async function getSprite(name: string): Promise<Sprite> {
-  return apiRequest<Sprite>('GET', `/sprites/${name}`);
+export async function getSprite(name: string, conn?: Connection): Promise<Sprite> {
+  return apiRequest<Sprite>('GET', `/sprites/${name}`, undefined, undefined, conn);
 }
 
-export async function deleteSprite(name: string): Promise<void> {
-  await apiRequest<{}>('DELETE', `/sprites/${name}`);
+export async function deleteSprite(name: string, conn?: Connection): Promise<void> {
+  await apiRequest<{}>('DELETE', `/sprites/${name}`, undefined, undefined, conn);
 }
 
 export type SpriteUrlAuth = 'public' | 'sprite';
@@ -123,19 +183,27 @@ export type SpriteUrlAuth = 'public' | 'sprite';
  * (e.g. ttyd) can reach a service, since the WebView can't carry the API token on
  * its in-page WebSocket/XHR requests.
  */
-export async function updateSpriteUrlAuth(name: string, auth: SpriteUrlAuth): Promise<Sprite> {
-  return apiRequest<Sprite>('PUT', `/sprites/${name}`, { url_settings: { auth } });
+export async function updateSpriteUrlAuth(
+  name: string,
+  auth: SpriteUrlAuth,
+  conn?: Connection
+): Promise<Sprite> {
+  return apiRequest<Sprite>('PUT', `/sprites/${name}`, { url_settings: { auth } }, undefined, conn);
 }
 
 // MARK: - Checkpoints
 
-export async function listCheckpoints(spriteName: string): Promise<Checkpoint[]> {
-  return apiRequest<Checkpoint[]>('GET', `/sprites/${spriteName}/checkpoints`);
+export async function listCheckpoints(spriteName: string, conn?: Connection): Promise<Checkpoint[]> {
+  return apiRequest<Checkpoint[]>('GET', `/sprites/${spriteName}/checkpoints`, undefined, undefined, conn);
 }
 
-export async function createCheckpoint(spriteName: string, comment?: string): Promise<void> {
-  const token = await getToken();
-  const url = `${BASE_URL}/sprites/${spriteName}/checkpoint`;
+export async function createCheckpoint(
+  spriteName: string,
+  comment?: string,
+  conn?: Connection
+): Promise<void> {
+  const { httpBase, token } = await resolveTarget(conn);
+  const url = `${httpBase}/sprites/${spriteName}/checkpoint`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -174,9 +242,13 @@ export async function createCheckpoint(spriteName: string, comment?: string): Pr
   }
 }
 
-export async function restoreCheckpoint(spriteName: string, checkpointId: string): Promise<void> {
-  const token = await getToken();
-  const url = `${BASE_URL}/sprites/${spriteName}/checkpoints/${checkpointId}/restore`;
+export async function restoreCheckpoint(
+  spriteName: string,
+  checkpointId: string,
+  conn?: Connection
+): Promise<void> {
+  const { httpBase, token } = await resolveTarget(conn);
+  const url = `${httpBase}/sprites/${spriteName}/checkpoints/${checkpointId}/restore`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -227,9 +299,10 @@ export async function writeSpriteFile(
   path: string,
   workingDir: string,
   bytes: Uint8Array,
-  options: { mode?: string; mkdir?: boolean; contentType?: string } = {}
+  options: { mode?: string; mkdir?: boolean; contentType?: string } = {},
+  conn?: Connection
 ): Promise<SpriteFileWriteResult> {
-  const token = await getToken();
+  const { httpBase, token } = await resolveTarget(conn);
   const params = new URLSearchParams({
     path,
     workingDir,
@@ -239,7 +312,7 @@ export async function writeSpriteFile(
 
   const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   const response = await fetch(
-    `${BASE_URL}/sprites/${encodeURIComponent(spriteName)}/fs/write?${params.toString()}`,
+    `${httpBase}/sprites/${encodeURIComponent(spriteName)}/fs/write?${params.toString()}`,
     {
       method: 'PUT',
       headers: {
@@ -262,8 +335,8 @@ export async function writeSpriteFile(
 
 // MARK: - Auth Validation
 
-export async function validateToken(): Promise<void> {
-  await apiRequest<SpritesListResponse>('GET', '/sprites');
+export async function validateToken(conn?: Connection): Promise<void> {
+  await apiRequest<SpritesListResponse>('GET', '/sprites', undefined, undefined, conn);
 }
 
 // MARK: - Services
@@ -274,10 +347,11 @@ export async function streamService(
   config: ServiceRequest,
   onEvent: (event: ServiceLogEvent) => void,
   signal?: AbortSignal,
-  duration: string = '3600s'
+  duration: string = '3600s',
+  conn?: Connection
 ): Promise<void> {
-  const token = await getToken();
-  const url = `${BASE_URL}/sprites/${spriteName}/services/${serviceName}?duration=${duration}`;
+  const { httpBase, token } = await resolveTarget(conn);
+  const url = `${httpBase}/sprites/${spriteName}/services/${serviceName}?duration=${duration}`;
 
   const response = await fetch(url, {
     method: 'PUT',
@@ -333,10 +407,11 @@ export async function streamServiceLogs(
   serviceName: string,
   onEvent: (event: ServiceLogEvent) => void,
   signal?: AbortSignal,
-  duration: string = '3600s'
+  duration: string = '3600s',
+  conn?: Connection
 ): Promise<void> {
-  const token = await getToken();
-  const url = `${BASE_URL}/sprites/${spriteName}/services/${serviceName}/logs?duration=${duration}`;
+  const { httpBase, token } = await resolveTarget(conn);
+  const url = `${httpBase}/sprites/${spriteName}/services/${serviceName}/logs?duration=${duration}`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -411,13 +486,14 @@ function makeExecWsUrl(
   spriteName: string,
   command: string[],
   token: string,
+  wsBase: string,
   options: StreamExecOptions
 ): string {
   if (options.attachSessionId) {
     const params = new URLSearchParams();
     if (Platform.OS === 'web') params.set('token', token);
     const query = params.toString();
-    return `${WS_BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(options.attachSessionId)}${query ? `?${query}` : ''}`;
+    return `${wsBase}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(options.attachSessionId)}${query ? `?${query}` : ''}`;
   }
 
   const params = new URLSearchParams();
@@ -428,7 +504,7 @@ function makeExecWsUrl(
   params.set('max_run_after_disconnect', options.maxRunAfterDisconnect ?? '0s');
   if (Platform.OS === 'web') params.set('token', token);
 
-  return `${WS_BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
+  return `${wsBase}/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
 }
 
 async function messageDataToBytes(data: unknown): Promise<Uint8Array | undefined> {
@@ -504,10 +580,11 @@ export async function streamExec(
   command: string[],
   onEvent: (event: ServiceLogEvent) => void,
   signal?: AbortSignal,
-  options: StreamExecOptions = {}
+  options: StreamExecOptions = {},
+  conn?: Connection
 ): Promise<void> {
-  const token = await getToken();
-  const url = makeExecWsUrl(spriteName, command, token, options);
+  const { wsBase, token } = await resolveTarget(conn);
+  const url = makeExecWsUrl(spriteName, command, token, wsBase, options);
   const stdoutDecoder = new TextDecoder();
   const stderrDecoder = new TextDecoder();
 
@@ -707,7 +784,8 @@ export function startBackgroundService(
   serviceName: string,
   config: ServiceRequest,
   onEvent?: (event: ServiceLogEvent) => void,
-  settleMs: number = 1500
+  settleMs: number = 1500,
+  conn?: Connection
 ): { controller: AbortController; started: Promise<void> } {
   const controller = new AbortController();
   const started = new Promise<void>((resolve) => {
@@ -728,7 +806,9 @@ export function startBackgroundService(
           settle();
         }
       },
-      controller.signal
+      controller.signal,
+      undefined,
+      conn
     )
       .catch((err) => {
         if ((err as Error)?.name !== 'AbortError') {
@@ -743,33 +823,44 @@ export function startBackgroundService(
   return { controller, started };
 }
 
-export async function getServiceStatus(spriteName: string, serviceName: string): Promise<ServiceInfo> {
-  return apiRequest<ServiceInfo>('GET', `/sprites/${spriteName}/services/${serviceName}`);
+export async function getServiceStatus(
+  spriteName: string,
+  serviceName: string,
+  conn?: Connection
+): Promise<ServiceInfo> {
+  return apiRequest<ServiceInfo>('GET', `/sprites/${spriteName}/services/${serviceName}`, undefined, undefined, conn);
 }
 
-export async function deleteService(spriteName: string, serviceName: string): Promise<void> {
-  await apiRequest<{}>('DELETE', `/sprites/${spriteName}/services/${serviceName}`, undefined, 5);
+export async function deleteService(
+  spriteName: string,
+  serviceName: string,
+  conn?: Connection
+): Promise<void> {
+  await apiRequest<{}>('DELETE', `/sprites/${spriteName}/services/${serviceName}`, undefined, 5, conn);
 }
 
-export async function listServices(spriteName: string): Promise<ServiceInfo[]> {
+export async function listServices(spriteName: string, conn?: Connection): Promise<ServiceInfo[]> {
   const result = await apiRequest<ServiceInfo[] | { services?: ServiceInfo[] }>(
     'GET',
-    `/sprites/${spriteName}/services`
+    `/sprites/${spriteName}/services`,
+    undefined,
+    undefined,
+    conn
   );
   if (Array.isArray(result)) return result;
   if (result && Array.isArray(result.services)) return result.services;
   return [];
 }
 
-export async function cleanupLegacyChatServices(spriteName: string): Promise<void> {
+export async function cleanupLegacyChatServices(spriteName: string, conn?: Connection): Promise<void> {
   const stalePrefixes = ['wisp-claude-', 'wisp-codex-', 'wisp-exec-'];
-  const services = await listServices(spriteName);
+  const services = await listServices(spriteName, conn);
   const staleServices = services.filter((service) =>
     stalePrefixes.some((prefix) => service.name.startsWith(prefix))
   );
 
   await Promise.allSettled(
-    staleServices.map((service) => deleteService(spriteName, service.name))
+    staleServices.map((service) => deleteService(spriteName, service.name, conn))
   );
 }
 
@@ -784,11 +875,14 @@ export interface ExecSession {
 }
 
 /** List currently running exec sessions on a sprite (GET /sprites/{name}/exec). */
-export async function listExecSessions(spriteName: string): Promise<ExecSession[]> {
+export async function listExecSessions(spriteName: string, conn?: Connection): Promise<ExecSession[]> {
   try {
     const result = await apiRequest<ExecSession[] | { sessions: ExecSession[] }>(
       'GET',
-      `/sprites/${spriteName}/exec`
+      `/sprites/${spriteName}/exec`,
+      undefined,
+      undefined,
+      conn
     );
     if (Array.isArray(result)) return result;
     if (result && Array.isArray((result as any).sessions)) return (result as any).sessions;
@@ -802,12 +896,13 @@ export async function killExecSession(
   spriteName: string,
   sessionId: string,
   signal: string = 'SIGTERM',
-  timeout: string = '5s'
+  timeout: string = '5s',
+  conn?: Connection
 ): Promise<void> {
-  const token = await getToken();
+  const { httpBase, token } = await resolveTarget(conn);
   const params = new URLSearchParams({ signal, timeout });
   const response = await fetch(
-    `${BASE_URL}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(sessionId)}/kill?${params.toString()}`,
+    `${httpBase}/sprites/${encodeURIComponent(spriteName)}/exec/${encodeURIComponent(sessionId)}/kill?${params.toString()}`,
     {
       method: 'POST',
       headers: {
@@ -842,7 +937,8 @@ export async function killExecSession(
 export async function runExec(
   spriteName: string,
   command: string,
-  timeout: number = 15
+  timeout: number = 15,
+  conn?: Connection
 ): Promise<{ output: string; success: boolean }> {
   let output = '';
   let exitCode: number | undefined;
@@ -864,7 +960,8 @@ export async function runExec(
       {
         path: '/bin/bash',
         maxRunAfterDisconnect: '1s',
-      }
+      },
+      conn
     );
   } catch (err: any) {
     if (err.name !== 'AbortError') {
