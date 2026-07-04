@@ -8,6 +8,12 @@ const KEYS = {
   githubToken: 'github_token',
   assemblyAiToken: 'assemblyai_api_key',
   openAiToken: 'openai_api_key',
+  // AWS IAM credentials for the 'aws-ec2' connection backing (§3.6). Stored the
+  // same way as every other credential: user-pasted, single-user app, no broker.
+  // Account-level (one key pair manages all aws-ec2 instances), so they live here
+  // rather than per-connection.
+  awsAccessKeyId: 'aws_access_key_id',
+  awsSecretAccessKey: 'aws_secret_access_key',
 } as const;
 
 export type TokenKey = keyof typeof KEYS;
@@ -60,5 +66,7 @@ export async function clearAllTokens(): Promise<void> {
     deleteToken('githubToken'),
     deleteToken('assemblyAiToken'),
     deleteToken('openAiToken'),
+    deleteToken('awsAccessKeyId'),
+    deleteToken('awsSecretAccessKey'),
   ]);
 }
