@@ -29,6 +29,7 @@ import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
+import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
 import { getSetting, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
@@ -38,7 +39,7 @@ import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirec
 // The sprite screen is a hub with three tabs. "chats" (center) is the default
 // and shows the conversation list; opening a conversation switches to a
 // full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
-type Tab = 'options' | 'chats' | 'settings';
+type Tab = 'options' | 'chats' | 'filesystem' | 'settings';
 
 function normalizeProvider(provider: unknown): AgentProvider {
   return provider === 'codex' ? 'codex' : 'claude';
@@ -522,6 +523,7 @@ export default function SpriteDetailScreen() {
   const tabItems: { key: Tab; label: string }[] = [
     { key: 'options', label: 'Options' },
     { key: 'chats', label: 'Chats' },
+    { key: 'filesystem', label: 'Files' },
     { key: 'settings', label: 'Settings' },
   ];
 
@@ -723,6 +725,10 @@ export default function SpriteDetailScreen() {
               onQuickBash={() => setQuickBashVisible(true)}
               onBrowseSessions={() => setSessionBrowserVisible(true)}
             />
+          )}
+
+          {tab === 'filesystem' && (
+            <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
           )}
 
           {tab === 'settings' && (
