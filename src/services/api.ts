@@ -260,6 +260,123 @@ export async function writeSpriteFile(
   return response.json() as Promise<SpriteFileWriteResult>;
 }
 
+export interface SpriteFileEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  isSymlink: boolean;
+  size: number;
+  mode?: string;
+  modTime?: string;
+}
+
+export interface SpriteDirectoryListing {
+  path: string;
+  entries: SpriteFileEntry[];
+  count: number;
+}
+
+function joinFsPath(dir: string, name: string): string {
+  if (!name) return dir;
+  if (!dir || dir === '/') return `/${name}`;
+  return `${dir.replace(/\/+$/, '')}/${name}`;
+}
+
+function readEntryFlag(raw: Record<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
+}
+
+/**
+ * The `fs/list` entry shape isn't strictly specified, so normalize defensively:
+ * accept camelCase / snake_case / `type` / a leading `mode` char (`drwx…`, `lrwx…`).
+ */
+function normalizeFileEntry(raw: unknown, dirPath: string): SpriteFileEntry {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const name = String(obj.name ?? obj.Name ?? '');
+  const rawPath = obj.path ?? obj.Path;
+  const path = typeof rawPath === 'string' && rawPath ? rawPath : joinFsPath(dirPath, name);
+
+  const type = typeof obj.type === 'string' ? obj.type.toLowerCase() : undefined;
+  const mode = typeof obj.mode === 'string' ? obj.mode : typeof obj.Mode === 'string' ? obj.Mode : undefined;
+
+  let isDir = readEntryFlag(obj, ['isDir', 'is_dir', 'IsDir', 'dir']) ?? false;
+  if (!isDir && type) isDir = type === 'dir' || type === 'directory';
+  if (!isDir && mode) isDir = mode.startsWith('d');
+
+  let isSymlink = readEntryFlag(obj, ['isSymlink', 'is_symlink', 'symlink']) ?? false;
+  if (!isSymlink && type) isSymlink = type === 'symlink' || type === 'link';
+  if (!isSymlink && mode) isSymlink = mode.startsWith('l');
+
+  const sizeRaw = obj.size ?? obj.Size;
+  const size = typeof sizeRaw === 'number' ? sizeRaw : Number(sizeRaw) || 0;
+
+  const modTimeRaw = obj.modTime ?? obj.mod_time ?? obj.mtime ?? obj.modified ?? obj.ModTime;
+  const modTime = typeof modTimeRaw === 'string' ? modTimeRaw : undefined;
+
+  return { name, path, isDir, isSymlink, size, mode, modTime };
+}
+
+/** List a directory on the sprite. Directories are sorted first, then by name. */
+export async function listSpriteDirectory(
+  spriteName: string,
+  path: string,
+  workingDir: string = '/'
+): Promise<SpriteDirectoryListing> {
+  const params = new URLSearchParams({ path, workingDir });
+  const raw = await apiRequest<{ path?: string; entries?: unknown[]; count?: number }>(
+    'GET',
+    `/sprites/${encodeURIComponent(spriteName)}/fs/list?${params.toString()}`
+  );
+  const listPath = typeof raw?.path === 'string' && raw.path ? raw.path : path;
+  const rawEntries = Array.isArray(raw?.entries) ? raw.entries : [];
+  const entries = rawEntries
+    .map((entry) => normalizeFileEntry(entry, listPath))
+    .filter((entry) => entry.name && entry.name !== '.' && entry.name !== '..');
+  entries.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+  return { path: listPath, entries, count: entries.length };
+}
+
+export interface SpriteFileContent {
+  bytes: Uint8Array;
+  contentType: string | null;
+  size: number;
+}
+
+/** Read a file's raw bytes from the sprite. */
+export async function readSpriteFile(
+  spriteName: string,
+  path: string,
+  workingDir: string = '/'
+): Promise<SpriteFileContent> {
+  const token = await getToken();
+  const params = new URLSearchParams({ path, workingDir });
+  const response = await fetch(
+    `${BASE_URL}/sprites/${encodeURIComponent(spriteName)}/fs/read?${params.toString()}`,
+    { method: 'GET', headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  if (response.status === 401) throw new AppError('unauthorized', 'Unauthorized');
+  if (response.status === 404) throw new AppError('notFound', 'Not found');
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new AppError('serverError', text || `Read file error ${response.status}`, response.status);
+  }
+
+  const buffer = await response.arrayBuffer();
+  return {
+    bytes: new Uint8Array(buffer),
+    contentType: response.headers.get('content-type'),
+    size: buffer.byteLength,
+  };
+}
+
 // MARK: - Auth Validation
 
 export async function validateToken(): Promise<void> {
