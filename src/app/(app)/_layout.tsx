@@ -1,11 +1,15 @@
 import { Stack } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
+import { useConnections } from '@/contexts/ConnectionsContext';
 import { Redirect } from 'expo-router';
 
 export default function AppLayout() {
   const { isAuthenticated, isLoading } = useAuth();
+  const { hasAnyConnection, isLoading: connectionsLoading } = useConnections();
 
-  if (!isLoading && !isAuthenticated) {
+  // Reachable if the user has a Sprites token (legacy gate) OR any connection
+  // at all — a custom-VPS-only user (no Sprites account) is still authenticated.
+  if (!isLoading && !connectionsLoading && !isAuthenticated && !hasAnyConnection) {
     return <Redirect href="/auth" />;
   }
 
