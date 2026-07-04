@@ -1,0 +1,70 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LaunchInstanceRestrictedTypeAndTag",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": ["t3.micro", "t4g.nano"],
+          "aws:RequestTag/ManagedBy": "sprites-rn-manager",
+          "aws:RequestedRegion": "us-east-1"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": ["ManagedBy", "Name"]
+        }
+      }
+    },
+    {
+      "Sid": "LaunchInstanceSupportingResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1::image/*",
+        "arn:aws:ec2:us-east-1:*:subnet/*",
+        "arn:aws:ec2:us-east-1:*:security-group/*",
+        "arn:aws:ec2:us-east-1:*:network-interface/*",
+        "arn:aws:ec2:us-east-1:*:volume/*",
+        "arn:aws:ec2:us-east-1:*:key-pair/*"
+      ],
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+      }
+    },
+    {
+      "Sid": "TagOnlyAtLaunch",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:*:*/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": "RunInstances",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "PowerControlManagedInstancesOnly",
+      "Effect": "Allow",
+      "Action": ["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"],
+      "Resource": "arn:aws:ec2:us-east-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ManagedBy": "sprites-rn-manager",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "DescribeInstancesReadOnlyRegionScoped",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+      }
+    }
+  ]
+}
