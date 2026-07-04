@@ -1,0 +1,4 @@
+# Build artifacts (produced by build.sh / go build) — never commit binaries.
+/dist/
+/remote-agent
+*.test

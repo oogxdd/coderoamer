@@ -1,38 +1,53 @@
 #!/usr/bin/env bash
-# install.sh — set up remote-agent on a fresh Linux machine.
-# Run as a regular user with sudo access.
-# Usage: bash install.sh
-
+# install.sh — set up the remote-agent daemon on a Linux machine.
+#
+# The daemon is a single static Go binary (no runtime deps). This script obtains
+# it (prefers a prebuilt binary shipped alongside; falls back to building from
+# source if Go is present), generates an AGENT_TOKEN, and installs a systemd user
+# service so it auto-starts on boot — which is what makes "wake" viable: as soon
+# as the machine boots, the API is already listening.
+#
+# Usage:
+#   bash install.sh                 # install/refresh the daemon on port 8765
+#
+# (Tunnel setup — Tailscale / Cloudflare — is layered on in a later revision;
+# see docs/custom-vm-providers.md §3.5.)
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.remote-agent"
 SERVICE_NAME="remote-agent"
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$INSTALL_DIR/remote-agent"
 
-echo "==> Checking Node.js (need 18+)..."
-if ! command -v node &>/dev/null; then
-  echo "Node not found. Installing via nvm..."
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-  export NVM_DIR="$HOME/.nvm"
-  # shellcheck disable=SC1091
-  source "$NVM_DIR/nvm.sh"
-  nvm install 20 && nvm use 20
-fi
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+}
+ARCH="$(detect_arch)"
 
-NODE_MAJOR=$(node -e "process.stdout.write(process.version.slice(1).split('.')[0])")
-if [ "$NODE_MAJOR" -lt 18 ]; then
-  echo "Node $NODE_MAJOR is too old (need 18+). Please upgrade."
+mkdir -p "$INSTALL_DIR"
+
+echo "==> Obtaining the remote-agent binary (arch: $ARCH)..."
+if [ -x "$SRC_DIR/dist/remote-agent-linux-$ARCH" ]; then
+  echo "    Using prebuilt dist/remote-agent-linux-$ARCH"
+  cp "$SRC_DIR/dist/remote-agent-linux-$ARCH" "$BIN"
+elif [ -x "$SRC_DIR/remote-agent" ] && [ "$SRC_DIR/remote-agent" != "$BIN" ]; then
+  echo "    Using prebuilt ./remote-agent"
+  cp "$SRC_DIR/remote-agent" "$BIN"
+elif command -v go >/dev/null 2>&1; then
+  echo "    Building from source with $(go version)"
+  ( cd "$SRC_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" . )
+else
+  echo "    No prebuilt binary found and Go is not installed." >&2
+  echo "    On your dev machine run 'bash build.sh' and copy dist/remote-agent-linux-$ARCH next to this script," >&2
+  echo "    or install Go (https://go.dev/dl/) on this machine and re-run." >&2
   exit 1
 fi
-echo "    Node $(node --version) OK"
-
-echo "==> Copying daemon files to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"
-cp "$(dirname "$0")/index.js"   "$INSTALL_DIR/"
-cp "$(dirname "$0")/package.json" "$INSTALL_DIR/"
-
-echo "==> Installing npm dependencies..."
-cd "$INSTALL_DIR"
-npm install --omit=dev --loglevel=error
+chmod +x "$BIN"
+echo "    Installed $BIN"
 
 echo "==> Configuring token..."
 if [ ! -f "$INSTALL_DIR/.env" ]; then
@@ -61,7 +76,7 @@ After=network.target
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$(command -v node) $INSTALL_DIR/index.js
+ExecStart=$BIN
 Restart=always
 RestartSec=3
 
@@ -70,15 +85,15 @@ WantedBy=default.target
 EOF
   systemctl --user daemon-reload
   systemctl --user enable "$SERVICE_NAME"
-  systemctl --user start  "$SERVICE_NAME"
+  systemctl --user restart "$SERVICE_NAME"
   echo "    systemd service enabled and started."
-  echo "    Check status: systemctl --user status $SERVICE_NAME"
-  echo "    View logs:    journalctl --user -u $SERVICE_NAME -f"
+  echo "    Status: systemctl --user status $SERVICE_NAME"
+  echo "    Logs:   journalctl --user -u $SERVICE_NAME -f"
 else
   echo "    systemd not available. Start the daemon manually:"
-  echo "    cd $INSTALL_DIR && source .env && node index.js"
+  echo "    set -a; source $INSTALL_DIR/.env; set +a; $BIN"
 fi
 
 echo ""
 echo "Done. The daemon listens on port 8765 (change PORT= in $INSTALL_DIR/.env)."
-echo "Expose it over HTTPS (see MIGRATION.md) and add it as a connection in the app."
+echo "Expose it over HTTPS (see docs/custom-vm-providers.md) and add it as a connection in the app."
