@@ -12,24 +12,19 @@ import {
 import { router } from 'expo-router';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
-import { AgentProvider, ChatMessage, providerDisplayName } from '@/models/chat';
+import { ChatMessage, providerDisplayName, RemoteAgentSession } from '@/models/chat';
 import { shortWorkingDirectory } from '@/constants/session';
-import {
-  ClaudeSessionSummary,
-  listClaudeSessions,
-  readClaudeSessionMessages,
-} from '@/services/claude-sessions';
-import {
-  CodexSessionSummary,
-  listCodexSessions,
-  readCodexSessionMessages,
-} from '@/services/codex-sessions';
+import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
+import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
 import { ExecSession, listExecSessions } from '@/services/api';
 import { ChatMessageView } from './ChatMessageView';
 
 type BrowserTab = 'history' | 'live';
-export type AgentSessionSummary =
-  (ClaudeSessionSummary | CodexSessionSummary) & { provider: AgentProvider };
+/** @deprecated Use RemoteAgentSession from models/chat. Kept as an alias for callers. */
+export type AgentSessionSummary = RemoteAgentSession;
+
+/** Green used for the "still running" indicator, matching the Live Terminal dot. */
+const LIVE_COLOR = '#3fb950';
 
 interface SessionBrowserSheetProps {
   spriteName: string;
@@ -87,7 +82,8 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
         [
           ...claudeList.map((session) => ({ ...session, provider: 'claude' as const })),
           ...codexList.map((session) => ({ ...session, provider: 'codex' as const })),
-        ].sort((a, b) => b.modified - a.modified)
+          // Live (still-running) sessions bubble to the top; ties break by recency.
+        ].sort((a, b) => Number(b.live) - Number(a.live) || b.modified - a.modified)
       );
       setLastLoadedAt(Date.now());
     } catch (e: any) {
@@ -172,6 +168,12 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
               <Text style={[styles.providerPill, { color: colors.tint, borderColor: colors.border }]}>
                 {providerDisplayName(item.provider)}
               </Text>
+              {item.live && (
+                <View style={styles.liveBadge}>
+                  <View style={[styles.liveDot, { backgroundColor: LIVE_COLOR }]} />
+                  <Text style={[styles.liveBadgeText, { color: LIVE_COLOR }]}>LIVE</Text>
+                </View>
+              )}
               <Text style={[styles.rowMeta, { color: colors.textSecondary }]} numberOfLines={1}>
                 {item.cwd ? shortWorkingDirectory(item.cwd) : 'unknown dir'}
               </Text>
@@ -364,6 +366,12 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
                       <Text style={[styles.detailId, { color: colors.textSecondary }]} numberOfLines={1}>
                         {selected.id}
                       </Text>
+                      {selected.live && (
+                        <Text style={[styles.detailLiveHint, { color: LIVE_COLOR }]}>
+                          ● Live — still running on {spriteName}. Continuing here starts a
+                          parallel turn from this transcript.
+                        </Text>
+                      )}
                     </View>
                   }
                   ListEmptyComponent={
@@ -484,5 +492,20 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 4,
+  },
+  liveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  liveBadgeText: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  detailLiveHint: {
+    fontSize: FontSize.xs,
+    marginTop: 6,
+    lineHeight: 16,
   },
 });
