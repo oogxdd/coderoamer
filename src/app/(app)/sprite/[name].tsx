@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -27,6 +27,8 @@ import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
+import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
+import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
@@ -87,6 +89,11 @@ export default function SpriteDetailScreen() {
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
   const [sessionBrowserVisible, setSessionBrowserVisible] = useState(false);
+  // Conversations started from the "sprite console" CLI on a computer, discovered
+  // by scanning the sprite's Claude/Codex transcripts. Merged into the Chats list.
+  const [remoteSessions, setRemoteSessions] = useState<AgentSessionSummary[]>([]);
+  const [remoteRefreshing, setRemoteRefreshing] = useState(false);
+  const [remoteBusyId, setRemoteBusyId] = useState<string | undefined>();
   // Bumped to force the current chat to reload its persisted messages (e.g. after
   // seeding a resumed session's transcript) even when chatId is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -109,6 +116,47 @@ export default function SpriteDetailScreen() {
   const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [transcriptionProvider, setTranscriptionProvider] =
     useState<TranscriptionProvider>('sprite');
+
+  // Scan the sprite for CLI-started (console) Claude/Codex conversations so they
+  // show up alongside the phone's own chats. Best-effort: failure just leaves the
+  // list showing local chats.
+  const loadRemoteSessions = useCallback(async () => {
+    if (!spriteName) return;
+    try {
+      const [claudeList, codexList] = await Promise.all([
+        listClaudeSessions(spriteName),
+        listCodexSessions(spriteName),
+      ]);
+      setRemoteSessions([
+        ...claudeList.map((s) => ({ ...s, provider: 'claude' as const })),
+        ...codexList.map((s) => ({ ...s, provider: 'codex' as const })),
+      ]);
+    } catch {
+      // Non-fatal — keep whatever we already have.
+    }
+  }, [spriteName]);
+
+  const handleRefreshRemote = useCallback(async () => {
+    setRemoteRefreshing(true);
+    await loadRemoteSessions();
+    setRemoteRefreshing(false);
+  }, [loadRemoteSessions]);
+
+  // Remote sessions already mirrored by a local chat (same resume id) would show
+  // twice — drop those; the local chat is the richer, editable representation.
+  const unlinkedRemoteSessions = useMemo(() => {
+    const linked = new Set<string>();
+    for (const c of chatList) {
+      if (c.claudeSessionId) linked.add(c.claudeSessionId);
+      if (c.codexSessionId) linked.add(c.codexSessionId);
+    }
+    return remoteSessions.filter((s) => !linked.has(s.id));
+  }, [chatList, remoteSessions]);
+
+  // Refresh the computer-started conversations whenever the list is on screen.
+  useEffect(() => {
+    if (tab === 'chats' && !chatOpen) loadRemoteSessions();
+  }, [tab, chatOpen, loadRemoteSessions]);
 
   const chat = useChat({
     spriteName,
@@ -471,6 +519,26 @@ export default function SpriteDetailScreen() {
     [chat.detachStream, chat.isStreaming, defaultDirectory, spriteName, commitChatList]
   );
 
+  // Tapping a computer-started conversation in the list: pull its transcript, then
+  // resume it in the chat UI (same path as the session browser's "Continue").
+  const handleOpenRemoteSession = useCallback(
+    async (session: AgentSessionSummary) => {
+      setRemoteBusyId(session.id);
+      try {
+        const messages =
+          session.provider === 'codex'
+            ? await readCodexSessionMessages(spriteName, session.id)
+            : await readClaudeSessionMessages(spriteName, session.id);
+        await handleResumeSession(session, messages);
+      } catch (e: any) {
+        Alert.alert('Could not open session', e?.message ?? 'Failed to load transcript.');
+      } finally {
+        setRemoteBusyId(undefined);
+      }
+    },
+    [spriteName, handleResumeSession]
+  );
+
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
     setChatProvider(nextProvider);
@@ -713,6 +781,11 @@ export default function SpriteDetailScreen() {
               currentChatId={chatId}
               onSelectChat={handleSelectChat}
               onDeleteChat={handleDeleteChat}
+              remoteSessions={unlinkedRemoteSessions}
+              onSelectRemote={handleOpenRemoteSession}
+              remoteBusyId={remoteBusyId}
+              onRefresh={handleRefreshRemote}
+              refreshing={remoteRefreshing}
             />
           )}
 

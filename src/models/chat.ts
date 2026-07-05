@@ -5,6 +5,29 @@ export type AgentProvider = 'claude' | 'codex';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
 
+/**
+ * A conversation that lives on the sprite's disk rather than in the phone's local
+ * chat store — i.e. one started from the "sprite console" CLI (`claude` / `codex`)
+ * on a computer. Discovered by scanning the sprite's transcript files, it can be
+ * pulled into the conversation list and resumed in the chat UI. Shape is the
+ * common denominator of Claude/Codex session summaries plus the provider tag.
+ */
+export interface RemoteAgentSession {
+  /** Session/thread id — the value passed to `claude --resume` / `codex resume`. */
+  id: string;
+  provider: AgentProvider;
+  /** Working directory the session ran in (resume must reuse it). */
+  cwd?: string;
+  /** First user prompt, trimmed — used as the list preview. */
+  preview: string;
+  /** Number of transcript lines (rough activity indicator). */
+  messageCount: number;
+  /** Transcript file mtime in ms since epoch. */
+  modified: number;
+  /** True when the CLI session is (likely) still running. */
+  live: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   timestamp: number;

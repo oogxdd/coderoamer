@@ -32,6 +32,12 @@ export interface CodexSessionSummary {
   messageCount: number;
   /** File mtime in ms since epoch. */
   modified: number;
+  /**
+   * True when a process still holds the rollout open (a running `codex`) or it
+   * was appended to within the last ~90s — i.e. the CLI thread is likely still
+   * going. Best-effort: derived sprite-side from `/proc` and file mtime.
+   */
+  live: boolean;
 }
 
 /** Rollout line types we keep; everything else is preamble/usage/encrypted noise. */
@@ -50,6 +56,27 @@ const fs = require('fs'), os = require('os'), path = require('path');
 const root = path.join(os.homedir(), '.codex', 'sessions');
 const out = [];
 const UUID_RE = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+// A rollout counts as "live" when some process still holds it open (a running
+// codex), or it was appended to within this window. Rollout filenames are unique
+// (rollout-<ts>-<uuid>.jsonl), so matching on basename is enough.
+const LIVE_WINDOW_MS = 90000;
+function openTranscriptNames() {
+  const set = new Set();
+  let pids;
+  try { pids = fs.readdirSync('/proc'); } catch { return set; }
+  for (const pid of pids) {
+    if (!/^[0-9]+$/.test(pid)) continue;
+    let fds;
+    try { fds = fs.readdirSync('/proc/' + pid + '/fd'); } catch { continue; }
+    for (const fd of fds) {
+      let target;
+      try { target = fs.readlinkSync('/proc/' + pid + '/fd/' + fd); } catch { continue; }
+      if (target.slice(-6) === '.jsonl') set.add(path.basename(target));
+    }
+  }
+  return set;
+}
+const openNames = openTranscriptNames();
 function walk(dir) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -120,6 +147,7 @@ function readRollout(fp, name) {
     preview: (preview || '').slice(0, 240),
     messageCount: lines.length,
     modified: Math.floor(stat.mtimeMs),
+    live: openNames.has(name) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS),
   });
 }
 try { walk(root); } catch (e) {}
@@ -205,6 +233,7 @@ export async function listCodexSessions(spriteName: string): Promise<CodexSessio
         preview: typeof x.preview === 'string' ? x.preview.trim() : '',
         messageCount: Number(x.messageCount) || 0,
         modified: Number(x.modified) || 0,
+        live: !!x.live,
       }));
   } catch {
     return [];
