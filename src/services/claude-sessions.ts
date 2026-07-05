@@ -24,6 +24,12 @@ export interface ClaudeSessionSummary {
   messageCount: number;
   /** File mtime in ms since epoch. */
   modified: number;
+  /**
+   * True when a process still holds the transcript open (a running `claude`) or
+   * it was appended to within the last ~90s — i.e. the CLI session is likely
+   * still going. Best-effort: derived sprite-side from `/proc` and file mtime.
+   */
+  live: boolean;
 }
 
 const SESSION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,200}$/;
@@ -61,6 +67,27 @@ function cwdOf(lines) {
   }
   return null;
 }
+// A transcript counts as "live" when some process still holds it open (a running
+// claude), or it was appended to within this window. Session filenames are unique
+// (<session-id>.jsonl), so matching on basename is enough and dodges realpath skew.
+const LIVE_WINDOW_MS = 90000;
+function openTranscriptNames() {
+  const set = new Set();
+  let pids;
+  try { pids = fs.readdirSync('/proc'); } catch { return set; }
+  for (const pid of pids) {
+    if (!/^[0-9]+$/.test(pid)) continue;
+    let fds;
+    try { fds = fs.readdirSync('/proc/' + pid + '/fd'); } catch { continue; }
+    for (const fd of fds) {
+      let target;
+      try { target = fs.readlinkSync('/proc/' + pid + '/fd/' + fd); } catch { continue; }
+      if (target.slice(-6) === '.jsonl') set.add(path.basename(target));
+    }
+  }
+  return set;
+}
+const openNames = openTranscriptNames();
 try {
   for (const dir of fs.readdirSync(base)) {
     const full = path.join(base, dir);
@@ -78,6 +105,7 @@ try {
         preview: firstUserText(lines).slice(0, 240),
         messageCount: lines.length,
         modified: Math.floor(stat.mtimeMs),
+        live: openNames.has(f) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS),
       });
     }
   }
@@ -114,6 +142,7 @@ export async function listClaudeSessions(spriteName: string): Promise<ClaudeSess
         preview: typeof x.preview === 'string' ? x.preview.trim() : '',
         messageCount: Number(x.messageCount) || 0,
         modified: Number(x.modified) || 0,
+        live: !!x.live,
       }));
   } catch {
     return [];
