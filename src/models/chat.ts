@@ -42,7 +42,34 @@ export type ChatContent =
   | { type: 'reasoning'; text: string }
   | { type: 'toolUse'; card: ToolUseCard }
   | { type: 'toolResult'; card: ToolResultCard }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'turnOutcome'; outcome: TurnOutcome };
+
+export type TurnOutcomeStatus = 'success' | 'maxTurns' | 'error' | 'interrupted';
+
+/**
+ * How a turn ended — from Claude's `result` event (`subtype`/`is_error`),
+ * Codex's `turn.completed`/`error`, or a local interrupt. Rendered as a footer
+ * on the assistant message so a silent stop is distinguishable from success.
+ */
+export interface TurnOutcome {
+  status: TurnOutcomeStatus;
+  /** Raw CLI result subtype (e.g. `error_max_turns`) when one was reported. */
+  subtype?: string;
+  durationMs?: number;
+  numTurns?: number;
+  completedAt: number;
+}
+
+export function formatTurnDuration(ms: number | undefined): string | null {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return null;
+  const seconds = ms / 1000;
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}m ${s}s`;
+}
 
 export interface ToolUseCard {
   toolUseId: string;
