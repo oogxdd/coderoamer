@@ -229,7 +229,11 @@ export function ChatInputBar({
               borderColor: colors.border,
             },
           ]}
-          placeholder={isStreaming ? `${providerDisplayName(provider)} is working...` : 'Message...'}
+          placeholder={
+            isStreaming
+              ? `${providerDisplayName(provider)} is working — queue a message...`
+              : 'Message...'
+          }
           placeholderTextColor={colors.textSecondary}
           value={value}
           onChangeText={onChangeText}
@@ -240,13 +244,24 @@ export function ChatInputBar({
           blurOnSubmit={false}
         />
         {isStreaming ? (
-          <Pressable
-            style={[styles.sendButton, { backgroundColor: colors.destructive }]}
-            onPress={onInterrupt}
-            hitSlop={8}
-          >
-            <Text style={styles.sendIcon}>■</Text>
-          </Pressable>
+          <>
+            {canSend && (
+              <Pressable
+                style={[styles.sendButton, { backgroundColor: colors.tint }]}
+                onPress={onSend}
+                hitSlop={8}
+              >
+                <Text style={styles.sendIcon}>↑</Text>
+              </Pressable>
+            )}
+            <Pressable
+              style={[styles.sendButton, { backgroundColor: colors.destructive }]}
+              onPress={onInterrupt}
+              hitSlop={8}
+            >
+              <Text style={styles.sendIcon}>■</Text>
+            </Pressable>
+          </>
         ) : (
           <Pressable
             style={[
