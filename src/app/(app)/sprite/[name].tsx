@@ -300,6 +300,16 @@ export default function SpriteDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, reloadNonce]);
 
+  // On leaving the sprite screen, detach any live stream (the exec keeps
+  // running; reopening the chat reattaches) and stop pending reconnects.
+  const detachStreamRef = useRef(chat.detachStream);
+  detachStreamRef.current = chat.detachStream;
+  useEffect(() => {
+    return () => {
+      detachStreamRef.current();
+    };
+  }, []);
+
   // Re-sync the current chat whenever the app returns from the background or lock screen.
   // The hook will reattach to a still-running exec session, or merge the on-disk transcript
   // if the agent finished while the app was suspended.

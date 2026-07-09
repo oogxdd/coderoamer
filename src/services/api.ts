@@ -900,16 +900,26 @@ export interface ExecSession {
   last_activity?: string;
 }
 
-/** List currently running exec sessions on a sprite (GET /sprites/{name}/exec). */
+/**
+ * List currently running exec sessions on a sprite (GET /sprites/{name}/exec).
+ * Throws on transport/auth errors so callers can tell "the API is unreachable"
+ * apart from "no sessions are running" — the reconnect loop needs that
+ * distinction to decide between retrying and declaring a run finished.
+ */
+export async function listExecSessionsStrict(spriteName: string): Promise<ExecSession[]> {
+  const result = await apiRequest<ExecSession[] | { sessions: ExecSession[] }>(
+    'GET',
+    `/sprites/${spriteName}/exec`
+  );
+  if (Array.isArray(result)) return result;
+  if (result && Array.isArray((result as any).sessions)) return (result as any).sessions;
+  return [];
+}
+
+/** Like listExecSessionsStrict, but swallows errors into an empty list. */
 export async function listExecSessions(spriteName: string): Promise<ExecSession[]> {
   try {
-    const result = await apiRequest<ExecSession[] | { sessions: ExecSession[] }>(
-      'GET',
-      `/sprites/${spriteName}/exec`
-    );
-    if (Array.isArray(result)) return result;
-    if (result && Array.isArray((result as any).sessions)) return (result as any).sessions;
-    return [];
+    return await listExecSessionsStrict(spriteName);
   } catch {
     return [];
   }

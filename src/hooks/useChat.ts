@@ -112,6 +112,9 @@ export function useChat(options: UseChatOptions) {
   const turnTimingRef = useRef<ChatTurnTiming>({});
   const detachingControllersRef = useRef<Set<AbortController>>(new Set());
   const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const attachToRunRef = useRef<(run: ActiveChatRun, loadRequest: number) => void>(() => {});
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -173,13 +176,20 @@ export function useChat(options: UseChatOptions) {
   );
 
   const syncClaudeTranscript = useCallback(
-    async (loadRequest: number, resumeId: string | undefined) => {
+    async (
+      loadRequest: number,
+      resumeId: string | undefined,
+      opts?: { allowReconnecting?: boolean }
+    ) => {
       if (provider !== 'claude' || !resumeId) return;
 
       try {
         const transcript = await readClaudeSessionMessages(spriteName, resumeId);
         if (loadRequest !== loadRequestRef.current) return;
-        if (statusRef.current !== 'idle') return;
+        const statusOk =
+          statusRef.current === 'idle' ||
+          (opts?.allowReconnecting === true && statusRef.current === 'reconnecting');
+        if (!statusOk) return;
         if (transcript.length === 0) return;
         const local = messagesRef.current;
         const transcriptTurns = countUserMessages(transcript);
@@ -204,13 +214,20 @@ export function useChat(options: UseChatOptions) {
   // resumed Codex thread so turns that finished while the app was away (or ran
   // from a terminal) are recovered — the same history `codex exec resume` sees.
   const syncCodexTranscript = useCallback(
-    async (loadRequest: number, resumeId: string | undefined) => {
+    async (
+      loadRequest: number,
+      resumeId: string | undefined,
+      opts?: { allowReconnecting?: boolean }
+    ) => {
       if (!isCodexProvider(provider) || !resumeId) return;
 
       try {
         const transcript = await readCodexSessionMessages(spriteName, resumeId);
         if (loadRequest !== loadRequestRef.current) return;
-        if (statusRef.current !== 'idle') return;
+        const statusOk =
+          statusRef.current === 'idle' ||
+          (opts?.allowReconnecting === true && statusRef.current === 'reconnecting');
+        if (!statusOk) return;
         if (transcript.length === 0) return;
         const local = messagesRef.current;
         const transcriptTurns = countUserMessages(transcript);
@@ -227,6 +244,174 @@ export function useChat(options: UseChatOptions) {
     },
     [chatId, provider, spriteName]
   );
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  /** Clear all active-turn state and pull the final on-disk transcript. */
+  const finishActiveRun = useCallback(
+    async (activeRun: ActiveChatRun, loadRequest: number, setIdle: boolean) => {
+      execSessionIdRef.current = undefined;
+      activeUserMessageIdRef.current = undefined;
+      activeAssistantMessageIdRef.current = undefined;
+      assistantTextSeenRef.current = false;
+      if (activeRunRef.current?.execSessionId === activeRun.execSessionId) {
+        setActiveRun(undefined);
+      }
+      if (setIdle) setStatusTracked('idle');
+      await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current);
+      await syncCodexTranscript(loadRequest, codexSessionIdRef.current);
+      await persistMessages();
+    },
+    [persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
+  );
+
+  /**
+   * Keep trying to get back to a still-running turn. Each tick first probes
+   * the exec-session list over HTTP: API unreachable → back off and try again
+   * (the network is down); session gone → the run finished while we were away,
+   * finalize from the on-disk transcript; session alive → reattach the socket.
+   */
+  const scheduleReconnect = useCallback(
+    (activeRun: ActiveChatRun, loadRequest: number) => {
+      clearReconnectTimer();
+      const attempt = reconnectAttemptRef.current + 1;
+      reconnectAttemptRef.current = attempt;
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt - 1, 5));
+      debugChat('reconnect scheduled', provider, `attempt=${attempt}`, `delayMs=${delayMs}`);
+      setStatusTracked('reconnecting');
+      reconnectTimerRef.current = setTimeout(async () => {
+        reconnectTimerRef.current = null;
+        if (loadRequest !== loadRequestRef.current) return;
+        if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+
+        let sessions: api.ExecSession[];
+        try {
+          sessions = await api.listExecSessionsStrict(spriteName);
+        } catch (err: any) {
+          if (err?.code === 'notFound' || err?.code === 'unauthorized' || err?.code === 'noToken') {
+            // The sprite (or our access to it) is gone — stop retrying.
+            setErrorMessage(err?.message ?? 'Sprite unreachable');
+            await finishActiveRun(activeRun, loadRequest, true);
+            return;
+          }
+          scheduleReconnect(activeRun, loadRequest);
+          return;
+        }
+        if (loadRequest !== loadRequestRef.current) return;
+        if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+
+        if (!sessions.some((s) => s.id === activeRun.execSessionId)) {
+          debugChat('reconnect: run finished while away', provider, activeRun.execSessionId);
+          await finishActiveRun(activeRun, loadRequest, true);
+          return;
+        }
+        attachToRunRef.current(activeRun, loadRequest);
+      }, delayMs);
+    },
+    [clearReconnectTimer, finishActiveRun, provider, setStatusTracked, spriteName]
+  );
+
+  /**
+   * (Re)attach to a running turn's exec session. Pulls the on-disk transcript
+   * first so output that streamed while we were disconnected renders
+   * immediately — the attach socket only carries output from now on.
+   */
+  const attachToRun = useCallback(
+    async (activeRun: ActiveChatRun, loadRequest: number) => {
+      if (abortRef.current) {
+        debugChat('attach skipped: a stream is already active', provider);
+        return;
+      }
+      activeUserMessageIdRef.current = activeRun.userMessageId;
+      activeAssistantMessageIdRef.current = activeRun.assistantMessageId;
+      execSessionIdRef.current = activeRun.execSessionId;
+      processedUUIDsRef.current = new Set();
+      claudeParserRef.current.reset();
+      codexParserRef.current.reset();
+      codexStderrRef.current = '';
+      codexSawAssistantRef.current = false;
+      agentTurnCompleteRef.current = false;
+      serviceEventsSeenRef.current = 0;
+      turnTimingRef.current = { startedAt: Date.now() };
+      setStatusTracked('reconnecting');
+
+      await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current, {
+        allowReconnecting: true,
+      });
+      await syncCodexTranscript(loadRequest, codexSessionIdRef.current, {
+        allowReconnecting: true,
+      });
+      if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+      if (abortRef.current) return;
+
+      const controller = new AbortController();
+      let disconnectedBeforeExit = false;
+      abortRef.current = controller;
+      try {
+        await api.streamExec(
+          spriteName,
+          [],
+          (event) => {
+            if (abortRef.current !== controller) return;
+            if (reconnectAttemptRef.current !== 0) reconnectAttemptRef.current = 0;
+            processServiceEventRef.current(event);
+          },
+          controller.signal,
+          {
+            attachSessionId: activeRun.execSessionId,
+            onDisconnectBeforeExit: () => {
+              disconnectedBeforeExit = true;
+            },
+          }
+        );
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          debugChat('active exec attach failed', provider, err.message ?? err);
+          // Attach errors get the same treatment as mid-stream drops: the
+          // probe in scheduleReconnect decides whether the run is still alive.
+          disconnectedBeforeExit = true;
+        }
+      } finally {
+        const wasDetaching = detachingControllersRef.current.delete(controller);
+        const isCurrentStream = abortRef.current === controller;
+        if (isCurrentStream) {
+          abortRef.current = null;
+        }
+        if (wasDetaching && !agentTurnCompleteRef.current) {
+          debugChat('active exec detached', provider, activeRun.execSessionId);
+          if (isCurrentStream) setStatusTracked('idle');
+          await persistMessages();
+          return;
+        }
+        if (
+          disconnectedBeforeExit &&
+          activeRunRef.current?.execSessionId === activeRun.execSessionId &&
+          !agentTurnCompleteRef.current
+        ) {
+          await persistMessages();
+          scheduleReconnect(activeRun, loadRequestRef.current);
+          return;
+        }
+        await finishActiveRun(activeRun, loadRequest, isCurrentStream);
+      }
+    },
+    [
+      finishActiveRun,
+      persistMessages,
+      provider,
+      scheduleReconnect,
+      setStatusTracked,
+      spriteName,
+      syncClaudeTranscript,
+      syncCodexTranscript,
+    ]
+  );
+  attachToRunRef.current = attachToRun;
 
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
@@ -256,7 +441,17 @@ export function useChat(options: UseChatOptions) {
     if (loadRequest !== loadRequestRef.current) return;
 
     // Avoid clobbering live in-memory messages if a send started while loading persisted history.
-    if (messagesRef.current.length > initialMessageCount || statusRef.current !== 'idle') return;
+    if (messagesRef.current.length > initialMessageCount || statusRef.current !== 'idle') {
+      // Reload while waiting between reconnect attempts (e.g. the app came back
+      // to the foreground): retry immediately instead of waiting out the backoff.
+      const pendingRun = activeRunRef.current;
+      if (statusRef.current === 'reconnecting' && pendingRun && !abortRef.current) {
+        clearReconnectTimer();
+        reconnectAttemptRef.current = 0;
+        attachToRunRef.current(pendingRun, loadRequest);
+      }
+      return;
+    }
 
     messagesRef.current = saved;
     loadedChatIdRef.current = chatId;
@@ -288,73 +483,9 @@ export function useChat(options: UseChatOptions) {
 
     const activeRun = options.initialActiveRun;
     if (activeRun && activeRun.provider === provider) {
-      activeUserMessageIdRef.current = activeRun.userMessageId;
-      activeAssistantMessageIdRef.current = activeRun.assistantMessageId;
-      execSessionIdRef.current = activeRun.execSessionId;
-      processedUUIDsRef.current = new Set();
-      claudeParserRef.current.reset();
-      codexParserRef.current.reset();
-      codexStderrRef.current = '';
-      codexSawAssistantRef.current = false;
-      agentTurnCompleteRef.current = false;
-      serviceEventsSeenRef.current = 0;
-      turnTimingRef.current = { startedAt: Date.now() };
-      setStatusTracked('reconnecting');
-
-      (async () => {
-        const controller = new AbortController();
-        let disconnectedBeforeExit = false;
-        abortRef.current = controller;
-        try {
-          await api.streamExec(
-            spriteName,
-            [],
-            (event) => {
-              if (abortRef.current !== controller) return;
-              processServiceEvent(event);
-            },
-            controller.signal,
-            {
-              attachSessionId: activeRun.execSessionId,
-              onDisconnectBeforeExit: () => {
-                disconnectedBeforeExit = true;
-              },
-            }
-          );
-        } catch (err: any) {
-          if (err.name !== 'AbortError') {
-            debugChat('active exec attach failed', provider, err.message ?? err);
-          }
-        } finally {
-          const wasDetaching = detachingControllersRef.current.delete(controller);
-          const isCurrentStream = abortRef.current === controller;
-          if (isCurrentStream) {
-            abortRef.current = null;
-          }
-          if (wasDetaching && !agentTurnCompleteRef.current) {
-            debugChat('active exec detached', provider, activeRun.execSessionId);
-            if (isCurrentStream) setStatusTracked('idle');
-            await persistMessages();
-            return;
-          }
-          if (disconnectedBeforeExit && activeRunRef.current?.execSessionId === activeRun.execSessionId && !agentTurnCompleteRef.current) {
-            if (isCurrentStream) setStatusTracked('idle');
-            await persistMessages();
-            return;
-          }
-          execSessionIdRef.current = undefined;
-          activeUserMessageIdRef.current = undefined;
-          activeAssistantMessageIdRef.current = undefined;
-          assistantTextSeenRef.current = false;
-          if (activeRunRef.current?.execSessionId === activeRun.execSessionId) {
-            setActiveRun(undefined);
-          }
-          if (isCurrentStream) setStatusTracked('idle');
-          await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
-          await syncCodexTranscript(loadRequest, options.initialCodexSessionId);
-          await persistMessages();
-        }
-      })();
+      clearReconnectTimer();
+      reconnectAttemptRef.current = 0;
+      attachToRun(activeRun, loadRequest);
       return;
     }
 
@@ -370,17 +501,16 @@ export function useChat(options: UseChatOptions) {
     syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
     syncCodexTranscript(loadRequest, options.initialCodexSessionId);
   }, [
+    attachToRun,
     chatId,
+    clearReconnectTimer,
     options.initialActiveRun,
     options.initialClaudeSessionId,
     options.initialCodexSessionId,
-    persistMessages,
     provider,
     setClaudeSessionId,
     setCodexSessionId,
     setActiveRun,
-    setStatusTracked,
-    spriteName,
     syncClaudeTranscript,
     syncCodexTranscript,
   ]);
@@ -1197,7 +1327,13 @@ export function useChat(options: UseChatOptions) {
         if (err.name !== 'AbortError') {
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
-          setErrorMessage(message);
+          if (streamActiveRunRef.current && !agentTurnCompleteRef.current) {
+            // The exec session may still be running on the sprite — treat the
+            // dropped stream like a disconnect and let the reconnect loop decide.
+            disconnectedBeforeExit = true;
+          } else {
+            setErrorMessage(message);
+          }
           if (isCodexProvider(provider)) {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
@@ -1240,8 +1376,13 @@ export function useChat(options: UseChatOptions) {
         }
 
         if (disconnectedBeforeExit && streamActiveRun && !agentTurnCompleteRef.current) {
-          if (isCurrentStream) setStatusTracked('idle');
           await persistMessages();
+          const runNow = activeRunRef.current as ActiveChatRun | undefined;
+          if (runNow?.execSessionId === streamActiveRun.execSessionId) {
+            scheduleReconnect(streamActiveRun, loadRequestRef.current);
+          } else if (isCurrentStream) {
+            setStatusTracked('idle');
+          }
           return;
         }
         const streamExecSessionId = streamActiveRunRef.current?.execSessionId;
@@ -1265,6 +1406,7 @@ export function useChat(options: UseChatOptions) {
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
+      scheduleReconnect,
       setActiveRun,
       setStatusTracked,
       spriteName,
@@ -1276,6 +1418,8 @@ export function useChat(options: UseChatOptions) {
   );
 
   const interrupt = useCallback(() => {
+    clearReconnectTimer();
+    reconnectAttemptRef.current = 0;
     const sessionId = execSessionIdRef.current ?? activeRunRef.current?.execSessionId;
     if (sessionId) {
       api.killExecSession(spriteName, sessionId).catch(() => {});
@@ -1300,9 +1444,10 @@ export function useChat(options: UseChatOptions) {
     setTimeout(() => {
       persistMessages().catch(() => {});
     }, 0);
-  }, [appendTurnOutcome, persistMessages, setActiveRun, setStatusTracked, spriteName]);
+  }, [appendTurnOutcome, clearReconnectTimer, persistMessages, setActiveRun, setStatusTracked, spriteName]);
 
   const detachStream = useCallback(() => {
+    clearReconnectTimer();
     const controller = abortRef.current;
     if (controller) {
       detachingControllersRef.current.add(controller);
@@ -1310,7 +1455,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = null;
     }
     setStatusTracked('idle');
-  }, [setStatusTracked]);
+  }, [clearReconnectTimer, setStatusTracked]);
 
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
