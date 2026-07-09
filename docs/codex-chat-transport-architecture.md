@@ -1,13 +1,14 @@
 # Chat transport architecture (Claude & Codex)
 
-Status: design notes + decisions. Captures the analysis of how chat turns are
-transported to/from the agent CLIs inside a sprite, the current model, and the
-two persistent-session designs we considered. Companion to
+Status: design notes + decisions, updated after the first Codex app-server
+implementation. Captures the analysis of how chat turns are transported to/from
+the agent CLIs inside a sprite, the current model, and the two persistent-session
+designs we considered. Companion to
 [`codex-app-server-estimate.md`](./codex-app-server-estimate.md).
 
 ---
 
-## 1. Current model — one-shot exec + `resume`
+## 1. Current model — one-shot exec + resumable provider threads
 
 Each chat turn spawns a **fresh process** over the Exec WebSocket and streams its
 stdout NDJSON back:
@@ -15,10 +16,12 @@ stdout NDJSON back:
 - Transport: `api.streamExec(sprite, ['bash','-c', cmd], onEvent, signal, opts)`
   → `WSS /v1/sprites/{name}/exec` (`src/services/api.ts`).
 - Claude: `claude -p --verbose --output-format stream-json --dangerously-skip-permissions [--resume <id>] <prompt>`
-- Codex: `codex exec [resume <id>] --json --model gpt-5-codex --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <prompt>`
+- Codex: `codex app-server --stdio`; the app writes JSON-RPC requests to stdin
+  (`initialize` → `thread/start` or `thread/resume` → `turn/start`) and parses
+  app-server notifications from stdout.
 - Continuity across turns is via **session id resume**, not a live process:
-  `claude --resume <session_id>` / `codex exec resume <thread_id>`. The id comes
-  from the first `system` / `thread.started` event and is persisted
+  `claude --resume <session_id>` / `thread/resume <thread_id>`. The id comes
+  from the first `system` / `thread/started` event and is persisted
   (`claudeSessionIdRef` / `codexSessionIdRef` in `src/hooks/useChat.ts`).
 - The process is kept alive *during* a turn by `withSpriteTaskHeartbeat`
   (sprite task API `expire 5m`, re-put every 60s; plus a dot every 20s to keep
@@ -35,9 +38,9 @@ behavior explicit. The legacy service-per-turn chat path is what
 tears down.
 
 ### Limits of the current model
-- **No token-by-token streaming for Codex.** `codex exec --json` only emits a
-  whole `agent_message` at `item.completed`. (Claude's `stream-json` *does*
-  stream deltas.)
+- **Codex app-server process is still cold per turn.** We get live deltas, but
+  still pay process startup and thread resume on each turn. That is intentional:
+  it matches sprite suspend/resume behavior and avoids warm daemon lifecycle.
 - **Cold start every turn.** `resume` re-launches the process and reloads the
   thread from disk each turn.
 - **Durability gap after a turn ends.** The heartbeat keeps the process alive
@@ -58,8 +61,8 @@ was wrong: it bundled two *independent* decisions. Separate them:
 - **Axis A — process lifetime:** *ephemeral* (a fresh process per turn, cold) vs
   *persistent* (one process kept alive across turns, warm).
 - **Axis B — how a turn is delivered & streamed:** *argv + whole-message*
-  (`claude -p <prompt>`, `codex exec --json`) vs *stdin + streamed events*
-  (`claude --input-format stream-json`, `codex proto`).
+  (`claude -p <prompt>`, legacy `codex exec --json`) vs *stdin + streamed
+  events* (`claude --input-format stream-json`, `codex app-server --stdio`).
 
 > **Sprite reality check.** A sprite suspends when idle — that is the point
 > (don't burn resources when nobody's looking). Keeping a process *warm for
@@ -72,7 +75,7 @@ The useful insight is that **Axis B is independent of Axis A**: you can stream a
 turn token-by-token while still being *cold per turn*. Streaming is a property of
 one turn's output format, not of process persistence.
 
-### 2.1 The wire protocol (already implemented for reads)
+### 2.1 The wire protocol (implemented for reads and stdin writes)
 The Exec WebSocket is **bidirectional**. Binary frames are
 `[streamId: 1 byte][payload]` (`src/services/api.ts`, `handleBinaryMessage`):
 
@@ -83,45 +86,46 @@ The Exec WebSocket is **bidirectional**. Binary frames are
 | `2`      | process → client | stderr                 |
 | `3`      | process → client | exit (payload = code)  |
 
-`StreamExecOptions` already exposes `stdin?: boolean` (`api.ts` ~L347) and the
-exec URL builder sets `stdin=true`. The code currently only *reads*; to write a
-turn we add a **write path**: keep a handle to the open `WebSocket` and send a
-frame `Uint8Array([0x00, ...utf8(payload)])`.
+`StreamExecOptions` exposes `stdin?: boolean` and `onStdinReady`. The writer
+sends `Uint8Array([0x00, ...utf8(payload)])` frames into the running process.
 
 ### 2.2 Where each provider stands on streaming (cold, per turn)
 
 | | cold per-turn, streams? | to make it stream |
 |---|---|---|
 | **Claude** | ✅ already (`-p --output-format stream-json` emits deltas) | nothing — current code already gets this |
-| **Codex** | ❌ `exec --json` delivers `agent_message` whole at `item.completed` | spawn `codex proto`, push one turn to stdin, stream events, let it exit |
+| **Codex** | ✅ via app-server (`item/agentMessage/delta`, reasoning deltas) | spawn `codex app-server --stdio`, push one turn to stdin, stream events, then terminate |
 
-So **Claude already streams cold**. Only **Codex** lacks it, and the fix is
-*not* warmth — it's switching that turn's process from `codex exec --json` to
-`codex proto` (which streams), still launched **one process per turn**.
+So **both providers now stream cold**. For Codex, the fix was *not* warmth — it
+was switching each turn's process from legacy `codex exec --json` to
+`codex app-server --stdio`, still launched **one process per turn**.
 
-### 2.3 Recommended target — *cold-per-turn `codex proto` streaming*
+### 2.3 Implemented target — *cold-per-turn `codex app-server --stdio` streaming*
 
 This keeps Axis A = ephemeral (sprite-friendly) and only moves Codex along
 Axis B:
 
-1. Per Codex turn, spawn `codex proto` over Exec with `stdin: true` (no warm
-   keep-alive beyond the in-flight turn — the existing heartbeat already covers
+1. Per Codex turn, spawn `codex app-server --stdio` over Exec with `stdin: true`
+   (no warm keep-alive beyond the in-flight turn — the existing heartbeat covers
    "alive while the turn runs").
-2. Write **one** turn to stdin (JSON-RPC op; resume the thread via the stored
-   `codexSessionId`), `0x00`-framed.
-3. Stream the incremental events back on stdout through `CodexStreamParser`
-   (now you get reasoning/text deltas live instead of a wall of text at the end).
-4. Turn completes → process exits. Next turn (possibly hours later) = a fresh
-   cold spawn that resumes the thread from disk. Exactly the cold model you want.
+2. Write JSON-RPC to stdin: `initialize`, `initialized`, `thread/start` or
+   `thread/resume`, then `turn/start`, all `0x00`-framed at the Exec layer.
+3. Stream app-server notifications back on stdout through `CodexStreamParser`.
+   It now understands both legacy `codex exec --json` events and app-server
+   methods such as `item/agentMessage/delta`, `item/started`,
+   `item/completed`, `turn/plan/updated`, and `turn/completed`.
+4. On `turn/completed`, kill the app-server exec session. Next turn (possibly
+   hours later) = a fresh cold spawn that resumes the thread from disk.
 
-Cost: one stdin write-path in `streamExec` + a small `codex proto` driver. Cold
-start is paid once per turn — same as today's `codex exec resume`. **No warm
-process, no service.**
+Cost: one stdin write-path in `streamExec` + `src/services/codex-app-server.ts`.
+Cold start is paid once per turn — same tradeoff as legacy `codex exec resume`.
+**No warm process, no service.**
 
 When is this even worth doing? Only if Codex's "tools stream in, then the whole
 answer appears at once at the end" actually bothers you. If not, the current
-`codex exec --json` path (plus the §6 transcript sync and the parity fixes) is
-already fine and needs zero changes.
+legacy `codex exec --json` path (plus the §6 transcript sync and the parity
+fixes) is still useful as a reference/fallback design, but the app now routes
+Codex chat turns through app-server.
 
 ### 2.4 Niche only — persistent/warm session
 
@@ -136,33 +140,34 @@ death with `--resume <id>` (safe — nothing to replay since no prompt is baked
 in); discover live sessions via `listExecSessions`.
 
 ### 2.5 Code touchpoints (for §2.3)
-- `api.ts`: add a stdin writer to `streamExec` (expose the socket or pass a
-  `onSink(send: (bytes) => void)` callback); keep `stdin: true`.
-- A small `codexProtoTurn(spriteName, threadId?, prompt)` driver: spawn → send
-  one turn → stream → exit.
-- `useChat.ts`: for `provider === 'codex'`, route the turn through the proto
-  driver instead of building a `codex exec` bash line. `CodexStreamParser` /
-  event mapping stay as-is (proto emits the same item/event vocabulary §6 maps).
+- `api.ts`: `ExecStdinWriter` + `onStdinReady`, framed as stream id `0`.
+- `src/services/codex-app-server.ts`: app-server JSON-RPC state machine
+  (`initialize` → thread start/resume → turn start).
+- `src/models/codex-events.ts`: app-server notification mapping to existing
+  `CodexStreamEvent`.
+- `useChat.ts`: Codex turns route through the app-server driver instead of
+  building a `codex exec --json` command.
 
 ### 2.6 Risks / open items
-- Exact `codex proto` JSON-RPC schema (submit turn / resume / interrupt) must be
-  pinned to the installed CLI version (`codex --version`).
+- The implemented schema was generated from `codex-cli 0.137.0`
+  (`codex app-server generate-ts --experimental`). It should be rechecked when
+  the installed Codex CLI changes.
 - Claude `--input-format stream-json` input message shape (only relevant if the
   niche warm path in §2.4 is ever pursued).
-- stdin framing details (raw bytes on stream `0` vs a JSON control frame) —
-  verify against a live sprite.
+- Live sprite verification is still needed for the real hosted Exec WebSocket,
+  although local CLI stdio framing was verified as newline-delimited JSON-RPC.
 
-### 2.7 Current exec vs ideal exec — what actually changes
+### 2.7 Legacy exec vs app-server exec — what actually changes
 
 Both are the **same Exec WebSocket transport**; the delta is small and Codex-only.
 
-| | Current exec (§1) | Ideal exec (§2.3) |
+| | Legacy Codex exec | App-server exec (§2.3) |
 |---|---|---|
 | Process lifetime | ephemeral, cold per turn | **same** — ephemeral, cold per turn |
 | Sprite suspends when idle | yes (desired) | **same** (desired) |
 | Continuity | `--resume` / `exec resume <id>` | **same** (resume by id) |
 | Claude streaming | ✅ already | ✅ unchanged |
-| Codex per-turn binary | `codex exec --json` | **`codex proto`** |
+| Codex per-turn binary | legacy `codex exec --json` | **`codex app-server --stdio`** |
 | Codex prompt delivery | argv (`<prompt>` in bash line) | **stdin frame** (`0x00`+payload) |
 | Codex output | whole `agent_message` at end | **streamed** reasoning/text deltas |
 | `streamExec` direction | read-only | **read + write (stdin)** |
@@ -170,8 +175,8 @@ Both are the **same Exec WebSocket transport**; the delta is small and Codex-onl
 | Services / FIFO / warm keep-alive | none | **none** |
 
 Net: the *only* moving parts are (a) teach `streamExec` to write a stdin frame
-and (b) drive Codex turns through `codex proto` instead of `codex exec`. Process
-model, cold-start behavior, resume, and durability are **identical** to today.
+and (b) drive Codex turns through app-server instead of `codex exec`. Process
+model, cold-start behavior, resume, and durability remain the same.
 
 ---
 
@@ -211,7 +216,7 @@ it only as a fallback.
   via `listServices` / `getServiceStatus`.
 - Service `cmd` starts the agent in **persistent, prompt-less stdin mode**:
   - Claude: `claude -p --input-format stream-json --output-format stream-json --dangerously-skip-permissions --resume <id?> --model <m>`
-  - Codex: `codex proto`
+  - Codex: `codex app-server --stdio`
   - **No prompt argument anywhere.** The process boots, opens stdin, and idles.
 - Register via `PUT /v1/sprites/{name}/services/{service}` with
   `ServiceRequest { cmd, args?, needs?, http_port? }` (see `streamService`).
@@ -242,7 +247,7 @@ agent's own on-disk transcript — §6 — as the ultimate source of truth.)
 - A supervised restart of a **prompt-less** service = a fresh idle reader. **No
   prompt is replayed** (the historical failure mode).
 - The cost: a restart drops the warm in-memory thread. On (re)start, pass
-  `--resume <id>` (Claude) / resume the thread (`codex proto`) so context is
+  `--resume <id>` (Claude) / resume the thread (`thread/resume`) so context is
   reloaded from disk. Persist the id locally and in the service args.
 - Concurrency: one service per chat ⇒ stable name avoids collisions; multiple
   open chats ⇒ multiple services. Garbage-collect idle/stale services
@@ -271,28 +276,26 @@ agent's own on-disk transcript — §6 — as the ultimate source of truth.)
 
 ## 5. Comparison
 
-| Property | §1 exec + resume (current) | **§2.3 cold-per-turn `proto`** (recommended) | §2.4 persistent/warm (niche) | §4 per-chat service (niche) |
+| Property | legacy exec + resume | **§2.3 cold-per-turn app-server** (implemented) | §2.4 persistent/warm (niche) | §4 per-chat service (niche) |
 |---|---|---|---|---|
 | API | Exec | Exec | Exec | Services |
 | Process lifetime | ephemeral (cold) | **ephemeral (cold)** | persistent (warm) | persistent (supervised) |
 | Sprite-friendly (suspends idle) | ✅ | ✅ | ❌ fights suspend | ❌ fights suspend |
-| Codex streaming | ❌ whole message | ✅ (`codex proto`) | ✅ | ✅ |
+| Codex streaming | ❌ whole message | ✅ (`codex app-server --stdio`) | ✅ | ✅ |
 | Cold start / turn | yes | yes (accepted) | no | no |
 | Follow-ups | ✅ via resume | ✅ via resume + stdin | ✅ via stdin | ✅ via input channel |
 | Durability after idle | ✅ §6 transcript sync | ✅ §6 transcript sync | ✅ §6 (+ live if alive) | ✅ durable log buffer |
 | Prompt-replay risk | none | none | none | none (no baked prompt) |
-| Extra machinery | none | stdin writer + proto driver | + keep-alive/respawn | service GC + input channel |
+| Extra machinery | none | stdin writer + app-server driver | + keep-alive/respawn | service GC + input channel |
 | Lifecycle cost | lowest | low | medium | medium-high |
 
 **Recommendation:** for the real "write → leave → come back" pattern, stay
 **ephemeral/cold** (the sprite model wants this). The only worthwhile upgrade is
-**§2.3 — route Codex turns through `codex proto` for live streaming**, still one
-cold process per turn; do it *only if* Codex's end-of-turn text dump actually
-bothers you. **§2.4 (warm)** and **§4 (service)** are niche — justified only by a
-tight multi-turn burst in one active sitting, and both work against sprite
-suspension. Durability after idle is already handled cold by §6 for every option,
-so it is not a reason to go warm. §2.3 is gated on pinning the installed
-`codex proto` JSON-RPC schema.
+**§2.3 — route Codex turns through `codex app-server --stdio` for live
+streaming**, still one cold process per turn. **§2.4 (warm)** and **§4
+(service)** are niche — justified only by a tight multi-turn burst in one active
+sitting, and both work against sprite suspension. Durability after idle is
+already handled cold by §6 for every option, so it is not a reason to go warm.
 
 ---
 
