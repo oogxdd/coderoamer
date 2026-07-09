@@ -40,6 +40,43 @@ export function withSpriteTaskHeartbeat(command: string, taskName: string): stri
   ].join('; ');
 }
 
+/** Strip characters that would break an HTTP header, keep it one line. */
+function sanitizeNotifyText(value: string, max: number): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * Shell suffix appended after the agent command: POSTs a ntfy.sh-style push
+ * notification with the turn's success/failure, then preserves the agent's
+ * exit status. It runs on the sprite, so it fires even when the app is closed
+ * mid-turn — subscribe to the topic in the ntfy app to get pinged.
+ */
+export function buildTurnNotifySuffix(opts: {
+  server: string;
+  topic: string;
+  title: string;
+  promptPreview: string;
+}): string {
+  const topic = opts.topic.trim();
+  if (!topic) return '';
+  const server = (opts.server.trim() || 'https://ntfy.sh').replace(/\/+$/, '');
+  const url = shellQuote(`${server}/${encodeURIComponent(topic)}`);
+  const title = shellQuote(`Title: ${sanitizeNotifyText(opts.title, 80)}`);
+  const preview = sanitizeNotifyText(opts.promptPreview, 100);
+  const okBody = shellQuote(preview ? `Done: ${preview}` : 'Turn finished');
+  const failBody = shellQuote(preview ? `Failed: ${preview}` : 'Turn failed');
+  return (
+    `; WISP_EXIT=$?; if [ "$WISP_EXIT" = "0" ]; then ` +
+    `curl -sS -m 10 -H ${title} -H "Tags: white_check_mark" -d ${okBody} ${url} >/dev/null 2>&1 || true; ` +
+    `else curl -sS -m 10 -H ${title} -H "Tags: x" -H "Priority: high" -d ${failBody} ${url} >/dev/null 2>&1 || true; fi; ` +
+    `(exit "$WISP_EXIT")`
+  );
+}
+
 /**
  * Command that kills a chat turn's whole process group, located by the unique
  * task-name marker in the bash wrapper's argv. `killExecSession` SIGTERMs the

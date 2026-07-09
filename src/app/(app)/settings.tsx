@@ -64,6 +64,10 @@ export default function SettingsScreen() {
   // Preferences
   const [autoCheckpoint, setAutoCheckpoint] = useState(false);
 
+  // Turn-finished push notifications (ntfy.sh or self-hosted ntfy server)
+  const [ntfyTopic, setNtfyTopic] = useState('');
+  const [ntfyServer, setNtfyServer] = useState('');
+
   // GitHub token (paste — supports OAuth tokens and fine-grained PATs)
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [savingGitHub, setSavingGitHub] = useState(false);
@@ -145,6 +149,8 @@ export default function SettingsScreen() {
           workdir,
           assemblyAiSaved,
           openAiSaved,
+          savedNtfyTopic,
+          savedNtfyServer,
         ] =
           await Promise.all([
             getSetting('defaultProvider'),
@@ -157,6 +163,8 @@ export default function SettingsScreen() {
             getSetting('defaultWorkingDirectory'),
             hasToken('assemblyAiToken'),
             hasToken('openAiToken'),
+            getSetting('ntfyTopic'),
+            getSetting('ntfyServer'),
           ]);
 
         if (
@@ -182,6 +190,8 @@ export default function SettingsScreen() {
         setHasAssemblyAiToken(assemblyAiSaved);
         setHasOpenAiToken(openAiSaved);
         setAutoCheckpoint(checkpoint);
+        if (savedNtfyTopic !== null) setNtfyTopic(savedNtfyTopic);
+        if (savedNtfyServer !== null) setNtfyServer(savedNtfyServer);
       } catch {
         // Settings load failed silently
       }
@@ -233,6 +243,16 @@ export default function SettingsScreen() {
   const handleAutoCheckpointChange = useCallback(async (value: boolean) => {
     setAutoCheckpoint(value);
     await setSettingBool('autoCheckpoint', value);
+  }, []);
+
+  const handleNtfyTopicChange = useCallback(async (text: string) => {
+    setNtfyTopic(text);
+    await setSetting('ntfyTopic', text.trim());
+  }, []);
+
+  const handleNtfyServerChange = useCallback(async (text: string) => {
+    setNtfyServer(text);
+    await setSetting('ntfyServer', text.trim());
   }, []);
 
   const handleSignOut = useCallback(() => {
@@ -719,6 +739,43 @@ export default function SettingsScreen() {
           <Text style={[styles.rowLabel, { color: colors.text }]}>Interactive Terminal</Text>
           <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
         </Pressable>
+      </View>
+
+      {/* Notifications Section */}
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>NOTIFICATIONS</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Topic</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={ntfyTopic}
+            onChangeText={handleNtfyTopicChange}
+            placeholder="my-secret-topic"
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </View>
+        <View style={styles.inputRow}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Server</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={ntfyServer}
+            onChangeText={handleNtfyServerChange}
+            placeholder="https://ntfy.sh"
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
+        </View>
+        <View style={styles.textAreaContainer}>
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            When set, the sprite sends a push via ntfy when a chat turn finishes — even with the
+            app closed. Install the ntfy app and subscribe to the same topic. Pick a long, hard to
+            guess topic name; anyone who knows it can read these notifications.
+          </Text>
+        </View>
       </View>
 
       {/* Preferences Section */}

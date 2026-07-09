@@ -9,6 +9,7 @@ import {
   TurnOutcome,
   isCodexProvider,
   makeId,
+  providerDisplayName,
 } from '@/models/chat';
 import {
   ClaudeAssistantEvent,
@@ -31,6 +32,7 @@ import { getSetting } from '@/services/storage';
 import {
   buildFallbackPrompt,
   buildProcessGroupKillCommand,
+  buildTurnNotifySuffix,
   classifyCodexAuthIssue,
   codexEventDebugLabel,
   compactDebugChunk,
@@ -1281,7 +1283,22 @@ export function useChat(options: UseChatOptions) {
       }
 
       const taskName = safeTaskName(`wisp-chat-${provider}-${userMessageId}`);
-      const fullCommand = withSpriteTaskHeartbeat(commandParts.join(' && '), taskName);
+      const [ntfyTopic, ntfyServer] = await Promise.all([
+        getSetting('ntfyTopic'),
+        getSetting('ntfyServer'),
+      ]);
+      let turnCommand = commandParts.join(' && ');
+      if (ntfyTopic?.trim()) {
+        // Push a phone notification from the sprite when the turn ends, so
+        // "send and walk away" doesn't require reopening the app to find out.
+        turnCommand += buildTurnNotifySuffix({
+          server: ntfyServer ?? '',
+          topic: ntfyTopic,
+          title: `${spriteName} · ${providerDisplayName(provider)}`,
+          promptPreview: prompt,
+        });
+      }
+      const fullCommand = withSpriteTaskHeartbeat(turnCommand, taskName);
 
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
