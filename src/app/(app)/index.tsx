@@ -14,6 +14,7 @@ import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite } from '@/models/sprite';
 import * as api from '@/services/api';
+import { chatRepository } from '@/services/chat-repository';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
@@ -29,6 +30,9 @@ export default function DashboardScreen() {
   const [error, setError] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
   const [wakingSprites, setWakingSprites] = useState<Set<string>>(new Set());
+  // Persisted "chat has an agent turn running" flags per sprite. Best-effort:
+  // reconciled against live exec sessions when a sprite screen opens.
+  const [runningBySprite, setRunningBySprite] = useState<Record<string, number>>({});
 
   const loadSprites = useCallback(async () => {
     setIsLoading(true);
@@ -38,6 +42,16 @@ export default function DashboardScreen() {
       setSprites(result);
     } catch (err: any) {
       setError(err.message);
+    }
+    try {
+      const runningChats = await chatRepository.listWithActiveRuns();
+      const counts: Record<string, number> = {};
+      for (const chat of runningChats) {
+        counts[chat.spriteName] = (counts[chat.spriteName] ?? 0) + 1;
+      }
+      setRunningBySprite(counts);
+    } catch {
+      // Non-fatal — badges just don't show.
     }
     setIsLoading(false);
   }, []);
@@ -110,6 +124,7 @@ export default function DashboardScreen() {
             sprite={item}
             onPress={() => handlePress(item)}
             isWaking={wakingSprites.has(item.name)}
+            runningCount={runningBySprite[item.name] ?? 0}
           />
         )}
         keyExtractor={(item) => item.id}
