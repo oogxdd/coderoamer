@@ -41,6 +41,8 @@ const TRANSCRIPTION_PROVIDER_OPTIONS: { label: string; value: TranscriptionProvi
   { label: 'OpenAI', value: 'openai' },
 ];
 
+const PROVIDER_OPTIONS: AgentProvider[] = ['claude', 'codex', 'codexAppServer'];
+
 export function ChatInputBar({
   value,
   onChangeText,
@@ -77,7 +79,7 @@ export function ChatInputBar({
       <View style={styles.providerRow}>
         <Text style={[styles.providerLabel, { color: colors.textSecondary }]}>Provider</Text>
         <View style={[styles.providerControl, { backgroundColor: colors.backgroundElement }]}>
-          {(['claude', 'codex'] as AgentProvider[]).map((option) => (
+          {PROVIDER_OPTIONS.map((option) => (
             <Pressable
               key={option}
               style={[
@@ -299,7 +301,7 @@ const styles = StyleSheet.create({
   },
   providerButton: {
     borderRadius: 6,
-    paddingHorizontal: Spacing.md,
+    paddingHorizontal: Spacing.sm,
     paddingVertical: 5,
   },
   providerButtonText: {

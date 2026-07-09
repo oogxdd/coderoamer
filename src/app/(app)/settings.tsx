@@ -27,6 +27,7 @@ type ProviderOption = { label: string; value: AgentProvider };
 const PROVIDER_OPTIONS: ProviderOption[] = [
   { label: 'Claude', value: 'claude' },
   { label: 'Codex', value: 'codex' },
+  { label: 'Codex Server', value: 'codexAppServer' },
 ];
 
 const MODEL_OPTIONS: { label: string; value: ClaudeModel }[] = [
@@ -158,7 +159,11 @@ export default function SettingsScreen() {
             hasToken('openAiToken'),
           ]);
 
-        if (providerSetting === 'claude' || providerSetting === 'codex') {
+        if (
+          providerSetting === 'claude' ||
+          providerSetting === 'codex' ||
+          providerSetting === 'codexAppServer'
+        ) {
           setDefaultProvider(providerSetting as AgentProvider);
         }
         if (model && ['sonnet', 'opus', 'haiku'].includes(model)) {
@@ -541,7 +546,7 @@ export default function SettingsScreen() {
             autoCorrect={false}
           />
           <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
-            New chats `cd` here before launching Claude. Point it at the folder where you cloned
+            New chats `cd` here before launching the agent. Point it at the folder where you cloned
             your repo (e.g. /home/sprite/my-repo).
           </Text>
         </View>
