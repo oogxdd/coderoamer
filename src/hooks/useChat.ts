@@ -52,6 +52,13 @@ interface SessionIds {
   codexSessionId?: string;
 }
 
+/** A send that failed before anything launched on the sprite — safe to retry. */
+interface FailedSend {
+  prompt: string;
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
 interface UseChatOptions {
   spriteName: string;
   chatId: string;
@@ -88,6 +95,7 @@ export function useChat(options: UseChatOptions) {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   const [inputText, setInputText] = useState('');
   const [codexAuthIssue, setCodexAuthIssue] = useState<string | undefined>();
+  const [failedSend, setFailedSendState] = useState<FailedSend | undefined>();
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
@@ -115,6 +123,12 @@ export function useChat(options: UseChatOptions) {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const attachToRunRef = useRef<(run: ActiveChatRun, loadRequest: number) => void>(() => {});
+  const failedSendRef = useRef<FailedSend | undefined>(undefined);
+
+  const setFailedSend = useCallback((value: FailedSend | undefined) => {
+    failedSendRef.current = value;
+    setFailedSendState(value);
+  }, []);
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -431,6 +445,7 @@ export function useChat(options: UseChatOptions) {
       turnTimingRef.current = {};
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
+      setFailedSend(undefined);
       claudeSessionIdRef.current = options.initialClaudeSessionId;
       codexSessionIdRef.current = options.initialCodexSessionId;
       activeRunRef.current = options.initialActiveRun;
@@ -511,6 +526,7 @@ export function useChat(options: UseChatOptions) {
     setClaudeSessionId,
     setCodexSessionId,
     setActiveRun,
+    setFailedSend,
     syncClaudeTranscript,
     syncCodexTranscript,
   ]);
@@ -1131,45 +1147,24 @@ export function useChat(options: UseChatOptions) {
   );
   processServiceEventRef.current = processServiceEvent;
 
-  const sendMessage = useCallback(
-    async (text?: string) => {
-      if (statusRef.current !== 'idle') return;
-      if (activeRunRef.current) {
-        loadSession();
-        return;
-      }
-
-      const prompt = (text ?? inputText).trim();
-      if (!prompt) return;
-
-      if (!text) setInputText('');
-
-      // Invalidate any in-flight history load to prevent clobbering this turn.
-      loadRequestRef.current += 1;
-      const historyBeforeSend = messagesRef.current;
-
-      const userMessage: ChatMessage = {
-        id: makeId(),
-        timestamp: Date.now(),
-        role: 'user',
-        content: [{ type: 'text', text: prompt }],
-      };
-
-      const assistantMessage: ChatMessage = {
-        id: makeId(),
-        timestamp: Date.now(),
-        role: 'assistant',
-        content: [],
-      };
-
-      activeUserMessageIdRef.current = userMessage.id;
-      activeAssistantMessageIdRef.current = assistantMessage.id;
+  /**
+   * Launch the agent process for one turn and stream it back. Shared by
+   * sendMessage and retryFailedSend — the turn's user/assistant messages must
+   * already exist in the conversation.
+   */
+  const executeTurn = useCallback(
+    async (
+      prompt: string,
+      userMessageId: string,
+      assistantMessageId: string,
+      historyForFallback: ChatMessage[]
+    ) => {
+      activeUserMessageIdRef.current = userMessageId;
+      activeAssistantMessageIdRef.current = assistantMessageId;
       assistantTextSeenRef.current = false;
-      const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
-      updateMessages(() => pendingMessages);
-      await chatRepository.setMessages(chatId, pendingMessages);
       turnTimingRef.current = { startedAt: Date.now() };
-      debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
+      setFailedSend(undefined);
+      debugChat('executeTurn', provider, 'user', userMessageId, 'assistant', assistantMessageId);
 
       const commandParts: string[] = [];
       let codexAppServerPrompt: string | undefined;
@@ -1190,7 +1185,7 @@ export function useChat(options: UseChatOptions) {
       if (provider === 'claude') {
         const claudePrompt = claudeSessionIdRef.current
           ? prompt
-          : buildFallbackPrompt(historyBeforeSend, prompt);
+          : buildFallbackPrompt(historyForFallback, prompt);
 
         commandParts.push('export NO_DNA=1');
 
@@ -1225,7 +1220,7 @@ export function useChat(options: UseChatOptions) {
         setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
-          : buildFallbackPrompt(historyBeforeSend, prompt);
+          : buildFallbackPrompt(historyForFallback, prompt);
 
         if (provider === 'codexAppServer') {
           codexAppServerPrompt = codexPrompt;
@@ -1247,7 +1242,7 @@ export function useChat(options: UseChatOptions) {
         }
       }
 
-      const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
+      const taskName = safeTaskName(`wisp-chat-${provider}-${userMessageId}`);
       const fullCommand = withSpriteTaskHeartbeat(commandParts.join(' && '), taskName);
 
       processedUUIDsRef.current = new Set();
@@ -1266,6 +1261,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = abortController;
       execSessionIdRef.current = undefined;
       let disconnectedBeforeExit = false;
+      let sendError: string | undefined;
       const streamActiveRunRef: { current?: ActiveChatRun } = {};
 
       try {
@@ -1276,8 +1272,8 @@ export function useChat(options: UseChatOptions) {
             taskName,
             provider,
             transport,
-            userMessageId: userMessage.id,
-            assistantMessageId: assistantMessage.id,
+            userMessageId,
+            assistantMessageId,
             workingDirectory,
             startedAt: Date.now(),
           };
@@ -1332,6 +1328,7 @@ export function useChat(options: UseChatOptions) {
             // dropped stream like a disconnect and let the reconnect loop decide.
             disconnectedBeforeExit = true;
           } else {
+            sendError = message;
             setErrorMessage(message);
           }
           if (isCodexProvider(provider)) {
@@ -1390,6 +1387,14 @@ export function useChat(options: UseChatOptions) {
         if (!streamExecSessionId || currentActiveRun?.execSessionId === streamExecSessionId) {
           setActiveRun(undefined);
         }
+        const neverStarted =
+          !streamActiveRunRef.current &&
+          turnTimingRef.current.firstStdoutAt === undefined &&
+          turnTimingRef.current.firstStderrAt === undefined;
+        if (sendError && neverStarted && !agentTurnCompleteRef.current) {
+          // Nothing launched on the sprite, so re-running the same send is safe.
+          setFailedSend({ prompt, userMessageId, assistantMessageId });
+        }
         execSessionIdRef.current = undefined;
         activeUserMessageIdRef.current = undefined;
         activeAssistantMessageIdRef.current = undefined;
@@ -1399,23 +1404,80 @@ export function useChat(options: UseChatOptions) {
       }
     },
     [
-      inputText,
-      chatId,
-      loadSession,
       persistMessages,
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
       scheduleReconnect,
       setActiveRun,
+      setFailedSend,
       setStatusTracked,
       spriteName,
       handleClaudeEvent,
       handleCodexEvent,
-      updateMessages,
       workingDirectory,
     ]
   );
+
+  const sendMessage = useCallback(
+    async (text?: string) => {
+      if (statusRef.current !== 'idle') return;
+      if (activeRunRef.current) {
+        loadSession();
+        return;
+      }
+
+      const prompt = (text ?? inputText).trim();
+      if (!prompt) return;
+
+      if (!text) setInputText('');
+
+      // Invalidate any in-flight history load to prevent clobbering this turn.
+      loadRequestRef.current += 1;
+      const historyBeforeSend = messagesRef.current;
+
+      const userMessage: ChatMessage = {
+        id: makeId(),
+        timestamp: Date.now(),
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+      };
+
+      const assistantMessage: ChatMessage = {
+        id: makeId(),
+        timestamp: Date.now(),
+        role: 'assistant',
+        content: [],
+      };
+
+      const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
+      updateMessages(() => pendingMessages);
+      await chatRepository.setMessages(chatId, pendingMessages);
+      await executeTurn(prompt, userMessage.id, assistantMessage.id, historyBeforeSend);
+    },
+    [chatId, executeTurn, inputText, loadSession, updateMessages]
+  );
+
+  /**
+   * Re-run a send that failed before anything launched on the sprite, reusing
+   * the already-rendered user/assistant messages.
+   */
+  const retryFailedSend = useCallback(async () => {
+    const failed = failedSendRef.current;
+    if (!failed) return;
+    if (statusRef.current !== 'idle' || activeRunRef.current) return;
+    setErrorMessage(undefined);
+    loadRequestRef.current += 1;
+    const msgs = messagesRef.current;
+    const userIndex = msgs.findIndex((m) => m.id === failed.userMessageId);
+    const historyForFallback = userIndex > 0 ? msgs.slice(0, userIndex) : [];
+    await executeTurn(
+      failed.prompt,
+      failed.userMessageId,
+      failed.assistantMessageId,
+      historyForFallback
+    );
+  }, [executeTurn]);
 
   const interrupt = useCallback(() => {
     clearReconnectTimer();
@@ -1476,5 +1538,7 @@ export function useChat(options: UseChatOptions) {
     sessionId: isCodexProvider(provider) ? codexSessionIdRef.current : claudeSessionIdRef.current,
     codexAuthIssue,
     clearCodexAuthIssue,
+    failedSend,
+    retryFailedSend,
   };
 }

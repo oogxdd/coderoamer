@@ -790,6 +790,17 @@ export default function SpriteDetailScreen() {
               <Text style={[styles.errorBarText, { color: colors.destructive }]}>
                 {chat.errorMessage}
               </Text>
+              {chat.failedSend && (
+                <Pressable
+                  style={[styles.retryButton, { borderColor: colors.destructive }]}
+                  onPress={chat.retryFailedSend}
+                  hitSlop={8}
+                >
+                  <Text style={[styles.retryButtonText, { color: colors.destructive }]}>
+                    Retry send
+                  </Text>
+                </Pressable>
+              )}
             </View>
           )}
           <ChatInputBar
@@ -1304,6 +1315,18 @@ const styles = StyleSheet.create({
   errorBarText: {
     fontSize: FontSize.sm,
     textAlign: 'center',
+  },
+  retryButton: {
+    alignSelf: 'center',
+    marginTop: Spacing.sm,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 3,
+  },
+  retryButtonText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
   },
   centerView: {
     flex: 1,
