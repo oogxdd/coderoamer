@@ -129,13 +129,22 @@ api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
 
 ### Codex provider
 
-`AgentProvider = 'claude' | 'codex'`. The chat layer is provider-abstracted. For
-Codex, the command is `codex exec [--json] [--resume <id>] --model gpt-5-codex
---skip-git-repo-check --dangerously-bypass-approvals-and-sandbox '<prompt>'`,
-parsed by `CodexStreamParser` / `parseCodexEvent`. Codex auth issues are sniffed
-from stderr by `classifyCodexAuthIssue` (looks for `codex login`, 401/403, etc.)
-and surfaced with a switch-to-Claude prompt. Codex is keyed on `codexSessionId`
-(Codex thread id); Claude on `claudeSessionId`.
+`AgentProvider = 'claude' | 'codex' | 'codexAppServer'`. The chat layer is
+provider-abstracted. The two Codex providers intentionally expose the two
+transport paths side-by-side:
+
+- `codex`: legacy/fallback `codex exec --json` / `codex exec resume --json
+  <id>`, still parsed by `CodexStreamParser` / `parseCodexEvent`.
+- `codexAppServer`: `codex app-server --stdio`; `useChat` drives the
+  JSON-RPC handshake through `streamCodexAppServerTurn`
+  (`initialize` → `thread/start`/`thread/resume` → `turn/start`), with stdin
+  carried over the Exec WebSocket.
+
+Both modes use `--skip-git-repo-check` and/or no-approval/full-access settings
+where the CLI supports them. Codex auth issues are sniffed from stderr by
+`classifyCodexAuthIssue` (looks for `codex login`, 401/403, etc.) and surfaced
+with a switch-to-Claude prompt. Codex is keyed on `codexSessionId` (Codex thread
+id); Claude on `claudeSessionId`.
 
 ### Session browser (`src/services/claude-sessions.ts`)
 

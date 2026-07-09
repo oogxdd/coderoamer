@@ -6,6 +6,7 @@ import {
   ChatStatus,
   ToolResultCard,
   ToolUseCard,
+  isCodexProvider,
   makeId,
 } from '@/models/chat';
 import {
@@ -369,7 +370,7 @@ export function useChat(options: UseChatOptions) {
   // from a terminal) are recovered — the same history `codex exec resume` sees.
   const syncCodexTranscript = useCallback(
     async (loadRequest: number, resumeId: string | undefined) => {
-      if (provider !== 'codex' || !resumeId) return;
+      if (!isCodexProvider(provider) || !resumeId) return;
 
       try {
         const transcript = await readCodexSessionMessages(spriteName, resumeId);
@@ -1078,7 +1079,7 @@ export function useChat(options: UseChatOptions) {
             turnTimingRef.current.firstStderrAt = Date.now();
             debugChat('first stderr', provider, elapsedSince(turnTimingRef.current.startedAt));
           }
-          if (provider === 'codex' && event.data) {
+          if (isCodexProvider(provider) && event.data) {
             codexStderrRef.current += `\n${event.data}`;
           }
           if (event.data) {
@@ -1217,16 +1218,31 @@ export function useChat(options: UseChatOptions) {
 
         commandParts.push(claudeCmd);
       } else {
-        const codexModel = (await getSetting('codexModel'))?.trim();
+        const codexModelSetting = await getSetting('codexModel');
+        const codexModel = codexModelSetting?.trim();
         setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
           : buildFallbackPrompt(historyBeforeSend, prompt);
 
-        codexAppServerPrompt = codexPrompt;
-        codexAppServerModel = codexModel || undefined;
-        transport = 'codexAppServer';
-        commandParts.push('codex app-server --stdio');
+        if (provider === 'codexAppServer') {
+          codexAppServerPrompt = codexPrompt;
+          codexAppServerModel = codexModel || undefined;
+          transport = 'codexAppServer';
+          commandParts.push('codex app-server --stdio');
+        } else {
+          let codexCmd = codexSessionIdRef.current
+            ? 'codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox'
+            : 'codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox';
+          if (codexModel) {
+            codexCmd += ` --model ${shellQuote(codexModel)}`;
+          }
+          if (codexSessionIdRef.current) {
+            codexCmd += ` ${shellQuote(codexSessionIdRef.current)}`;
+          }
+          codexCmd += ` ${shellQuote(codexPrompt)}`;
+          commandParts.push(codexCmd);
+        }
       }
 
       const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
@@ -1276,7 +1292,7 @@ export function useChat(options: UseChatOptions) {
           processServiceEvent(event);
         };
 
-        if (provider === 'codex' && codexAppServerPrompt !== undefined) {
+        if (provider === 'codexAppServer' && codexAppServerPrompt !== undefined) {
           await streamCodexAppServerTurn({
             spriteName,
             command: ['bash', '-c', fullCommand],
@@ -1310,7 +1326,7 @@ export function useChat(options: UseChatOptions) {
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
           setErrorMessage(message);
-          if (provider === 'codex') {
+          if (isCodexProvider(provider)) {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
         }
@@ -1347,7 +1363,7 @@ export function useChat(options: UseChatOptions) {
           }
         }
 
-        if (provider === 'codex' && !codexSawAssistantRef.current) {
+        if (isCodexProvider(provider) && !codexSawAssistantRef.current) {
           reportCodexAuthIssue(codexStderrRef.current);
         }
 
@@ -1430,7 +1446,7 @@ export function useChat(options: UseChatOptions) {
     interrupt,
     detachStream,
     loadSession,
-    sessionId: provider === 'codex' ? codexSessionIdRef.current : claudeSessionIdRef.current,
+    sessionId: isCodexProvider(provider) ? codexSessionIdRef.current : claudeSessionIdRef.current,
     codexAuthIssue,
     clearCodexAuthIssue,
   };
