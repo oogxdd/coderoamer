@@ -12,7 +12,7 @@ import {
 import { router } from 'expo-router';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
-import { AgentProvider, ChatMessage, providerDisplayName } from '@/models/chat';
+import { AgentProvider, ChatMessage, isCodexProvider, providerDisplayName } from '@/models/chat';
 import { shortWorkingDirectory } from '@/constants/session';
 import {
   ClaudeSessionSummary,
@@ -131,7 +131,7 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
       setDetailLoading(true);
       try {
         const msgs =
-          session.provider === 'codex'
+          isCodexProvider(session.provider)
             ? await readCodexSessionMessages(spriteName, session.id)
             : await readClaudeSessionMessages(spriteName, session.id);
         if (request !== detailRequestRef.current) return;

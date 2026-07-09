@@ -1,9 +1,10 @@
 # Chat transport architecture (Claude & Codex)
 
-Status: design notes + decisions, updated after the first Codex app-server
-implementation. Captures the analysis of how chat turns are transported to/from
-the agent CLIs inside a sprite, the current model, and the two persistent-session
-designs we considered. Companion to
+Status: design notes + decisions, updated after keeping the legacy Codex exec
+provider side-by-side with the first Codex app-server provider. Captures the
+analysis of how chat turns are transported to/from the agent CLIs inside a
+sprite, the current model, and the two persistent-session designs we considered.
+Companion to
 [`codex-app-server-estimate.md`](./codex-app-server-estimate.md).
 
 ---
@@ -16,9 +17,12 @@ stdout NDJSON back:
 - Transport: `api.streamExec(sprite, ['bash','-c', cmd], onEvent, signal, opts)`
   → `WSS /v1/sprites/{name}/exec` (`src/services/api.ts`).
 - Claude: `claude -p --verbose --output-format stream-json --dangerously-skip-permissions [--resume <id>] <prompt>`
-- Codex: `codex app-server --stdio`; the app writes JSON-RPC requests to stdin
-  (`initialize` → `thread/start` or `thread/resume` → `turn/start`) and parses
-  app-server notifications from stdout.
+- Codex: provider-level split:
+  - `Codex`: legacy/fallback `codex exec --json` / `codex exec resume --json`,
+    parsed through the same `CodexStreamParser`.
+  - `Codex Server`: `codex app-server --stdio`; the app writes JSON-RPC
+    requests to stdin (`initialize` → `thread/start` or `thread/resume` →
+    `turn/start`) and parses app-server notifications from stdout.
 - Continuity across turns is via **session id resume**, not a live process:
   `claude --resume <session_id>` / `thread/resume <thread_id>`. The id comes
   from the first `system` / `thread/started` event and is persisted
@@ -94,16 +98,18 @@ sends `Uint8Array([0x00, ...utf8(payload)])` frames into the running process.
 | | cold per-turn, streams? | to make it stream |
 |---|---|---|
 | **Claude** | ✅ already (`-p --output-format stream-json` emits deltas) | nothing — current code already gets this |
-| **Codex** | ✅ via app-server (`item/agentMessage/delta`, reasoning deltas) | spawn `codex app-server --stdio`, push one turn to stdin, stream events, then terminate |
+| **Codex** | ❌ legacy `codex exec --json` returns the final assistant message as a whole | choose the `Codex Server` provider |
+| **Codex Server** | ✅ via app-server (`item/agentMessage/delta`, reasoning deltas) | spawn `codex app-server --stdio`, push one turn to stdin, stream events, then terminate |
 
-So **both providers now stream cold**. For Codex, the fix was *not* warmth — it
-was switching each turn's process from legacy `codex exec --json` to
-`codex app-server --stdio`, still launched **one process per turn**.
+So **Codex Server can stream cold** through `codex app-server --stdio`. The
+streaming fix was *not* warmth — it was adding the app-server provider, still
+launched **one process per turn**. The legacy `Codex` provider remains
+available side-by-side as a fallback.
 
 ### 2.3 Implemented target — *cold-per-turn `codex app-server --stdio` streaming*
 
 This keeps Axis A = ephemeral (sprite-friendly) and only moves Codex along
-Axis B:
+Axis B when the `Codex Server` provider is selected:
 
 1. Per Codex turn, spawn `codex app-server --stdio` over Exec with `stdin: true`
    (no warm keep-alive beyond the in-flight turn — the existing heartbeat covers
@@ -117,15 +123,16 @@ Axis B:
 4. On `turn/completed`, kill the app-server exec session. Next turn (possibly
    hours later) = a fresh cold spawn that resumes the thread from disk.
 
-Cost: one stdin write-path in `streamExec` + `src/services/codex-app-server.ts`.
+Cost: one stdin write-path in `streamExec`, `src/services/codex-app-server.ts`,
+and one extra `AgentProvider` value so the legacy `Codex` path stays available.
 Cold start is paid once per turn — same tradeoff as legacy `codex exec resume`.
 **No warm process, no service.**
 
 When is this even worth doing? Only if Codex's "tools stream in, then the whole
 answer appears at once at the end" actually bothers you. If not, the current
 legacy `codex exec --json` path (plus the §6 transcript sync and the parity
-fixes) is still useful as a reference/fallback design, but the app now routes
-Codex chat turns through app-server.
+fixes) remains useful as a fallback design; the app exposes both Codex paths as
+separate provider options.
 
 ### 2.4 Niche only — persistent/warm session
 
@@ -145,8 +152,11 @@ in); discover live sessions via `listExecSessions`.
   (`initialize` → thread start/resume → turn start).
 - `src/models/codex-events.ts`: app-server notification mapping to existing
   `CodexStreamEvent`.
-- `useChat.ts`: Codex turns route through the app-server driver instead of
-  building a `codex exec --json` command.
+- `useChat.ts`: Codex turns route through either the app-server driver or the
+  legacy `codex exec --json` command based on `AgentProvider`.
+- `models/chat.ts`, `settings.tsx`, `ChatInputBar.tsx`, `NewSessionSheet.tsx`,
+  and `storage.ts`: `Codex` and `Codex Server` are exposed side-by-side as
+  provider options.
 
 ### 2.6 Risks / open items
 - The implemented schema was generated from `codex-cli 0.137.0`

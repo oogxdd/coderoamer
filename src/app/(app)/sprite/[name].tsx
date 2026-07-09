@@ -15,7 +15,13 @@ import {
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
-import { AgentProvider, ChatMessage, providerDisplayName, toolUseActivityLabel } from '@/models/chat';
+import {
+  AgentProvider,
+  ChatMessage,
+  isCodexProvider,
+  providerDisplayName,
+  toolUseActivityLabel,
+} from '@/models/chat';
 import * as api from '@/services/api';
 import { useChat } from '@/hooks/useChat';
 import { useChatDictation } from '@/hooks/useChatDictation';
@@ -35,6 +41,7 @@ import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirec
 type Tab = 'overview' | 'chat' | 'checkpoints';
 
 function normalizeProvider(provider: unknown): AgentProvider {
+  if (provider === 'codexAppServer') return 'codexAppServer';
   return provider === 'codex' ? 'codex' : 'claude';
 }
 
@@ -361,8 +368,8 @@ export default function SpriteDetailScreen() {
       const dir = normalizeWorkingDirectory(session.cwd || defaultDirectory);
       const chats = chatListRef.current;
       const existing = chats.find((c) =>
-        session.provider === 'codex'
-          ? c.provider === 'codex' && c.codexSessionId === session.id
+        isCodexProvider(session.provider)
+          ? isCodexProvider(c.provider) && c.codexSessionId === session.id
           : c.provider === 'claude' && c.claudeSessionId === session.id
       );
 
@@ -370,9 +377,9 @@ export default function SpriteDetailScreen() {
       if (existing) {
         target = {
           ...existing,
-          provider: session.provider,
+          provider: existing.provider,
           claudeSessionId: session.provider === 'claude' ? session.id : existing.claudeSessionId,
-          codexSessionId: session.provider === 'codex' ? session.id : existing.codexSessionId,
+          codexSessionId: isCodexProvider(session.provider) ? session.id : existing.codexSessionId,
           workingDirectory: dir,
           lastUsed: Date.now(),
         };
@@ -384,7 +391,7 @@ export default function SpriteDetailScreen() {
           chatNumber: maxNumber + 1,
           provider: session.provider,
           claudeSessionId: session.provider === 'claude' ? session.id : undefined,
-          codexSessionId: session.provider === 'codex' ? session.id : undefined,
+          codexSessionId: isCodexProvider(session.provider) ? session.id : undefined,
           workingDirectory: dir,
           createdAt: Date.now(),
           lastUsed: Date.now(),
@@ -402,9 +409,9 @@ export default function SpriteDetailScreen() {
       await saveChatList(spriteName, updated);
       await saveChatMessages(target.id, messages);
 
-      setChatProvider(session.provider);
+      setChatProvider(target.provider);
       setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
-      setCodexSessionId(session.provider === 'codex' ? session.id : target.codexSessionId);
+      setCodexSessionId(isCodexProvider(session.provider) ? session.id : target.codexSessionId);
       setActiveRun(undefined);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
