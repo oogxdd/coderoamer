@@ -27,10 +27,24 @@ import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
 import { getSetting } from '@/services/storage';
+import {
+  buildFallbackPrompt,
+  classifyCodexAuthIssue,
+  codexEventDebugLabel,
+  compactDebugChunk,
+  conversationSignature,
+  countUserMessages,
+  elapsedSince,
+  isHeartbeatStderr,
+  mergeTranscript,
+  nextAssistantAfterUser,
+  safeTaskName,
+  shellQuote,
+  withSpriteTaskHeartbeat,
+} from '@/services/chat-helpers';
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
-const DEBUG_SNIPPET_MAX = 240;
 
 interface SessionIds {
   claudeSessionId?: string;
@@ -50,190 +64,10 @@ interface UseChatOptions {
   onCodexAuthIssue?: (message: string) => void;
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function safeTaskName(value: string): string {
-  return value.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
-}
-
-function withSpriteTaskHeartbeat(command: string, taskName: string): string {
-  const quotedTaskName = shellQuote(taskName);
-  return [
-    `TASK_NAME=${quotedTaskName}`,
-    `TASK_EXPIRE=5m`,
-    `sprite_task_api() { curl -sS --unix-socket /.sprite/api.sock -H "Content-Type: application/json" "$@" >/dev/null 2>&1 || true; }`,
-    `sprite_task_put() { sprite_task_api -X PUT "http://sprite/v1/tasks/$TASK_NAME" -d "{\\"expire\\":\\"$TASK_EXPIRE\\"}"; }`,
-    `sprite_task_delete() { sprite_task_api -X DELETE "http://sprite/v1/tasks/$TASK_NAME"; }`,
-    'cleanup() { status=$?; trap - EXIT INT TERM; if [ -n "${LOG_HBEAT:-}" ]; then kill "$LOG_HBEAT" 2>/dev/null || true; wait "$LOG_HBEAT" 2>/dev/null || true; fi; if [ -n "${TASK_HBEAT:-}" ]; then kill "$TASK_HBEAT" 2>/dev/null || true; wait "$TASK_HBEAT" 2>/dev/null || true; fi; sprite_task_delete; exit "$status"; }',
-    `trap cleanup EXIT INT TERM`,
-    `sprite_task_put`,
-    `(while true; do sleep 60; sprite_task_put; done) & TASK_HBEAT=$!`,
-    `(while true; do sleep 20; printf . >&2; done) & LOG_HBEAT=$!`,
-    command,
-  ].join('; ');
-}
-
-function classifyCodexAuthIssue(raw: string): string | undefined {
-  const text = raw.toLowerCase();
-  const matchesAuthIssue =
-    text.includes('codex login') ||
-    text.includes('not logged') ||
-    text.includes('authentication') ||
-    text.includes('unauthorized') ||
-    text.includes('forbidden') ||
-    text.includes('openai_api_key') ||
-    text.includes('api key') ||
-    text.includes('login required') ||
-    text.includes('chatgpt login') ||
-    text.includes('status code: 401') ||
-    text.includes('status code: 403');
-
-  if (!matchesAuthIssue) return undefined;
-
-  return [
-    'Codex is not authenticated in this sprite environment.',
-    'Run `codex login status` and then `codex login` inside the sprite shell, or switch this chat to Claude.',
-  ].join(' ');
-}
-
-function messagePlainText(message: ChatMessage): string {
-  return message.content
-    .filter((item): item is Extract<ChatContent, { type: 'text' }> => item.type === 'text')
-    .map((item) => item.text)
-    .join('\n\n')
-    .trim();
-}
-
-function buildFallbackPrompt(history: ChatMessage[], prompt: string): string {
-  const transcript = history
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => {
-      const text = messagePlainText(message);
-      if (!text) return null;
-      const role = message.role === 'user' ? 'User' : 'Assistant';
-      const clipped = text.length > 1200 ? `${text.slice(0, 1200)}...` : text;
-      return `${role}: ${clipped}`;
-    })
-    .filter((line): line is string => line !== null)
-    .slice(-12);
-
-  if (transcript.length === 0) return prompt;
-
-  return [
-    'Continue this conversation. Here is the prior transcript:',
-    transcript.join('\n\n'),
-    `User: ${prompt}`,
-    'Assistant:',
-  ].join('\n\n');
-}
-
-function countUserMessages(messages: ChatMessage[]): number {
-  return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
-}
-
-/** Stable content fingerprint — two conversations with the same signature render identically. */
-function conversationSignature(messages: ChatMessage[]): string {
-  return messages
-    .map((m) => {
-      const parts = m.content.map((c) => {
-        if (c.type === 'text') return `t:${c.text}`;
-        if (c.type === 'reasoning') return `r:${c.text.length}`;
-        if (c.type === 'toolUse') return `u:${c.card.toolUseId}`;
-        if (c.type === 'toolResult') return `R:${c.card.toolUseId}`;
-        return c.type;
-      });
-      return `${m.role}|${parts.join('|')}`;
-    })
-    .join('\n');
-}
-
-/**
- * Overlay an incoming (e.g. on-disk transcript) conversation onto the local one,
- * preserving the existing message ids for the common prefix. Keeping ids stable
- * means React reuses the already-mounted bubbles instead of remounting/re-scrolling
- * them — which is what made reopening a chat look like the last turn was duplicated
- * and re-answered.
- */
-function mergeTranscript(local: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  return incoming.map((msg, i) => {
-    const localMsg = local[i];
-    if (localMsg && localMsg.role === msg.role) {
-      return { ...msg, id: localMsg.id };
-    }
-    return msg;
-  });
-}
-
-function nextAssistantAfterUser(messages: ChatMessage[], userIndex: number): number {
-  for (let i = userIndex + 1; i < messages.length; i++) {
-    if (messages[i].role === 'user') break;
-    if (messages[i].role === 'assistant') return i;
-  }
-  return -1;
-}
-
 function debugChat(...args: unknown[]) {
   if (!__DEV__) return;
   // eslint-disable-next-line no-console
   console.log('[chat-debug]', ...args);
-}
-
-function elapsedSince(startedAt: number | undefined): string {
-  return startedAt ? `+${Date.now() - startedAt}ms` : '+?ms';
-}
-
-function redactDebugText(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/sk-[A-Za-z0-9_-]{10,}/g, 'sk-[redacted]')
-    .replace(/(OPENAI_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=\S+/g, '$1=[redacted]');
-}
-
-function compactDebugChunk(value: string, max = DEBUG_SNIPPET_MAX): string {
-  const cleaned = redactDebugText(stripLogTimestamps(value))
-    .replace(/\u001b\[[0-9;]*m/g, '')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
-    .trim();
-  if (cleaned.length <= max) return cleaned;
-  return `${cleaned.slice(0, max)}…`;
-}
-
-function isHeartbeatStderr(value: string): boolean {
-  const compact = stripLogTimestamps(value).replace(/\s/g, '');
-  return compact.length > 0 && /^\.+$/.test(compact);
-}
-
-function codexEventDebugLabel(event: CodexStreamEvent): string {
-  switch (event.type) {
-    case 'unknown':
-      return [
-        'unknown',
-        event.rawType ? `raw=${event.rawType}` : undefined,
-        event.itemType ? `item=${event.itemType}` : undefined,
-        event.keys?.length ? `keys=${event.keys.join('|')}` : undefined,
-      ].filter(Boolean).join(' ');
-    case 'assistantDelta':
-      return `assistantDelta chars=${event.text.length}`;
-    case 'reasoning':
-      return `reasoning chars=${event.text.length}`;
-    case 'commandBegin':
-      return `commandBegin id=${event.commandId}`;
-    case 'commandEnd':
-      return `commandEnd id=${event.commandId} exit=${event.exitCode ?? '?'}`;
-    case 'fileChange':
-      return `fileChange files=${event.files.length}`;
-    case 'mcpToolBegin':
-      return `mcpToolBegin tool=${event.server ? `${event.server}.` : ''}${event.tool}`;
-    case 'mcpToolEnd':
-      return `mcpToolEnd tool=${event.server ? `${event.server}.` : ''}${event.tool} error=${event.isError}`;
-    case 'todoList':
-      return `todoList items=${event.items.length}`;
-    default:
-      return event.type;
-  }
 }
 
 type ChatTurnTiming = {
