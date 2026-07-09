@@ -39,6 +39,7 @@ import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
+import { reconcileActiveRuns } from '@/services/run-reconcile';
 import { getSetting, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
@@ -216,6 +217,10 @@ export default function SpriteDetailScreen() {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      // Drop "Running" flags whose exec session is gone (turn finished while
+      // the app was away) before binding chat state, so we don't try to attach
+      // to dead runs and the list doesn't show stale spinners.
+      await reconcileActiveRuns(spriteName).catch(() => {});
       const [chats, savedDefaultDir, savedTranscriptionProvider] = await Promise.all([
         chatRepository.listBySprite(spriteName),
         getSetting('defaultWorkingDirectory'),
@@ -319,12 +324,23 @@ export default function SpriteDetailScreen() {
         appStateRef.current === 'inactive' || appStateRef.current === 'background';
       appStateRef.current = nextState;
       if (nextState === 'active' && wasAway && chatId) {
-        setReloadNonce((n) => n + 1);
+        (async () => {
+          const cleared = await reconcileActiveRuns(spriteName).catch(() => [] as string[]);
+          if (cleared.length > 0) {
+            commitChatList(
+              chatListRef.current.map((c) =>
+                cleared.includes(c.id) ? { ...c, activeRun: undefined } : c
+              )
+            );
+            if (cleared.includes(chatId)) setActiveRun(undefined);
+          }
+          setReloadNonce((n) => n + 1);
+        })();
       }
     });
 
     return () => subscription.remove();
-  }, [chatId]);
+  }, [chatId, commitChatList, spriteName]);
 
   // Auto-scroll on new messages
   useEffect(() => {

@@ -8,9 +8,11 @@ interface SpriteRowProps {
   sprite: Sprite;
   onPress: () => void;
   isWaking?: boolean;
+  /** Chats on this sprite with an agent turn currently running. */
+  runningCount?: number;
 }
 
-export function SpriteRow({ sprite, onPress, isWaking }: SpriteRowProps) {
+export function SpriteRow({ sprite, onPress, isWaking, runningCount }: SpriteRowProps) {
   const colors = useTheme();
   const dotColor = statusColor(sprite.status);
 
@@ -33,6 +35,11 @@ export function SpriteRow({ sprite, onPress, isWaking }: SpriteRowProps) {
           </View>
           <Text style={[styles.status, { color: colors.textSecondary }]}>
             {isWaking ? 'Waking...' : statusDisplayName(sprite.status)}
+            {runningCount ? (
+              <Text style={{ color: colors.success }}>
+                {` · ${runningCount} agent ${runningCount === 1 ? 'run' : 'runs'}`}
+              </Text>
+            ) : null}
             {sprite.url ? ` · ${sprite.url.replace('https://', '')}` : ''}
           </Text>
         </View>
