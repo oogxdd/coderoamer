@@ -49,6 +49,7 @@ export interface ActiveChatRun {
 // MARK: - Normalization (defensive load-time sanitization)
 
 function normalizeProvider(value: unknown): AgentProvider {
+  if (value === 'codexAppServer') return 'codexAppServer';
   return value === 'codex' ? 'codex' : 'claude';
 }
 

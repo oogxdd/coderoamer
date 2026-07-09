@@ -20,12 +20,14 @@
 - `CodexStreamParser` теперь понимает app-server notifications
   (`item/agentMessage/delta`, reasoning deltas, command/file/MCP items,
   `turn/plan/updated`, `turn/completed`) и старый `codex exec --json` формат.
-- `useChat` маршрутизирует Codex turns через app-server и завершает exec session
-  после `turn/completed`, сохраняя reattach через `ActiveChatRun`.
+- `useChat` умеет маршрутизировать Codex turns через app-server и завершает exec
+  session после `turn/completed`, сохраняя reattach через `ActiveChatRun`.
+  Старый `codex exec --json` путь оставлен side-by-side как отдельный provider
+  `Codex`; app-server режим доступен как provider `Codex Server`.
 
-Это **не** warm daemon и не per-chat service. Процесс остается одноразовым на ход,
-чтобы не конфликтовать со sprite suspend model. Ниже сохранена исходная оценка
-для более крупного persistent/warm эпика.
+App-server режим — **не** warm daemon и не per-chat service. Процесс остается
+одноразовым на ход, чтобы не конфликтовать со sprite suspend model. Ниже
+сохранена исходная оценка для более крупного persistent/warm эпика.
 
 ## Что даёт app-server (чего нет у `exec --json`)
 
