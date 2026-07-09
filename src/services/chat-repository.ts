@@ -39,6 +39,7 @@ export interface ActiveChatRun {
   execSessionId: string;
   taskName: string;
   provider: AgentProvider;
+  transport?: 'exec' | 'codexAppServer';
   userMessageId: string;
   assistantMessageId: string;
   workingDirectory: string;
@@ -92,6 +93,7 @@ function normalizeActiveRun(value: unknown): ActiveChatRun | undefined {
     execSessionId: raw.execSessionId,
     taskName: raw.taskName,
     provider: normalizeProvider(raw.provider),
+    transport: raw.transport === 'codexAppServer' ? 'codexAppServer' : 'exec',
     userMessageId: raw.userMessageId,
     assistantMessageId: raw.assistantMessageId,
     workingDirectory: typeof raw.workingDirectory === 'string' ? raw.workingDirectory : '',
@@ -124,6 +126,7 @@ interface ActiveRunRow {
   exec_session_id: string;
   task_name: string;
   provider: string;
+  transport: string;
   user_message_id: string;
   assistant_message_id: string;
   working_directory: string;
@@ -135,6 +138,7 @@ function rowToActiveRun(row: ActiveRunRow): ActiveChatRun {
     execSessionId: row.exec_session_id,
     taskName: row.task_name,
     provider: normalizeProvider(row.provider),
+    transport: row.transport === 'codexAppServer' ? 'codexAppServer' : 'exec',
     userMessageId: row.user_message_id,
     assistantMessageId: row.assistant_message_id,
     workingDirectory: row.working_directory,
@@ -220,13 +224,14 @@ function chatParams(chat: PersistedChat) {
 
 const ACTIVE_RUN_UPSERT_SQL = `
 INSERT INTO active_runs (
-  chat_id, exec_session_id, task_name, provider, user_message_id,
+  chat_id, exec_session_id, task_name, provider, transport, user_message_id,
   assistant_message_id, working_directory, started_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id) DO UPDATE SET
   exec_session_id = excluded.exec_session_id,
   task_name = excluded.task_name,
   provider = excluded.provider,
+  transport = excluded.transport,
   user_message_id = excluded.user_message_id,
   assistant_message_id = excluded.assistant_message_id,
   working_directory = excluded.working_directory,
@@ -239,6 +244,7 @@ function activeRunParams(chatId: string, run: ActiveChatRun) {
     run.execSessionId,
     run.taskName,
     run.provider,
+    run.transport ?? 'exec',
     run.userMessageId,
     run.assistantMessageId,
     run.workingDirectory,

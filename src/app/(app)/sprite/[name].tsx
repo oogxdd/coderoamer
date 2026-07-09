@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -22,18 +22,26 @@ import { useChatDictation } from '@/hooks/useChatDictation';
 import { useTheme } from '@/hooks/use-theme';
 import { ChatMessageView } from '@/components/chat/ChatMessageView';
 import { ChatInputBar } from '@/components/chat/ChatInputBar';
+import { ChatList } from '@/components/chat/ChatList';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
+import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
+import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
+import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
+import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
 import { getSetting, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
 
-type Tab = 'overview' | 'chat' | 'checkpoints';
+// The sprite screen is a hub with three tabs. "chats" (center) is the default
+// and shows the conversation list; opening a conversation switches to a
+// full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
+type Tab = 'options' | 'chats' | 'filesystem' | 'settings';
 
 function normalizeProvider(provider: unknown): AgentProvider {
   return provider === 'codex' ? 'codex' : 'claude';
@@ -65,7 +73,9 @@ function getActiveToolLabel(
 export default function SpriteDetailScreen() {
   const { name } = useLocalSearchParams<{ name: string }>();
   const colors = useTheme();
-  const [tab, setTab] = useState<Tab>('chat');
+  const [tab, setTab] = useState<Tab>('chats');
+  // Whether a single conversation is open full-screen (vs. the 3-tab hub).
+  const [chatOpen, setChatOpen] = useState(false);
   const [sprite, setSprite] = useState<Sprite | null>(null);
   const [isLoadingSprite, setIsLoadingSprite] = useState(true);
   const flatListRef = useRef<FlatList>(null);
@@ -80,19 +90,74 @@ export default function SpriteDetailScreen() {
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
   const [sessionBrowserVisible, setSessionBrowserVisible] = useState(false);
+  // Conversations started from the "sprite console" CLI on a computer, discovered
+  // by scanning the sprite's Claude/Codex transcripts. Merged into the Chats list.
+  const [remoteSessions, setRemoteSessions] = useState<AgentSessionSummary[]>([]);
+  const [remoteRefreshing, setRemoteRefreshing] = useState(false);
+  const [remoteBusyId, setRemoteBusyId] = useState<string | undefined>();
   // Bumped to force the current chat to reload its persisted messages (e.g. after
   // seeding a resumed session's transcript) even when chatId is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
   // null = closed. 'new' creates a fresh session; 'edit' changes the current session's directory.
   const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'edit' | null>(null);
+  // Reactive mirror of chatListRef so the inline Chats tab re-renders on change.
+  const [chatList, setChatList] = useState<PersistedChat[]>([]);
   const chatListRef = useRef<PersistedChat[]>([]);
   const appStateRef = useRef(AppState.currentState);
+
+  // Update both the synchronous ref (read inside callbacks to avoid stale
+  // closures) and the reactive state (drives the inline Chats list) together.
+  const commitChatList = useCallback((next: PersistedChat[]) => {
+    chatListRef.current = next;
+    setChatList(next);
+  }, []);
 
   const spriteName = name ?? '';
   const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [transcriptionProvider, setTranscriptionProvider] =
     useState<TranscriptionProvider>('sprite');
+
+  // Scan the sprite for CLI-started (console) Claude/Codex conversations so they
+  // show up alongside the phone's own chats. Best-effort: failure just leaves the
+  // list showing local chats.
+  const loadRemoteSessions = useCallback(async () => {
+    if (!spriteName) return;
+    try {
+      const [claudeList, codexList] = await Promise.all([
+        listClaudeSessions(spriteName),
+        listCodexSessions(spriteName),
+      ]);
+      setRemoteSessions([
+        ...claudeList.map((s) => ({ ...s, provider: 'claude' as const })),
+        ...codexList.map((s) => ({ ...s, provider: 'codex' as const })),
+      ]);
+    } catch {
+      // Non-fatal — keep whatever we already have.
+    }
+  }, [spriteName]);
+
+  const handleRefreshRemote = useCallback(async () => {
+    setRemoteRefreshing(true);
+    await loadRemoteSessions();
+    setRemoteRefreshing(false);
+  }, [loadRemoteSessions]);
+
+  // Remote sessions already mirrored by a local chat (same resume id) would show
+  // twice — drop those; the local chat is the richer, editable representation.
+  const unlinkedRemoteSessions = useMemo(() => {
+    const linked = new Set<string>();
+    for (const c of chatList) {
+      if (c.claudeSessionId) linked.add(c.claudeSessionId);
+      if (c.codexSessionId) linked.add(c.codexSessionId);
+    }
+    return remoteSessions.filter((s) => !linked.has(s.id));
+  }, [chatList, remoteSessions]);
+
+  // Refresh the computer-started conversations whenever the list is on screen.
+  useEffect(() => {
+    if (tab === 'chats' && !chatOpen) loadRemoteSessions();
+  }, [tab, chatOpen, loadRemoteSessions]);
 
   const chat = useChat({
     spriteName,
@@ -115,7 +180,7 @@ export default function SpriteDetailScreen() {
             }
           : chatMeta
       );
-      chatListRef.current = updated;
+      commitChatList(updated);
       chatRepository.updateSessionIds(chatId, {
         claudeSessionId: sessionIds.claudeSessionId,
         codexSessionId: sessionIds.codexSessionId,
@@ -127,7 +192,7 @@ export default function SpriteDetailScreen() {
       const updated = chatListRef.current.map((chatMeta) =>
         chatMeta.id === chatId ? { ...chatMeta, activeRun: nextActiveRun } : chatMeta
       );
-      chatListRef.current = updated;
+      commitChatList(updated);
       chatRepository.setActiveRun(chatId, nextActiveRun ?? undefined);
     },
   });
@@ -158,8 +223,10 @@ export default function SpriteDetailScreen() {
       setTranscriptionProvider(normalizeTranscriptionProvider(savedTranscriptionProvider));
 
       if (chats.length > 0) {
-        chatListRef.current = chats;
-        // Resume the most recently used session so reopening lands you right back in it.
+        commitChatList(chats);
+        // Point at the most recently used session so the hook can reattach to a
+        // still-running exec in the background — but stay on the list (chatOpen
+        // is false) so opening a sprite lands on the conversation list.
         const sorted = [...chats].sort((a, b) => b.lastUsed - a.lastUsed);
         const current = sorted[0];
         setChatId(current.id);
@@ -184,7 +251,7 @@ export default function SpriteDetailScreen() {
           lastSessionComplete: true,
           processedEventUUIDs: [],
         };
-        chatListRef.current = [firstChat];
+        commitChatList([firstChat]);
         await chatRepository.upsert(firstChat);
         setChatId(firstChat.id);
         setChatName('Session 1');
@@ -196,7 +263,7 @@ export default function SpriteDetailScreen() {
       }
     })();
     return () => { mounted = false; };
-  }, [spriteName]);
+  }, [spriteName, commitChatList]);
 
   // Load sprite info
   useEffect(() => {
@@ -267,14 +334,14 @@ export default function SpriteDetailScreen() {
             ? { ...c, lastUsed: Date.now(), firstMessagePreview: preview || c.firstMessagePreview }
             : c
         );
-        chatListRef.current = updated;
+        commitChatList(updated);
         chatRepository.patch(chatId, {
           lastUsed: Date.now(),
           firstMessagePreview: preview || undefined,
         });
       }
     }
-  }, [chat.messages.length, chatId]);
+  }, [chat.messages.length, chatId, commitChatList]);
 
   const handleSend = () => {
     chat.sendMessage();
@@ -305,8 +372,7 @@ export default function SpriteDetailScreen() {
       lastSessionComplete: true,
       processedEventUUIDs: [],
     };
-    const updated = [...chats, newChat];
-    chatListRef.current = updated;
+    commitChatList([...chats, newChat]);
     await chatRepository.upsert(newChat);
     setChatId(newChat.id);
     setChatName(`Session ${newNumber}`);
@@ -317,7 +383,10 @@ export default function SpriteDetailScreen() {
     setActiveRun(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
-  }, [chat.detachStream, chat.isStreaming, spriteName]);
+    // Adding a conversation opens it.
+    setTab('chats');
+    setChatOpen(true);
+  }, [chat.detachStream, chat.isStreaming, spriteName, commitChatList]);
 
   // Change the directory of the *current* session (only allowed before its first message).
   const updateCurrentDirectory = useCallback(async (config: NewSessionConfig) => {
@@ -326,16 +395,17 @@ export default function SpriteDetailScreen() {
     const updated = chatListRef.current.map((c) =>
       c.id === chatId ? { ...c, workingDirectory: dir } : c
     );
-    chatListRef.current = updated;
+    commitChatList(updated);
     await chatRepository.patch(chatId, { workingDirectory: dir });
     setSessionSheetMode(null);
-  }, [chatId, spriteName]);
+  }, [chatId, commitChatList]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
     const latestChat = chatListRef.current.find((c) => c.id === selectedChat.id) ?? selectedChat;
     if (latestChat.id === chatId) {
       setReloadNonce((n) => n + 1);
       setChatListVisible(false);
+      setChatOpen(true);
       return;
     }
     // One useChat instance is shared across sessions, so detach any in-flight stream
@@ -353,10 +423,35 @@ export default function SpriteDetailScreen() {
     const updated = chatListRef.current.map((c) =>
       c.id === latestChat.id ? { ...c, lastUsed: Date.now() } : c
     );
-    chatListRef.current = updated;
+    commitChatList(updated);
     chatRepository.patch(latestChat.id, { lastUsed: Date.now() });
     setChatListVisible(false);
-  }, [chat.detachStream, chat.isStreaming, chatId, spriteName, defaultDirectory]);
+    setChatOpen(true);
+  }, [chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
+
+  const handleDeleteChat = useCallback((target: PersistedChat) => {
+    const remaining = chatListRef.current.filter((c) => c.id !== target.id);
+    commitChatList(remaining);
+    chatRepository.remove(target.id);
+    if (target.id !== chatId) return;
+    // The current chat was deleted; detach any live stream and fall back to the
+    // most recent remaining conversation (or nothing, which shows the empty list).
+    if (chat.isStreaming) chat.detachStream();
+    if (remaining.length > 0) {
+      const next = [...remaining].sort((a, b) => b.lastUsed - a.lastUsed)[0];
+      setChatId(next.id);
+      setChatName(next.customName ?? `Session ${next.chatNumber}`);
+      setChatProvider(normalizeProvider(next.provider));
+      setClaudeSessionId(next.claudeSessionId);
+      setCodexSessionId(next.codexSessionId);
+      setActiveRun(next.activeRun);
+      setWorkingDirectory(next.workingDirectory || defaultDirectory);
+      setReloadNonce((n) => n + 1);
+    } else {
+      setChatId('');
+    }
+    setChatOpen(false);
+  }, [chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
 
   // Resume a session discovered on the sprite (its on-disk transcript).
   // Reuses an existing local chat bound to the same session id, or creates one,
@@ -405,7 +500,7 @@ export default function SpriteDetailScreen() {
       const updated = existing
         ? chats.map((c) => (c.id === target.id ? target : c))
         : [...chats, target];
-      chatListRef.current = updated;
+      commitChatList(updated);
       await chatRepository.upsert(target);
       await chatRepository.setMessages(target.id, messages);
 
@@ -417,11 +512,32 @@ export default function SpriteDetailScreen() {
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
       setChatId(target.id);
       setSessionBrowserVisible(false);
-      setTab('chat');
+      setTab('chats');
+      setChatOpen(true);
       // Force a reload even if chatId didn't change (resuming the open chat).
       setReloadNonce((n) => n + 1);
     },
-    [chat.detachStream, chat.isStreaming, defaultDirectory, spriteName]
+    [chat.detachStream, chat.isStreaming, defaultDirectory, spriteName, commitChatList]
+  );
+
+  // Tapping a computer-started conversation in the list: pull its transcript, then
+  // resume it in the chat UI (same path as the session browser's "Continue").
+  const handleOpenRemoteSession = useCallback(
+    async (session: AgentSessionSummary) => {
+      setRemoteBusyId(session.id);
+      try {
+        const messages =
+          session.provider === 'codex'
+            ? await readCodexSessionMessages(spriteName, session.id)
+            : await readClaudeSessionMessages(spriteName, session.id);
+        await handleResumeSession(session, messages);
+      } catch (e: any) {
+        Alert.alert('Could not open session', e?.message ?? 'Failed to load transcript.');
+      } finally {
+        setRemoteBusyId(undefined);
+      }
+    },
+    [spriteName, handleResumeSession]
   );
 
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
@@ -430,9 +546,9 @@ export default function SpriteDetailScreen() {
     const updated = chatListRef.current.map((c) =>
       c.id === chatId ? { ...c, provider: nextProvider } : c
     );
-    chatListRef.current = updated;
+    commitChatList(updated);
     chatRepository.patch(chatId, { provider: nextProvider });
-  }, [chat.isStreaming, chatId, isProviderLocked, spriteName]);
+  }, [chat.isStreaming, chatId, isProviderLocked, commitChatList]);
 
   useEffect(() => {
     if (!chat.codexAuthIssue) return;
@@ -467,94 +583,95 @@ export default function SpriteDetailScreen() {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
   }, [chat.setInputText]);
 
-  // Active tool label for the chat tab
+  // Active tool label for the chat view
   const activeToolLabel = chat.isStreaming
     ? getActiveToolLabel(chat.messages, workingDirectory)
     : undefined;
 
   const tabItems: { key: Tab; label: string }[] = [
-    { key: 'overview', label: 'Overview' },
-    { key: 'chat', label: 'Chat' },
-    { key: 'checkpoints', label: 'Checkpoints' },
+    { key: 'options', label: 'Options' },
+    { key: 'chats', label: 'Chats' },
+    { key: 'filesystem', label: 'Files' },
+    { key: 'settings', label: 'Settings' },
   ];
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12}>
-          <Text style={[styles.backButton, { color: colors.tint }]}>&#x2039; Back</Text>
+        <Pressable onPress={() => (chatOpen ? setChatOpen(false) : router.back())} hitSlop={12}>
+          <Text style={[styles.backButton, { color: colors.tint }]}>
+            &#x2039; {chatOpen ? 'Chats' : 'Back'}
+          </Text>
         </Pressable>
         <View style={styles.headerCenter}>
-          <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
-            {spriteName}
-          </Text>
-          {sprite && tab !== 'chat' && (
-            <View style={styles.statusRow}>
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: statusColor(sprite.status) },
-                ]}
-              />
-              <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-                {statusDisplayName(sprite.status)}
-              </Text>
-            </View>
-          )}
-          {tab === 'chat' && (
-            <Pressable onPress={() => setChatListVisible(true)} hitSlop={6}>
-              <Text style={[styles.chatSubtitle, { color: colors.tint }]} numberOfLines={1}>
-                {chatName} ▾ <Text style={{ color: colors.textSecondary }}>· {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}</Text>
-              </Text>
-            </Pressable>
-          )}
-        </View>
-        <View style={styles.headerRight}>
-          {tab === 'chat' && (
+          {chatOpen ? (
             <>
-              <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
-                <Text style={[styles.headerActionNew, { color: colors.tint }]}>＋ New</Text>
+              <Pressable onPress={() => setChatListVisible(true)} hitSlop={6}>
+                <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
+                  {chatName} ▾
+                </Text>
               </Pressable>
-              <Pressable onPress={() => setQuickBashVisible(true)} hitSlop={8}>
-                <Text style={[styles.headerAction, { color: colors.tint }]}>&#x26A1;</Text>
-              </Pressable>
-              <Pressable onPress={() => setSessionBrowserVisible(true)} hitSlop={8}>
-                <Text style={[styles.headerAction, { color: colors.tint }]}>&#x1F553;</Text>
-              </Pressable>
-              <Pressable onPress={() => setChatListVisible(true)} hitSlop={8}>
-                <Text style={[styles.headerAction, { color: colors.tint }]}>&#x2630;</Text>
-              </Pressable>
+              <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
+                {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
+                {spriteName}
+              </Text>
+              {sprite && (
+                <View style={styles.statusRow}>
+                  <View
+                    style={[styles.statusDot, { backgroundColor: statusColor(sprite.status) }]}
+                  />
+                  <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+                    {statusDisplayName(sprite.status)}
+                  </Text>
+                </View>
+              )}
             </>
           )}
         </View>
-      </View>
-
-      {/* Tab Bar */}
-      <View style={[styles.tabBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
-        {tabItems.map((t) => (
-          <Pressable
-            key={t.key}
-            style={[
-              styles.tab,
-              tab === t.key && { borderBottomColor: colors.tint, borderBottomWidth: 2 },
-            ]}
-            onPress={() => setTab(t.key)}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                { color: tab === t.key ? colors.tint : colors.textSecondary },
-              ]}
-            >
-              {t.label}
-            </Text>
+        <View style={styles.headerRight}>
+          <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
+            {chatOpen ? (
+              <Text style={[styles.headerActionNew, { color: colors.tint }]}>＋ New</Text>
+            ) : (
+              <Text style={[styles.headerActionAdd, { color: colors.tint }]}>＋</Text>
+            )}
           </Pressable>
-        ))}
+        </View>
       </View>
 
-      {/* Active tool label below tab bar (chat tab only) */}
-      {tab === 'chat' && activeToolLabel && (
+      {/* Tab Bar (hub only) */}
+      {!chatOpen && (
+        <View style={[styles.tabBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
+          {tabItems.map((t) => (
+            <Pressable
+              key={t.key}
+              style={[
+                styles.tab,
+                tab === t.key && { borderBottomColor: colors.tint, borderBottomWidth: 2 },
+              ]}
+              onPress={() => setTab(t.key)}
+            >
+              <Text
+                style={[
+                  styles.tabText,
+                  { color: tab === t.key ? colors.tint : colors.textSecondary },
+                ]}
+              >
+                {t.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
+      {/* Active tool label below header (chat view only) */}
+      {chatOpen && activeToolLabel && (
         <View style={[styles.activeToolBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
           <ActivityIndicator size="small" color={colors.tint} />
           <Text style={[styles.activeToolText, { color: colors.textSecondary }]} numberOfLines={1}>
@@ -563,20 +680,8 @@ export default function SpriteDetailScreen() {
         </View>
       )}
 
-      {/* Tab Content */}
-      {tab === 'overview' && (
-        <OverviewTab
-          sprite={sprite}
-          isLoading={isLoadingSprite}
-          spriteName={spriteName}
-          isActive={tab === 'overview'}
-          onSpriteUpdated={setSprite}
-          workingDirectory={workingDirectory}
-          onBrowseSessions={() => setSessionBrowserVisible(true)}
-        />
-      )}
-
-      {tab === 'chat' && (
+      {/* Content */}
+      {chatOpen ? (
         <KeyboardAvoidingView
           style={styles.flex}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -670,16 +775,54 @@ export default function SpriteDetailScreen() {
             onTranscriptionProviderChange={handleTranscriptionProviderChange}
           />
         </KeyboardAvoidingView>
+      ) : (
+        <>
+          {tab === 'chats' && (
+            <ChatList
+              chats={chatList}
+              currentChatId={chatId}
+              onSelectChat={handleSelectChat}
+              onDeleteChat={handleDeleteChat}
+              remoteSessions={unlinkedRemoteSessions}
+              onSelectRemote={handleOpenRemoteSession}
+              remoteBusyId={remoteBusyId}
+              onRefresh={handleRefreshRemote}
+              refreshing={remoteRefreshing}
+            />
+          )}
+
+          {tab === 'options' && (
+            <OptionsTab
+              spriteName={spriteName}
+              workingDirectory={workingDirectory}
+              onQuickBash={() => setQuickBashVisible(true)}
+              onBrowseSessions={() => setSessionBrowserVisible(true)}
+            />
+          )}
+
+          {tab === 'filesystem' && (
+            <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
+          )}
+
+          {tab === 'settings' && (
+            <SettingsTab
+              sprite={sprite}
+              isLoading={isLoadingSprite}
+              spriteName={spriteName}
+              workingDirectory={workingDirectory}
+              isActive={tab === 'settings'}
+              onSpriteUpdated={setSprite}
+            />
+          )}
+        </>
       )}
 
-      {tab === 'checkpoints' && <CheckpointsList spriteName={spriteName} />}
-
-      {/* Chat List Sheet */}
+      {/* Chat List Sheet (in-chat quick switch) */}
       {chatListVisible && (
         <ChatListSheet
           spriteName={spriteName}
           currentChatId={chatId}
-          chats={chatListRef.current}
+          chats={chatList}
           onSelectChat={handleSelectChat}
           onNewChat={() => {
             setChatListVisible(false);
@@ -723,40 +866,136 @@ export default function SpriteDetailScreen() {
   );
 }
 
-// Overview Tab Component
-function OverviewTab({
+/** A tappable card row used across the Options and Settings tabs. */
+function ConnectRow({
+  title,
+  subtitle,
+  onPress,
+  muted,
+}: {
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+  muted?: boolean;
+}) {
+  const colors = useTheme();
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.connectRow,
+        { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+      ]}
+      onPress={onPress}
+    >
+      <View style={styles.connectRowText}>
+        <Text style={[styles.connectTitle, { color: muted ? colors.textSecondary : colors.text }]}>
+          {title}
+        </Text>
+        <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>{subtitle}</Text>
+      </View>
+      <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
+    </Pressable>
+  );
+}
+
+// Options Tab — terminals, fast bash, and resuming previous sessions.
+function OptionsTab({
+  spriteName,
+  workingDirectory,
+  onQuickBash,
+  onBrowseSessions,
+}: {
+  spriteName: string;
+  workingDirectory: string;
+  onQuickBash: () => void;
+  onBrowseSessions: () => void;
+}) {
+  const colors = useTheme();
+  return (
+    <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>QUICK ACTIONS</Text>
+      <ConnectRow
+        title="⚡ Fast bash exec"
+        subtitle="Run a one-off shell command on the sprite and drop its output into the chat input."
+        onPress={onQuickBash}
+      />
+      <ConnectRow
+        title="Connect to a previous session"
+        subtitle="Browse Claude and Codex transcripts on this sprite and resume one in the native chat UI."
+        onPress={onBrowseSessions}
+      />
+
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>LIVE TERMINALS</Text>
+      <ConnectRow
+        title="Stream terminal (next-term)"
+        subtitle="Experimental renderer using the vendored next-term engine over the same WebSocket TTY."
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/exec-poc',
+            params: { name: spriteName, cwd: workingDirectory, engine: 'next-term' },
+          })
+        }
+      />
+      <ConnectRow
+        title="Stream terminal"
+        subtitle="Real TTY over WebSocket. Run anything — including `claude --resume` — and watch the live TUI."
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/exec-poc',
+            params: { name: spriteName, cwd: workingDirectory },
+          })
+        }
+      />
+      <ConnectRow
+        title="Web Terminal (ttyd) · legacy"
+        subtitle="Installs & starts ttyd in the sprite and opens it in a WebView. Makes the sprite URL public."
+        muted
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/ttyd-terminal',
+            params: { name: spriteName, cwd: workingDirectory },
+          })
+        }
+      />
+    </ScrollView>
+  );
+}
+
+type SettingsView = 'menu' | 'checkpoints' | 'accounts';
+
+// Settings Tab — checkpoints, accounts, sprite info, and delete. A lightweight
+// sub-view switch keeps each nested scroller (CheckpointsList / SpriteAccountsTab)
+// isolated and leaves room for more settings later.
+function SettingsTab({
   sprite,
   isLoading,
   spriteName,
+  workingDirectory,
   isActive,
   onSpriteUpdated,
-  workingDirectory,
-  onBrowseSessions,
 }: {
   sprite: Sprite | null;
   isLoading: boolean;
   spriteName: string;
+  workingDirectory: string;
   isActive: boolean;
   onSpriteUpdated: (sprite: Sprite) => void;
-  workingDirectory: string;
-  onBrowseSessions: () => void;
 }) {
   const colors = useTheme();
+  const [view, setView] = useState<SettingsView>('menu');
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Poll sprite status every 5 seconds while on overview tab
+  // Poll sprite status every 5 seconds while the Settings menu is showing.
   useEffect(() => {
-    if (!isActive) return;
-
+    if (!isActive || view !== 'menu') return;
     const interval = setInterval(async () => {
       try {
         const s = await api.getSprite(spriteName);
         onSpriteUpdated(s);
       } catch {}
     }, 5000);
-
     return () => clearInterval(interval);
-  }, [isActive, spriteName, onSpriteUpdated]);
+  }, [isActive, view, spriteName, onSpriteUpdated]);
 
   const handleDelete = () => {
     Alert.alert(
@@ -782,6 +1021,22 @@ function OverviewTab({
     );
   };
 
+  if (view === 'checkpoints') {
+    return (
+      <SettingsSubView title="Checkpoints" onBack={() => setView('menu')}>
+        <CheckpointsList spriteName={spriteName} />
+      </SettingsSubView>
+    );
+  }
+
+  if (view === 'accounts') {
+    return (
+      <SettingsSubView title="Accounts" onBack={() => setView('menu')}>
+        <SpriteAccountsTab spriteName={spriteName} isActive={isActive} />
+      </SettingsSubView>
+    );
+  }
+
   if (isLoading) {
     return (
       <View style={styles.centerView}>
@@ -790,145 +1045,57 @@ function OverviewTab({
     );
   }
 
-  if (!sprite) {
-    return (
-      <View style={styles.centerView}>
-        <Text style={[styles.errorBarText, { color: colors.destructive }]}>
-          Failed to load sprite info
-        </Text>
-      </View>
+  const infoRows: { label: string; value: string }[] = [];
+  if (sprite) {
+    infoRows.push(
+      { label: 'Name', value: sprite.name },
+      { label: 'Status', value: statusDisplayName(sprite.status) },
+      { label: 'ID', value: sprite.id }
     );
+    if (sprite.url) infoRows.push({ label: 'URL', value: sprite.url });
+    if (sprite.created_at) {
+      infoRows.push({ label: 'Created', value: new Date(sprite.created_at).toLocaleString() });
+    }
+    if (sprite.url_settings) infoRows.push({ label: 'Auth', value: sprite.url_settings.auth });
   }
-
-  const infoRows: { label: string; value: string }[] = [
-    { label: 'Name', value: sprite.name },
-    { label: 'Status', value: statusDisplayName(sprite.status) },
-    { label: 'ID', value: sprite.id },
-  ];
-  if (sprite.url) {
-    infoRows.push({ label: 'URL', value: sprite.url });
-  }
-  if (sprite.created_at) {
-    infoRows.push({
-      label: 'Created',
-      value: new Date(sprite.created_at).toLocaleString(),
-    });
-  }
-  if (sprite.url_settings) {
-    infoRows.push({ label: 'Auth', value: sprite.url_settings.auth });
-  }
-  // Working directory row
   infoRows.push({ label: 'Work Dir', value: workingDirectory });
 
   return (
-    <ScrollView style={styles.overviewContainer} contentContainerStyle={styles.overviewContent}>
-      {infoRows.map((row) => (
-        <View
-          key={row.label}
-          style={[styles.infoRow, { borderBottomColor: colors.border }]}
-        >
-          <Text style={[styles.infoLabel, { color: colors.textSecondary }]}>
-            {row.label}
-          </Text>
-          <Text
-            style={[styles.infoValue, { color: colors.text }]}
-            numberOfLines={1}
-            selectable
-          >
-            {row.value}
-          </Text>
-        </View>
-      ))}
+    <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>CONFIGURATION</Text>
+      <ConnectRow
+        title="Checkpoints"
+        subtitle="Create and restore filesystem checkpoints for this sprite."
+        onPress={() => setView('checkpoints')}
+      />
+      <ConnectRow
+        title="Accounts"
+        subtitle="Connect Claude, Codex, and GitHub accounts for this sprite."
+        onPress={() => setView('accounts')}
+      />
 
-      {/* More ways to connect */}
-      <Text style={[styles.connectHeader, { color: colors.textSecondary }]}>
-        SESSIONS &amp; TERMINALS
-      </Text>
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectRow,
-          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
-        ]}
-        onPress={onBrowseSessions}
-      >
-        <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>Resume a chat session</Text>
-          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Browse Claude and Codex transcripts on this sprite, view the full history,
-            and continue it in the native chat UI.
-          </Text>
-        </View>
-        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
-      </Pressable>
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectRow,
-          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
-        ]}
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/exec-poc',
-            params: { name: spriteName, cwd: workingDirectory, engine: 'next-term' },
-          })
-        }
-      >
-        <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>
-            Stream terminal (next-term)
-          </Text>
-          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Experimental renderer using the vendored next-term engine with the same
-            WebSocket TTY connection and working directory.
-          </Text>
-        </View>
-        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
-      </Pressable>
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectRow,
-          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
-        ]}
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/exec-poc',
-            params: { name: spriteName, cwd: workingDirectory },
-          })
-        }
-      >
-        <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.text }]}>Stream terminal</Text>
-          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Real TTY over WebSocket. Run anything — including `claude --resume` — and
-            watch the live TUI. Best for answering interactive prompts.
-          </Text>
-        </View>
-        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
-      </Pressable>
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectRow,
-          { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
-        ]}
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/ttyd-terminal',
-            params: { name: spriteName, cwd: workingDirectory },
-          })
-        }
-      >
-        <View style={styles.connectRowText}>
-          <Text style={[styles.connectTitle, { color: colors.textSecondary }]}>
-            Web Terminal (ttyd) · legacy
-          </Text>
-          <Text style={[styles.connectSubtitle, { color: colors.textSecondary }]}>
-            Installs &amp; starts ttyd in the sprite and opens it in a WebView. Makes the
-            sprite URL public — superseded by the options above.
-          </Text>
-        </View>
-        <Text style={[styles.connectChevron, { color: colors.tint }]}>›</Text>
-      </Pressable>
+      {!sprite ? (
+        <Text style={[styles.errorBarText, { color: colors.destructive, marginTop: Spacing.lg }]}>
+          Failed to load sprite info
+        </Text>
+      ) : (
+        <>
+          <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>SPRITE INFO</Text>
+          {infoRows.map((row) => (
+            <View key={row.label} style={[styles.infoRow, { borderBottomColor: colors.border }]}>
+              <Text style={[styles.infoLabel, { color: colors.textSecondary }]}>{row.label}</Text>
+              <Text
+                style={[styles.infoValue, { color: colors.text }]}
+                numberOfLines={1}
+                selectable
+              >
+                {row.value}
+              </Text>
+            </View>
+          ))}
+        </>
+      )}
 
-      {/* Delete Sprite button */}
       <View style={styles.deleteButtonContainer}>
         <Pressable
           style={[styles.deleteButton, { borderColor: colors.destructive }]}
@@ -945,6 +1112,31 @@ function OverviewTab({
         </Pressable>
       </View>
     </ScrollView>
+  );
+}
+
+// Full-height settings sub-screen with an in-tab back to the menu.
+function SettingsSubView({
+  title,
+  onBack,
+  children,
+}: {
+  title: string;
+  onBack: () => void;
+  children: React.ReactNode;
+}) {
+  const colors = useTheme();
+  return (
+    <View style={styles.flex}>
+      <View style={[styles.subHeader, { borderBottomColor: colors.border }]}>
+        <Pressable onPress={onBack} hitSlop={12}>
+          <Text style={[styles.subBack, { color: colors.tint }]}>&#x2039; Settings</Text>
+        </Pressable>
+        <Text style={[styles.subTitle, { color: colors.text }]}>{title}</Text>
+        <View style={styles.subHeaderSpacer} />
+      </View>
+      <View style={styles.flex}>{children}</View>
+    </View>
   );
 }
 
@@ -965,7 +1157,7 @@ const styles = StyleSheet.create({
   backButton: {
     fontSize: FontSize.xl,
     fontWeight: '400',
-    width: 50,
+    width: 70,
   },
   headerCenter: {
     flex: 1,
@@ -984,9 +1176,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     alignItems: 'center',
     gap: Spacing.sm,
+    width: 70,
   },
-  headerAction: {
-    fontSize: FontSize.lg,
+  headerActionAdd: {
+    fontSize: 26,
+    fontWeight: '400',
   },
   headerActionNew: {
     fontSize: FontSize.sm,
@@ -1088,10 +1282,10 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     flexShrink: 1,
   },
-  overviewContainer: {
+  tabScroll: {
     flex: 1,
   },
-  overviewContent: {
+  tabScrollContent: {
     paddingTop: Spacing.sm,
     paddingBottom: Spacing.xxl,
   },
@@ -1110,11 +1304,11 @@ const styles = StyleSheet.create({
     flex: 1,
     fontWeight: '500',
   },
-  connectHeader: {
+  sectionHeader: {
     fontSize: FontSize.xs,
     fontWeight: '600',
     letterSpacing: 0.5,
-    marginTop: Spacing.xxl,
+    marginTop: Spacing.xl,
     marginBottom: Spacing.sm,
     marginHorizontal: Spacing.lg,
   },
@@ -1160,5 +1354,25 @@ const styles = StyleSheet.create({
   deleteButtonText: {
     fontSize: FontSize.md,
     fontWeight: '600',
+  },
+  subHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  subBack: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    width: 90,
+  },
+  subTitle: {
+    fontSize: FontSize.md,
+    fontWeight: '700',
+  },
+  subHeaderSpacer: {
+    width: 90,
   },
 });
