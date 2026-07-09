@@ -785,6 +785,35 @@ export default function SpriteDetailScreen() {
               </Text>
             </View>
           )}
+          {chat.queuedPrompts.length > 0 && (
+            <View style={styles.queuedBar}>
+              {chat.queuedPrompts.map((q) => (
+                <View
+                  key={q.id}
+                  style={[
+                    styles.queuedChip,
+                    { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                  ]}
+                >
+                  <Pressable
+                    style={styles.queuedChipBody}
+                    onPress={() => chat.sendQueuedNow(q.id)}
+                    disabled={chat.isStreaming}
+                  >
+                    <Text
+                      style={[styles.queuedChipText, { color: colors.textSecondary }]}
+                      numberOfLines={1}
+                    >
+                      ⏳ {q.text}
+                    </Text>
+                  </Pressable>
+                  <Pressable hitSlop={8} onPress={() => chat.removeQueuedPrompt(q.id)}>
+                    <Text style={[styles.queuedChipRemove, { color: colors.textSecondary }]}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
           {chat.errorMessage && (
             <View style={[styles.errorBar, { backgroundColor: colors.destructive + '15' }]}>
               <Text style={[styles.errorBarText, { color: colors.destructive }]}>
@@ -1325,6 +1354,31 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   retryButtonText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  queuedBar: {
+    paddingHorizontal: Spacing.lg,
+    gap: Spacing.xs,
+    marginBottom: Spacing.xs,
+  },
+  queuedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    gap: Spacing.sm,
+  },
+  queuedChipBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  queuedChipText: {
+    fontSize: FontSize.sm,
+  },
+  queuedChipRemove: {
     fontSize: FontSize.sm,
     fontWeight: '600',
   },

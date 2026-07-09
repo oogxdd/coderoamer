@@ -59,6 +59,12 @@ interface FailedSend {
   assistantMessageId: string;
 }
 
+/** A message written while a turn was in flight, waiting to be sent. */
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+}
+
 interface UseChatOptions {
   spriteName: string;
   chatId: string;
@@ -96,6 +102,8 @@ export function useChat(options: UseChatOptions) {
   const [inputText, setInputText] = useState('');
   const [codexAuthIssue, setCodexAuthIssue] = useState<string | undefined>();
   const [failedSend, setFailedSendState] = useState<FailedSend | undefined>();
+  // In-memory only, per chat: queued messages don't survive app restarts.
+  const [queuedPrompts, setQueuedPromptsState] = useState<QueuedPrompt[]>([]);
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
@@ -124,11 +132,30 @@ export function useChat(options: UseChatOptions) {
   const reconnectAttemptRef = useRef(0);
   const attachToRunRef = useRef<(run: ActiveChatRun, loadRequest: number) => void>(() => {});
   const failedSendRef = useRef<FailedSend | undefined>(undefined);
+  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
+  const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
 
   const setFailedSend = useCallback((value: FailedSend | undefined) => {
     failedSendRef.current = value;
     setFailedSendState(value);
   }, []);
+
+  const setQueuedPrompts = useCallback((value: QueuedPrompt[]) => {
+    queuedPromptsRef.current = value;
+    setQueuedPromptsState(value);
+  }, []);
+
+  /** Fire the next queued message once the chat is fully idle again. */
+  const maybeSendNextQueued = useCallback(() => {
+    if (queuedPromptsRef.current.length === 0) return;
+    if (statusRef.current !== 'idle' || activeRunRef.current) return;
+    const [next, ...rest] = queuedPromptsRef.current;
+    setQueuedPrompts(rest);
+    // Defer one tick so the finished turn's state fully settles first.
+    setTimeout(() => {
+      sendMessageRef.current(next.text);
+    }, 0);
+  }, [setQueuedPrompts]);
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -268,7 +295,12 @@ export function useChat(options: UseChatOptions) {
 
   /** Clear all active-turn state and pull the final on-disk transcript. */
   const finishActiveRun = useCallback(
-    async (activeRun: ActiveChatRun, loadRequest: number, setIdle: boolean) => {
+    async (
+      activeRun: ActiveChatRun,
+      loadRequest: number,
+      setIdle: boolean,
+      opts?: { autoSendQueued?: boolean }
+    ) => {
       execSessionIdRef.current = undefined;
       activeUserMessageIdRef.current = undefined;
       activeAssistantMessageIdRef.current = undefined;
@@ -280,8 +312,9 @@ export function useChat(options: UseChatOptions) {
       await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current);
       await syncCodexTranscript(loadRequest, codexSessionIdRef.current);
       await persistMessages();
+      if (opts?.autoSendQueued) maybeSendNextQueued();
     },
-    [persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
+    [maybeSendNextQueued, persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
   );
 
   /**
@@ -321,7 +354,7 @@ export function useChat(options: UseChatOptions) {
 
         if (!sessions.some((s) => s.id === activeRun.execSessionId)) {
           debugChat('reconnect: run finished while away', provider, activeRun.execSessionId);
-          await finishActiveRun(activeRun, loadRequest, true);
+          await finishActiveRun(activeRun, loadRequest, true, { autoSendQueued: true });
           return;
         }
         attachToRunRef.current(activeRun, loadRequest);
@@ -411,7 +444,9 @@ export function useChat(options: UseChatOptions) {
           scheduleReconnect(activeRun, loadRequestRef.current);
           return;
         }
-        await finishActiveRun(activeRun, loadRequest, isCurrentStream);
+        await finishActiveRun(activeRun, loadRequest, isCurrentStream, {
+          autoSendQueued: agentTurnCompleteRef.current,
+        });
       }
     },
     [
@@ -446,6 +481,7 @@ export function useChat(options: UseChatOptions) {
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
       setFailedSend(undefined);
+      setQueuedPrompts([]);
       claudeSessionIdRef.current = options.initialClaudeSessionId;
       codexSessionIdRef.current = options.initialCodexSessionId;
       activeRunRef.current = options.initialActiveRun;
@@ -527,6 +563,7 @@ export function useChat(options: UseChatOptions) {
     setCodexSessionId,
     setActiveRun,
     setFailedSend,
+    setQueuedPrompts,
     syncClaudeTranscript,
     syncCodexTranscript,
   ]);
@@ -1401,9 +1438,11 @@ export function useChat(options: UseChatOptions) {
         assistantTextSeenRef.current = false;
         if (isCurrentStream) setStatusTracked('idle');
         await persistMessages();
+        if (agentTurnCompleteRef.current && !sendError) maybeSendNextQueued();
       }
     },
     [
+      maybeSendNextQueued,
       persistMessages,
       processServiceEvent,
       provider,
@@ -1421,14 +1460,16 @@ export function useChat(options: UseChatOptions) {
 
   const sendMessage = useCallback(
     async (text?: string) => {
-      if (statusRef.current !== 'idle') return;
-      if (activeRunRef.current) {
-        loadSession();
-        return;
-      }
-
       const prompt = (text ?? inputText).trim();
       if (!prompt) return;
+
+      if (statusRef.current !== 'idle' || activeRunRef.current) {
+        // A turn is in flight — queue the message; it auto-sends when the
+        // current turn completes.
+        if (!text) setInputText('');
+        setQueuedPrompts([...queuedPromptsRef.current, { id: makeId(), text: prompt }]);
+        return;
+      }
 
       if (!text) setInputText('');
 
@@ -1455,7 +1496,27 @@ export function useChat(options: UseChatOptions) {
       await chatRepository.setMessages(chatId, pendingMessages);
       await executeTurn(prompt, userMessage.id, assistantMessage.id, historyBeforeSend);
     },
-    [chatId, executeTurn, inputText, loadSession, updateMessages]
+    [chatId, executeTurn, inputText, setQueuedPrompts, updateMessages]
+  );
+  sendMessageRef.current = sendMessage;
+
+  const removeQueuedPrompt = useCallback(
+    (id: string) => {
+      setQueuedPrompts(queuedPromptsRef.current.filter((q) => q.id !== id));
+    },
+    [setQueuedPrompts]
+  );
+
+  /** Send a queued message immediately (only when the chat is idle). */
+  const sendQueuedNow = useCallback(
+    (id: string) => {
+      if (statusRef.current !== 'idle' || activeRunRef.current) return;
+      const target = queuedPromptsRef.current.find((q) => q.id === id);
+      if (!target) return;
+      setQueuedPrompts(queuedPromptsRef.current.filter((q) => q.id !== id));
+      sendMessageRef.current(target.text);
+    },
+    [setQueuedPrompts]
   );
 
   /**
@@ -1540,5 +1601,8 @@ export function useChat(options: UseChatOptions) {
     clearCodexAuthIssue,
     failedSend,
     retryFailedSend,
+    queuedPrompts,
+    removeQueuedPrompt,
+    sendQueuedNow,
   };
 }
