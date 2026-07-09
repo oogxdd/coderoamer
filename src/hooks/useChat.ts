@@ -6,6 +6,7 @@ import {
   ChatStatus,
   ToolResultCard,
   ToolUseCard,
+  TurnOutcome,
   isCodexProvider,
   makeId,
 } from '@/models/chat';
@@ -527,6 +528,23 @@ export function useChat(options: UseChatOptions) {
     [provider, updateMessages]
   );
 
+  // A turn has exactly one outcome; replace rather than stack when a merge or
+  // replay already recorded one.
+  const appendTurnOutcome = useCallback(
+    (outcome: TurnOutcome) => {
+      updateActiveAssistant((newContent) => {
+        const existing = newContent.findIndex((item) => item.type === 'turnOutcome');
+        if (existing !== -1) {
+          newContent[existing] = { type: 'turnOutcome', outcome };
+        } else {
+          newContent.push({ type: 'turnOutcome', outcome });
+        }
+        return newContent;
+      });
+    },
+    [updateActiveAssistant]
+  );
+
   const handleClaudeEvent = useCallback(
     (event: ClaudeStreamEvent) => {
       switch (event.type) {
@@ -621,13 +639,25 @@ export function useChat(options: UseChatOptions) {
             debugChat('claude result event', 'len', res.result.length);
             ensureTurnAssistantText(res.result);
           }
+          appendTurnOutcome({
+            status:
+              res.subtype === 'error_max_turns'
+                ? 'maxTurns'
+                : res.is_error
+                  ? 'error'
+                  : 'success',
+            subtype: res.subtype,
+            durationMs: res.duration_ms,
+            numTurns: res.num_turns,
+            completedAt: Date.now(),
+          });
           break;
         }
         case 'unknown':
           break;
       }
     },
-    [appendAssistantText, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
+    [appendAssistantText, appendTurnOutcome, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
   );
 
   const handleCodexEvent = useCallback(
@@ -826,6 +856,13 @@ export function useChat(options: UseChatOptions) {
         case 'turnCompleted':
           debugChat('codex turn completed', elapsedSince(turnTimingRef.current.startedAt));
           agentTurnCompleteRef.current = true;
+          appendTurnOutcome({
+            status: 'success',
+            durationMs: turnTimingRef.current.startedAt
+              ? Date.now() - turnTimingRef.current.startedAt
+              : undefined,
+            completedAt: Date.now(),
+          });
           if (activeRunRef.current?.transport === 'codexAppServer') {
             const sessionId = execSessionIdRef.current ?? activeRunRef.current.execSessionId;
             if (sessionId) {
@@ -836,13 +873,14 @@ export function useChat(options: UseChatOptions) {
         case 'error':
           debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);
           setErrorMessage(event.message);
+          appendTurnOutcome({ status: 'error', completedAt: Date.now() });
           break;
         case 'unknown':
           debugChat('codex unknown event', elapsedSince(turnTimingRef.current.startedAt), codexEventDebugLabel(event));
           break;
       }
     },
-    [appendAssistantText, updateActiveAssistant, setCodexSessionId, spriteName]
+    [appendAssistantText, appendTurnOutcome, updateActiveAssistant, setCodexSessionId, spriteName]
   );
 
   const reportCodexAuthIssue = useCallback(
@@ -1247,12 +1285,22 @@ export function useChat(options: UseChatOptions) {
       abortRef.current.abort();
       abortRef.current = null;
     }
+    // Mark the aborted turn before the active-message refs are cleared.
+    const hadActiveTurn =
+      activeUserMessageIdRef.current !== undefined || activeRunRef.current !== undefined;
+    if (hadActiveTurn && !agentTurnCompleteRef.current) {
+      appendTurnOutcome({ status: 'interrupted', completedAt: Date.now() });
+    }
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
     setActiveRun(undefined);
     setStatusTracked('idle');
-  }, [setActiveRun, setStatusTracked, spriteName]);
+    // Persist after React has flushed the outcome into messagesRef.
+    setTimeout(() => {
+      persistMessages().catch(() => {});
+    }, 0);
+  }, [appendTurnOutcome, persistMessages, setActiveRun, setStatusTracked, spriteName]);
 
   const detachStream = useCallback(() => {
     const controller = abortRef.current;

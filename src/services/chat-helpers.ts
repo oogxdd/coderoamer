@@ -107,6 +107,7 @@ export function conversationSignature(messages: ChatMessage[]): string {
         if (c.type === 'reasoning') return `r:${c.text.length}`;
         if (c.type === 'toolUse') return `u:${c.card.toolUseId}`;
         if (c.type === 'toolResult') return `R:${c.card.toolUseId}`;
+        if (c.type === 'turnOutcome') return `o:${c.outcome.status}`;
         return c.type;
       });
       return `${m.role}|${parts.join('|')}`;
@@ -125,7 +126,19 @@ export function mergeTranscript(local: ChatMessage[], incoming: ChatMessage[]): 
   return incoming.map((msg, i) => {
     const localMsg = local[i];
     if (localMsg && localMsg.role === msg.role) {
-      return { ...msg, id: localMsg.id };
+      const merged: ChatMessage = { ...msg, id: localMsg.id };
+      // On-disk transcripts carry no result/outcome lines, so a merge would
+      // silently drop the turn-outcome footer the live stream recorded. Carry
+      // the local footer over when the incoming message has none.
+      if (msg.role === 'assistant' && !msg.content.some((c) => c.type === 'turnOutcome')) {
+        const localOutcome = [...localMsg.content]
+          .reverse()
+          .find((c) => c.type === 'turnOutcome');
+        if (localOutcome) {
+          merged.content = [...msg.content, localOutcome];
+        }
+      }
+      return merged;
     }
     return msg;
   });

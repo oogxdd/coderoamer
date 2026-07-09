@@ -354,6 +354,11 @@ export default function SpriteDetailScreen() {
     chat.sendMessage();
   };
 
+  // One-tap recovery when a turn ended on --max-turns.
+  const handleContinueTurn = useCallback(() => {
+    chat.sendMessage('Continue where you left off.');
+  }, [chat.sendMessage]);
+
   const handleTranscriptionProviderChange = useCallback(async (provider: TranscriptionProvider) => {
     setTranscriptionProvider(provider);
     await setSetting('transcriptionProvider', provider);
@@ -706,6 +711,8 @@ export default function SpriteDetailScreen() {
                   index === chat.messages.length - 1 &&
                   item.role === 'assistant'
                 }
+                showTurnActions={index === chat.messages.length - 1 && !chat.isStreaming}
+                onContinueTurn={handleContinueTurn}
               />
             )}
             keyExtractor={(item) => item.id}
