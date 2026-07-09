@@ -40,6 +40,28 @@ export function withSpriteTaskHeartbeat(command: string, taskName: string): stri
   ].join('; ');
 }
 
+/**
+ * Command that kills a chat turn's whole process group, located by the unique
+ * task-name marker in the bash wrapper's argv. `killExecSession` SIGTERMs the
+ * session leader (bash), but bash defers traps while a foreground command
+ * runs, so the agent process can survive a plain session kill. The pattern's
+ * first character is wrapped in a bracket class so the killer's own command
+ * line doesn't match itself.
+ */
+export function buildProcessGroupKillCommand(taskName: string): string {
+  const sanitized = safeTaskName(taskName);
+  if (!sanitized) return 'true';
+  const escaped = sanitized.replace(/\./g, '\\.');
+  const selfExcluding = `[${escaped[0]}]${escaped.slice(1)}`;
+  const pattern = shellQuote(selfExcluding);
+  return [
+    `PID=$(pgrep -f ${pattern} | head -n1)`,
+    `if [ -n "$PID" ]; then PGID=$(ps -o pgid= -p "$PID" | tr -d " ")`,
+    `if [ -n "$PGID" ]; then kill -TERM -- "-$PGID" 2>/dev/null || true; sleep 2; kill -KILL -- "-$PGID" 2>/dev/null || true; fi; fi`,
+    `true`,
+  ].join('; ');
+}
+
 export function classifyCodexAuthIssue(raw: string): string | undefined {
   const text = raw.toLowerCase();
   const matchesAuthIssue =

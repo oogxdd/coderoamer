@@ -30,6 +30,7 @@ import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
 import { getSetting } from '@/services/storage';
 import {
   buildFallbackPrompt,
+  buildProcessGroupKillCommand,
   classifyCodexAuthIssue,
   codexEventDebugLabel,
   compactDebugChunk,
@@ -1547,6 +1548,13 @@ export function useChat(options: UseChatOptions) {
     if (sessionId) {
       api.killExecSession(spriteName, sessionId).catch(() => {});
       execSessionIdRef.current = undefined;
+    }
+    // killExecSession SIGTERMs the bash wrapper, which defers its trap while
+    // the agent runs in the foreground — the agent itself can survive. Also
+    // kill the turn's whole process group, found via its task-name marker.
+    const taskName = activeRunRef.current?.taskName;
+    if (taskName) {
+      api.runExec(spriteName, buildProcessGroupKillCommand(taskName), 15).catch(() => {});
     }
     if (abortRef.current) {
       abortRef.current.abort();
