@@ -1,6 +1,12 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { ChatMessage, ChatContent, toolUseActivityLabel } from '@/models/chat';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
+import {
+  ChatMessage,
+  ChatContent,
+  TurnOutcome,
+  formatTurnDuration,
+  toolUseActivityLabel,
+} from '@/models/chat';
 import { UserBubble } from './UserBubble';
 import { AssistantMessage } from './AssistantMessage';
 import { ToolUseCardView } from './ToolUseCardView';
@@ -13,6 +19,9 @@ interface ChatMessageViewProps {
   message: ChatMessage;
   workingDirectory?: string;
   isCurrentlyStreaming?: boolean;
+  /** Show turn actions (e.g. Continue after max-turns) — last message only. */
+  showTurnActions?: boolean;
+  onContinueTurn?: () => void;
 }
 
 function getActiveToolLabel(
@@ -29,10 +38,65 @@ function getActiveToolLabel(
   return undefined;
 }
 
+/** Muted one-line footer describing how the turn ended. */
+function TurnOutcomeFooter({
+  outcome,
+  onContinue,
+}: {
+  outcome: TurnOutcome;
+  onContinue?: () => void;
+}) {
+  const colors = useTheme();
+  const duration = formatTurnDuration(outcome.durationMs);
+  const details = [
+    duration,
+    outcome.numTurns !== undefined ? `${outcome.numTurns} turns` : null,
+  ].filter(Boolean);
+  const suffix = details.length > 0 ? ` · ${details.join(' · ')}` : '';
+
+  let color: string = colors.textSecondary;
+  let label: string;
+  switch (outcome.status) {
+    case 'success':
+      label = `✓ Done${suffix}`;
+      break;
+    case 'maxTurns':
+      color = colors.warning;
+      label = `⚠ Stopped: max turns reached${suffix}`;
+      break;
+    case 'error':
+      color = colors.destructive;
+      label = `✕ Turn failed${outcome.subtype ? ` (${outcome.subtype})` : ''}${suffix}`;
+      break;
+    case 'interrupted':
+      label = '■ Interrupted';
+      break;
+  }
+
+  return (
+    <View style={styles.outcomeRow}>
+      <Text style={[styles.outcomeText, { color }]} numberOfLines={1}>
+        {label}
+      </Text>
+      {onContinue && outcome.status === 'maxTurns' && (
+        <Pressable
+          style={[styles.continueButton, { borderColor: colors.tint }]}
+          onPress={onContinue}
+          hitSlop={8}
+        >
+          <Text style={[styles.continueButtonText, { color: colors.tint }]}>Continue</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
 export function ChatMessageView({
   message,
   workingDirectory,
   isCurrentlyStreaming,
+  showTurnActions,
+  onContinueTurn,
 }: ChatMessageViewProps) {
   const colors = useTheme();
 
@@ -90,6 +154,14 @@ export function ChatMessageView({
                 </Text>
               </View>
             );
+          case 'turnOutcome':
+            return (
+              <TurnOutcomeFooter
+                key={`outcome-${index}`}
+                outcome={item.outcome}
+                onContinue={showTurnActions ? onContinueTurn : undefined}
+              />
+            );
           default:
             return null;
         }
@@ -129,5 +201,27 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: FontSize.sm,
+  },
+  outcomeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    marginHorizontal: Spacing.lg,
+    marginTop: Spacing.xs,
+    marginBottom: Spacing.sm,
+  },
+  outcomeText: {
+    fontSize: FontSize.xs,
+    flexShrink: 1,
+  },
+  continueButton: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 3,
+  },
+  continueButtonText: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
   },
 });

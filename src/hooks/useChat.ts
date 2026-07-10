@@ -6,11 +6,14 @@ import {
   ChatStatus,
   ToolResultCard,
   ToolUseCard,
+  TurnOutcome,
   isCodexProvider,
   makeId,
+  providerDisplayName,
 } from '@/models/chat';
 import {
   ClaudeAssistantEvent,
+  ClaudePartialStreamEvent,
   ClaudeResultEvent,
   ClaudeStreamEvent,
   ClaudeSystemEvent,
@@ -27,14 +30,44 @@ import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
 import { getSetting } from '@/services/storage';
+import {
+  buildFallbackPrompt,
+  buildProcessGroupKillCommand,
+  buildTurnNotifySuffix,
+  classifyCodexAuthIssue,
+  codexEventDebugLabel,
+  compactDebugChunk,
+  conversationSignature,
+  countUserMessages,
+  elapsedSince,
+  firstDivergentIndex,
+  isHeartbeatStderr,
+  mergeTranscript,
+  nextAssistantAfterUser,
+  safeTaskName,
+  shellQuote,
+  withSpriteTaskHeartbeat,
+} from '@/services/chat-helpers';
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
-const DEBUG_SNIPPET_MAX = 240;
 
 interface SessionIds {
   claudeSessionId?: string;
   codexSessionId?: string;
+}
+
+/** A send that failed before anything launched on the sprite — safe to retry. */
+interface FailedSend {
+  prompt: string;
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
+/** A message written while a turn was in flight, waiting to be sent. */
+export interface QueuedPrompt {
+  id: string;
+  text: string;
 }
 
 interface UseChatOptions {
@@ -50,190 +83,10 @@ interface UseChatOptions {
   onCodexAuthIssue?: (message: string) => void;
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function safeTaskName(value: string): string {
-  return value.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
-}
-
-function withSpriteTaskHeartbeat(command: string, taskName: string): string {
-  const quotedTaskName = shellQuote(taskName);
-  return [
-    `TASK_NAME=${quotedTaskName}`,
-    `TASK_EXPIRE=5m`,
-    `sprite_task_api() { curl -sS --unix-socket /.sprite/api.sock -H "Content-Type: application/json" "$@" >/dev/null 2>&1 || true; }`,
-    `sprite_task_put() { sprite_task_api -X PUT "http://sprite/v1/tasks/$TASK_NAME" -d "{\\"expire\\":\\"$TASK_EXPIRE\\"}"; }`,
-    `sprite_task_delete() { sprite_task_api -X DELETE "http://sprite/v1/tasks/$TASK_NAME"; }`,
-    'cleanup() { status=$?; trap - EXIT INT TERM; if [ -n "${LOG_HBEAT:-}" ]; then kill "$LOG_HBEAT" 2>/dev/null || true; wait "$LOG_HBEAT" 2>/dev/null || true; fi; if [ -n "${TASK_HBEAT:-}" ]; then kill "$TASK_HBEAT" 2>/dev/null || true; wait "$TASK_HBEAT" 2>/dev/null || true; fi; sprite_task_delete; exit "$status"; }',
-    `trap cleanup EXIT INT TERM`,
-    `sprite_task_put`,
-    `(while true; do sleep 60; sprite_task_put; done) & TASK_HBEAT=$!`,
-    `(while true; do sleep 20; printf . >&2; done) & LOG_HBEAT=$!`,
-    command,
-  ].join('; ');
-}
-
-function classifyCodexAuthIssue(raw: string): string | undefined {
-  const text = raw.toLowerCase();
-  const matchesAuthIssue =
-    text.includes('codex login') ||
-    text.includes('not logged') ||
-    text.includes('authentication') ||
-    text.includes('unauthorized') ||
-    text.includes('forbidden') ||
-    text.includes('openai_api_key') ||
-    text.includes('api key') ||
-    text.includes('login required') ||
-    text.includes('chatgpt login') ||
-    text.includes('status code: 401') ||
-    text.includes('status code: 403');
-
-  if (!matchesAuthIssue) return undefined;
-
-  return [
-    'Codex is not authenticated in this sprite environment.',
-    'Run `codex login status` and then `codex login` inside the sprite shell, or switch this chat to Claude.',
-  ].join(' ');
-}
-
-function messagePlainText(message: ChatMessage): string {
-  return message.content
-    .filter((item): item is Extract<ChatContent, { type: 'text' }> => item.type === 'text')
-    .map((item) => item.text)
-    .join('\n\n')
-    .trim();
-}
-
-function buildFallbackPrompt(history: ChatMessage[], prompt: string): string {
-  const transcript = history
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => {
-      const text = messagePlainText(message);
-      if (!text) return null;
-      const role = message.role === 'user' ? 'User' : 'Assistant';
-      const clipped = text.length > 1200 ? `${text.slice(0, 1200)}...` : text;
-      return `${role}: ${clipped}`;
-    })
-    .filter((line): line is string => line !== null)
-    .slice(-12);
-
-  if (transcript.length === 0) return prompt;
-
-  return [
-    'Continue this conversation. Here is the prior transcript:',
-    transcript.join('\n\n'),
-    `User: ${prompt}`,
-    'Assistant:',
-  ].join('\n\n');
-}
-
-function countUserMessages(messages: ChatMessage[]): number {
-  return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
-}
-
-/** Stable content fingerprint — two conversations with the same signature render identically. */
-function conversationSignature(messages: ChatMessage[]): string {
-  return messages
-    .map((m) => {
-      const parts = m.content.map((c) => {
-        if (c.type === 'text') return `t:${c.text}`;
-        if (c.type === 'reasoning') return `r:${c.text.length}`;
-        if (c.type === 'toolUse') return `u:${c.card.toolUseId}`;
-        if (c.type === 'toolResult') return `R:${c.card.toolUseId}`;
-        return c.type;
-      });
-      return `${m.role}|${parts.join('|')}`;
-    })
-    .join('\n');
-}
-
-/**
- * Overlay an incoming (e.g. on-disk transcript) conversation onto the local one,
- * preserving the existing message ids for the common prefix. Keeping ids stable
- * means React reuses the already-mounted bubbles instead of remounting/re-scrolling
- * them — which is what made reopening a chat look like the last turn was duplicated
- * and re-answered.
- */
-function mergeTranscript(local: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  return incoming.map((msg, i) => {
-    const localMsg = local[i];
-    if (localMsg && localMsg.role === msg.role) {
-      return { ...msg, id: localMsg.id };
-    }
-    return msg;
-  });
-}
-
-function nextAssistantAfterUser(messages: ChatMessage[], userIndex: number): number {
-  for (let i = userIndex + 1; i < messages.length; i++) {
-    if (messages[i].role === 'user') break;
-    if (messages[i].role === 'assistant') return i;
-  }
-  return -1;
-}
-
 function debugChat(...args: unknown[]) {
   if (!__DEV__) return;
   // eslint-disable-next-line no-console
   console.log('[chat-debug]', ...args);
-}
-
-function elapsedSince(startedAt: number | undefined): string {
-  return startedAt ? `+${Date.now() - startedAt}ms` : '+?ms';
-}
-
-function redactDebugText(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/sk-[A-Za-z0-9_-]{10,}/g, 'sk-[redacted]')
-    .replace(/(OPENAI_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=\S+/g, '$1=[redacted]');
-}
-
-function compactDebugChunk(value: string, max = DEBUG_SNIPPET_MAX): string {
-  const cleaned = redactDebugText(stripLogTimestamps(value))
-    .replace(/\u001b\[[0-9;]*m/g, '')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
-    .trim();
-  if (cleaned.length <= max) return cleaned;
-  return `${cleaned.slice(0, max)}…`;
-}
-
-function isHeartbeatStderr(value: string): boolean {
-  const compact = stripLogTimestamps(value).replace(/\s/g, '');
-  return compact.length > 0 && /^\.+$/.test(compact);
-}
-
-function codexEventDebugLabel(event: CodexStreamEvent): string {
-  switch (event.type) {
-    case 'unknown':
-      return [
-        'unknown',
-        event.rawType ? `raw=${event.rawType}` : undefined,
-        event.itemType ? `item=${event.itemType}` : undefined,
-        event.keys?.length ? `keys=${event.keys.join('|')}` : undefined,
-      ].filter(Boolean).join(' ');
-    case 'assistantDelta':
-      return `assistantDelta chars=${event.text.length}`;
-    case 'reasoning':
-      return `reasoning chars=${event.text.length}`;
-    case 'commandBegin':
-      return `commandBegin id=${event.commandId}`;
-    case 'commandEnd':
-      return `commandEnd id=${event.commandId} exit=${event.exitCode ?? '?'}`;
-    case 'fileChange':
-      return `fileChange files=${event.files.length}`;
-    case 'mcpToolBegin':
-      return `mcpToolBegin tool=${event.server ? `${event.server}.` : ''}${event.tool}`;
-    case 'mcpToolEnd':
-      return `mcpToolEnd tool=${event.server ? `${event.server}.` : ''}${event.tool} error=${event.isError}`;
-    case 'todoList':
-      return `todoList items=${event.items.length}`;
-    default:
-      return event.type;
-  }
 }
 
 type ChatTurnTiming = {
@@ -253,6 +106,9 @@ export function useChat(options: UseChatOptions) {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   const [inputText, setInputText] = useState('');
   const [codexAuthIssue, setCodexAuthIssue] = useState<string | undefined>();
+  const [failedSend, setFailedSendState] = useState<FailedSend | undefined>();
+  // In-memory only, per chat: queued messages don't survive app restarts.
+  const [queuedPrompts, setQueuedPromptsState] = useState<QueuedPrompt[]>([]);
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
@@ -277,6 +133,50 @@ export function useChat(options: UseChatOptions) {
   const turnTimingRef = useRef<ChatTurnTiming>({});
   const detachingControllersRef = useRef<Set<AbortController>>(new Set());
   const processServiceEventRef = useRef<(event: ServiceLogEvent) => void>(() => {});
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const attachToRunRef = useRef<(run: ActiveChatRun, loadRequest: number) => void>(() => {});
+  const failedSendRef = useRef<FailedSend | undefined>(undefined);
+  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
+  const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
+  // Token streaming (--include-partial-messages): count of trailing content
+  // items in the active assistant message built from deltas of the in-flight
+  // API message, and whether the newest one is still appendable. The complete
+  // `assistant` event replaces these with the authoritative blocks.
+  const partialDeltaCountRef = useRef(0);
+  const partialBlockOpenRef = useRef(false);
+  // Old CLIs reject the flag; sniffed from stderr, retried once without it.
+  const partialFlagRejectedRef = useRef(false);
+  const partialMessagesUnsupportedRef = useRef(false);
+  // Serialized snapshot of the last persisted transcript, keyed by chat, so
+  // saves can write only the rows that changed since the previous save.
+  const persistedPayloadsRef = useRef<{ chatId: string; payloads: string[] } | null>(null);
+  // All DB writes go through one promise chain — SQLite transactions on the
+  // shared connection must not interleave.
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const setFailedSend = useCallback((value: FailedSend | undefined) => {
+    failedSendRef.current = value;
+    setFailedSendState(value);
+  }, []);
+
+  const setQueuedPrompts = useCallback((value: QueuedPrompt[]) => {
+    queuedPromptsRef.current = value;
+    setQueuedPromptsState(value);
+  }, []);
+
+  /** Fire the next queued message once the chat is fully idle again. */
+  const maybeSendNextQueued = useCallback(() => {
+    if (queuedPromptsRef.current.length === 0) return;
+    if (statusRef.current !== 'idle' || activeRunRef.current) return;
+    const [next, ...rest] = queuedPromptsRef.current;
+    setQueuedPrompts(rest);
+    // Defer one tick so the finished turn's state fully settles first.
+    setTimeout(() => {
+      sendMessageRef.current(next.text);
+    }, 0);
+  }, [setQueuedPrompts]);
 
   const setStatusTracked = useCallback((s: ChatStatus) => {
     statusRef.current = s;
@@ -330,21 +230,74 @@ export function useChat(options: UseChatOptions) {
     });
   }, []);
 
+  /**
+   * Persist the conversation, writing only the rows that changed since the
+   * last save for this chat (during streaming that's just the active
+   * assistant message). Falls back to a full rewrite when the snapshot cache
+   * belongs to another chat or a write failed. Calls are serialized.
+   */
   const persistMessages = useCallback(
-    async (msgs?: ChatMessage[]) => {
-      await chatRepository.setMessages(chatId, msgs ?? messagesRef.current);
+    (msgs?: ChatMessage[]) => {
+      const run = async () => {
+        const messages = msgs ?? messagesRef.current;
+        const payloads = messages.map((m) => JSON.stringify(m));
+        const cache = persistedPayloadsRef.current;
+        const prev = cache?.chatId === chatId ? cache.payloads : null;
+        persistedPayloadsRef.current = { chatId, payloads };
+        try {
+          const firstDiff = prev ? firstDivergentIndex(prev, payloads) : 0;
+          if (prev && firstDiff === prev.length && firstDiff === payloads.length) return;
+          await chatRepository.replaceMessagesFrom(chatId, payloads, firstDiff);
+        } catch (error) {
+          // Unknown DB state — force a full rewrite on the next save.
+          persistedPayloadsRef.current = null;
+          throw error;
+        }
+      };
+      const next = persistChainRef.current.then(run, run);
+      persistChainRef.current = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
     },
     [chatId]
   );
 
+  const clearPersistTimer = useCallback(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+  }, []);
+
+  /** Throttled persist while a turn streams — at most one write per 3s. */
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current) return;
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      // The timer may outlive a chat switch; never write another chat's
+      // in-memory messages under this closure's chat id.
+      if (loadedChatIdRef.current !== chatId) return;
+      persistMessages().catch(() => {});
+    }, 3000);
+  }, [chatId, persistMessages]);
+
   const syncClaudeTranscript = useCallback(
-    async (loadRequest: number, resumeId: string | undefined) => {
+    async (
+      loadRequest: number,
+      resumeId: string | undefined,
+      opts?: { allowReconnecting?: boolean }
+    ) => {
       if (provider !== 'claude' || !resumeId) return;
 
       try {
         const transcript = await readClaudeSessionMessages(spriteName, resumeId);
         if (loadRequest !== loadRequestRef.current) return;
-        if (statusRef.current !== 'idle') return;
+        const statusOk =
+          statusRef.current === 'idle' ||
+          (opts?.allowReconnecting === true && statusRef.current === 'reconnecting');
+        if (!statusOk) return;
         if (transcript.length === 0) return;
         const local = messagesRef.current;
         const transcriptTurns = countUserMessages(transcript);
@@ -357,25 +310,32 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await chatRepository.setMessages(chatId, merged);
+        await persistMessages(merged);
       } catch {
         // Offline / no transcript yet — keep the local copy.
       }
     },
-    [chatId, provider, spriteName]
+    [persistMessages, provider, spriteName]
   );
 
   // Codex counterpart of syncClaudeTranscript: pull the on-disk rollout for a
   // resumed Codex thread so turns that finished while the app was away (or ran
   // from a terminal) are recovered — the same history `codex exec resume` sees.
   const syncCodexTranscript = useCallback(
-    async (loadRequest: number, resumeId: string | undefined) => {
+    async (
+      loadRequest: number,
+      resumeId: string | undefined,
+      opts?: { allowReconnecting?: boolean }
+    ) => {
       if (!isCodexProvider(provider) || !resumeId) return;
 
       try {
         const transcript = await readCodexSessionMessages(spriteName, resumeId);
         if (loadRequest !== loadRequestRef.current) return;
-        if (statusRef.current !== 'idle') return;
+        const statusOk =
+          statusRef.current === 'idle' ||
+          (opts?.allowReconnecting === true && statusRef.current === 'reconnecting');
+        if (!statusOk) return;
         if (transcript.length === 0) return;
         const local = messagesRef.current;
         const transcriptTurns = countUserMessages(transcript);
@@ -385,13 +345,192 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await chatRepository.setMessages(chatId, merged);
+        await persistMessages(merged);
       } catch {
         // Offline / no rollout yet — keep the local copy.
       }
     },
-    [chatId, provider, spriteName]
+    [persistMessages, provider, spriteName]
   );
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  /** Clear all active-turn state and pull the final on-disk transcript. */
+  const finishActiveRun = useCallback(
+    async (
+      activeRun: ActiveChatRun,
+      loadRequest: number,
+      setIdle: boolean,
+      opts?: { autoSendQueued?: boolean }
+    ) => {
+      execSessionIdRef.current = undefined;
+      activeUserMessageIdRef.current = undefined;
+      activeAssistantMessageIdRef.current = undefined;
+      assistantTextSeenRef.current = false;
+      if (activeRunRef.current?.execSessionId === activeRun.execSessionId) {
+        setActiveRun(undefined);
+      }
+      if (setIdle) setStatusTracked('idle');
+      await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current);
+      await syncCodexTranscript(loadRequest, codexSessionIdRef.current);
+      await persistMessages();
+      if (opts?.autoSendQueued) maybeSendNextQueued();
+    },
+    [maybeSendNextQueued, persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
+  );
+
+  /**
+   * Keep trying to get back to a still-running turn. Each tick first probes
+   * the exec-session list over HTTP: API unreachable → back off and try again
+   * (the network is down); session gone → the run finished while we were away,
+   * finalize from the on-disk transcript; session alive → reattach the socket.
+   */
+  const scheduleReconnect = useCallback(
+    (activeRun: ActiveChatRun, loadRequest: number) => {
+      clearReconnectTimer();
+      const attempt = reconnectAttemptRef.current + 1;
+      reconnectAttemptRef.current = attempt;
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt - 1, 5));
+      debugChat('reconnect scheduled', provider, `attempt=${attempt}`, `delayMs=${delayMs}`);
+      setStatusTracked('reconnecting');
+      reconnectTimerRef.current = setTimeout(async () => {
+        reconnectTimerRef.current = null;
+        if (loadRequest !== loadRequestRef.current) return;
+        if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+
+        let sessions: api.ExecSession[];
+        try {
+          sessions = await api.listExecSessionsStrict(spriteName);
+        } catch (err: any) {
+          if (err?.code === 'notFound' || err?.code === 'unauthorized' || err?.code === 'noToken') {
+            // The sprite (or our access to it) is gone — stop retrying.
+            setErrorMessage(err?.message ?? 'Sprite unreachable');
+            await finishActiveRun(activeRun, loadRequest, true);
+            return;
+          }
+          scheduleReconnect(activeRun, loadRequest);
+          return;
+        }
+        if (loadRequest !== loadRequestRef.current) return;
+        if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+
+        if (!sessions.some((s) => s.id === activeRun.execSessionId)) {
+          debugChat('reconnect: run finished while away', provider, activeRun.execSessionId);
+          await finishActiveRun(activeRun, loadRequest, true, { autoSendQueued: true });
+          return;
+        }
+        attachToRunRef.current(activeRun, loadRequest);
+      }, delayMs);
+    },
+    [clearReconnectTimer, finishActiveRun, provider, setStatusTracked, spriteName]
+  );
+
+  /**
+   * (Re)attach to a running turn's exec session. Pulls the on-disk transcript
+   * first so output that streamed while we were disconnected renders
+   * immediately — the attach socket only carries output from now on.
+   */
+  const attachToRun = useCallback(
+    async (activeRun: ActiveChatRun, loadRequest: number) => {
+      if (abortRef.current) {
+        debugChat('attach skipped: a stream is already active', provider);
+        return;
+      }
+      activeUserMessageIdRef.current = activeRun.userMessageId;
+      activeAssistantMessageIdRef.current = activeRun.assistantMessageId;
+      execSessionIdRef.current = activeRun.execSessionId;
+      processedUUIDsRef.current = new Set();
+      claudeParserRef.current.reset();
+      codexParserRef.current.reset();
+      codexStderrRef.current = '';
+      codexSawAssistantRef.current = false;
+      agentTurnCompleteRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
+      serviceEventsSeenRef.current = 0;
+      turnTimingRef.current = { startedAt: Date.now() };
+      setStatusTracked('reconnecting');
+
+      await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current, {
+        allowReconnecting: true,
+      });
+      await syncCodexTranscript(loadRequest, codexSessionIdRef.current, {
+        allowReconnecting: true,
+      });
+      if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
+      if (abortRef.current) return;
+
+      const controller = new AbortController();
+      let disconnectedBeforeExit = false;
+      abortRef.current = controller;
+      try {
+        await api.streamExec(
+          spriteName,
+          [],
+          (event) => {
+            if (abortRef.current !== controller) return;
+            if (reconnectAttemptRef.current !== 0) reconnectAttemptRef.current = 0;
+            processServiceEventRef.current(event);
+          },
+          controller.signal,
+          {
+            attachSessionId: activeRun.execSessionId,
+            onDisconnectBeforeExit: () => {
+              disconnectedBeforeExit = true;
+            },
+          }
+        );
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          debugChat('active exec attach failed', provider, err.message ?? err);
+          // Attach errors get the same treatment as mid-stream drops: the
+          // probe in scheduleReconnect decides whether the run is still alive.
+          disconnectedBeforeExit = true;
+        }
+      } finally {
+        const wasDetaching = detachingControllersRef.current.delete(controller);
+        const isCurrentStream = abortRef.current === controller;
+        if (isCurrentStream) {
+          abortRef.current = null;
+        }
+        if (wasDetaching && !agentTurnCompleteRef.current) {
+          debugChat('active exec detached', provider, activeRun.execSessionId);
+          if (isCurrentStream) setStatusTracked('idle');
+          await persistMessages();
+          return;
+        }
+        if (
+          disconnectedBeforeExit &&
+          activeRunRef.current?.execSessionId === activeRun.execSessionId &&
+          !agentTurnCompleteRef.current
+        ) {
+          await persistMessages();
+          scheduleReconnect(activeRun, loadRequestRef.current);
+          return;
+        }
+        await finishActiveRun(activeRun, loadRequest, isCurrentStream, {
+          autoSendQueued: agentTurnCompleteRef.current,
+        });
+      }
+    },
+    [
+      finishActiveRun,
+      persistMessages,
+      provider,
+      scheduleReconnect,
+      setStatusTracked,
+      spriteName,
+      syncClaudeTranscript,
+      syncCodexTranscript,
+    ]
+  );
+  attachToRunRef.current = attachToRun;
 
   const loadSession = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
@@ -408,9 +547,16 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
       turnTimingRef.current = {};
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
+      setFailedSend(undefined);
+      setQueuedPrompts([]);
+      clearPersistTimer();
+      persistedPayloadsRef.current = null;
       claudeSessionIdRef.current = options.initialClaudeSessionId;
       codexSessionIdRef.current = options.initialCodexSessionId;
       activeRunRef.current = options.initialActiveRun;
@@ -421,11 +567,23 @@ export function useChat(options: UseChatOptions) {
     if (loadRequest !== loadRequestRef.current) return;
 
     // Avoid clobbering live in-memory messages if a send started while loading persisted history.
-    if (messagesRef.current.length > initialMessageCount || statusRef.current !== 'idle') return;
+    if (messagesRef.current.length > initialMessageCount || statusRef.current !== 'idle') {
+      // Reload while waiting between reconnect attempts (e.g. the app came back
+      // to the foreground): retry immediately instead of waiting out the backoff.
+      const pendingRun = activeRunRef.current;
+      if (statusRef.current === 'reconnecting' && pendingRun && !abortRef.current) {
+        clearReconnectTimer();
+        reconnectAttemptRef.current = 0;
+        attachToRunRef.current(pendingRun, loadRequest);
+      }
+      return;
+    }
 
     messagesRef.current = saved;
     loadedChatIdRef.current = chatId;
     setMessages(saved);
+    // The DB is the source we just read — seed the diff cache from it.
+    persistedPayloadsRef.current = { chatId, payloads: saved.map((m) => JSON.stringify(m)) };
     activeRunRef.current = options.initialActiveRun;
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
@@ -453,73 +611,9 @@ export function useChat(options: UseChatOptions) {
 
     const activeRun = options.initialActiveRun;
     if (activeRun && activeRun.provider === provider) {
-      activeUserMessageIdRef.current = activeRun.userMessageId;
-      activeAssistantMessageIdRef.current = activeRun.assistantMessageId;
-      execSessionIdRef.current = activeRun.execSessionId;
-      processedUUIDsRef.current = new Set();
-      claudeParserRef.current.reset();
-      codexParserRef.current.reset();
-      codexStderrRef.current = '';
-      codexSawAssistantRef.current = false;
-      agentTurnCompleteRef.current = false;
-      serviceEventsSeenRef.current = 0;
-      turnTimingRef.current = { startedAt: Date.now() };
-      setStatusTracked('reconnecting');
-
-      (async () => {
-        const controller = new AbortController();
-        let disconnectedBeforeExit = false;
-        abortRef.current = controller;
-        try {
-          await api.streamExec(
-            spriteName,
-            [],
-            (event) => {
-              if (abortRef.current !== controller) return;
-              processServiceEvent(event);
-            },
-            controller.signal,
-            {
-              attachSessionId: activeRun.execSessionId,
-              onDisconnectBeforeExit: () => {
-                disconnectedBeforeExit = true;
-              },
-            }
-          );
-        } catch (err: any) {
-          if (err.name !== 'AbortError') {
-            debugChat('active exec attach failed', provider, err.message ?? err);
-          }
-        } finally {
-          const wasDetaching = detachingControllersRef.current.delete(controller);
-          const isCurrentStream = abortRef.current === controller;
-          if (isCurrentStream) {
-            abortRef.current = null;
-          }
-          if (wasDetaching && !agentTurnCompleteRef.current) {
-            debugChat('active exec detached', provider, activeRun.execSessionId);
-            if (isCurrentStream) setStatusTracked('idle');
-            await persistMessages();
-            return;
-          }
-          if (disconnectedBeforeExit && activeRunRef.current?.execSessionId === activeRun.execSessionId && !agentTurnCompleteRef.current) {
-            if (isCurrentStream) setStatusTracked('idle');
-            await persistMessages();
-            return;
-          }
-          execSessionIdRef.current = undefined;
-          activeUserMessageIdRef.current = undefined;
-          activeAssistantMessageIdRef.current = undefined;
-          assistantTextSeenRef.current = false;
-          if (activeRunRef.current?.execSessionId === activeRun.execSessionId) {
-            setActiveRun(undefined);
-          }
-          if (isCurrentStream) setStatusTracked('idle');
-          await syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
-          await syncCodexTranscript(loadRequest, options.initialCodexSessionId);
-          await persistMessages();
-        }
-      })();
+      clearReconnectTimer();
+      reconnectAttemptRef.current = 0;
+      attachToRun(activeRun, loadRequest);
       return;
     }
 
@@ -535,17 +629,19 @@ export function useChat(options: UseChatOptions) {
     syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
     syncCodexTranscript(loadRequest, options.initialCodexSessionId);
   }, [
+    attachToRun,
     chatId,
+    clearPersistTimer,
+    clearReconnectTimer,
     options.initialActiveRun,
     options.initialClaudeSessionId,
     options.initialCodexSessionId,
-    persistMessages,
     provider,
     setClaudeSessionId,
     setCodexSessionId,
     setActiveRun,
-    setStatusTracked,
-    spriteName,
+    setFailedSend,
+    setQueuedPrompts,
     syncClaudeTranscript,
     syncCodexTranscript,
   ]);
@@ -693,6 +789,51 @@ export function useChat(options: UseChatOptions) {
     [provider, updateMessages]
   );
 
+  /**
+   * Render a token-streaming delta. Delta-built blocks are a live preview of
+   * the in-flight API message; handleClaudeEvent's `assistant` case swaps them
+   * for the authoritative blocks when the message completes.
+   */
+  const appendPartialDelta = useCallback(
+    (kind: 'text' | 'reasoning', text: string) => {
+      if (!text) return;
+      updateActiveAssistant((newContent) => {
+        if (kind === 'text') assistantTextSeenRef.current = true;
+        const last = newContent[newContent.length - 1];
+        const appendable =
+          partialDeltaCountRef.current > 0 && partialBlockOpenRef.current && last?.type === kind;
+        if (appendable && last?.type === 'text') {
+          newContent[newContent.length - 1] = { type: 'text', text: last.text + text };
+        } else if (appendable && last?.type === 'reasoning') {
+          newContent[newContent.length - 1] = { type: 'reasoning', text: last.text + text };
+        } else {
+          newContent.push(kind === 'text' ? { type: 'text', text } : { type: 'reasoning', text });
+          partialDeltaCountRef.current += 1;
+        }
+        partialBlockOpenRef.current = true;
+        return newContent;
+      });
+    },
+    [updateActiveAssistant]
+  );
+
+  // A turn has exactly one outcome; replace rather than stack when a merge or
+  // replay already recorded one.
+  const appendTurnOutcome = useCallback(
+    (outcome: TurnOutcome) => {
+      updateActiveAssistant((newContent) => {
+        const existing = newContent.findIndex((item) => item.type === 'turnOutcome');
+        if (existing !== -1) {
+          newContent[existing] = { type: 'turnOutcome', outcome };
+        } else {
+          newContent.push({ type: 'turnOutcome', outcome });
+        }
+        return newContent;
+      });
+    },
+    [updateActiveAssistant]
+  );
+
   const handleClaudeEvent = useCallback(
     (event: ClaudeStreamEvent) => {
       switch (event.type) {
@@ -706,6 +847,13 @@ export function useChat(options: UseChatOptions) {
           const asst = event.event as ClaudeAssistantEvent;
           debugChat('claude assistant event', asst.message.content.map((b) => b.type));
           updateActiveAssistant((newContent, targetIndex) => {
+            // Swap the delta-built preview of this API message for its
+            // authoritative blocks (same text, plus complete tool_use inputs).
+            if (partialDeltaCountRef.current > 0) {
+              newContent.splice(newContent.length - partialDeltaCountRef.current);
+              partialDeltaCountRef.current = 0;
+              partialBlockOpenRef.current = false;
+            }
             for (const block of asst.message.content) {
               if (block.type === 'text' && 'text' in block) {
                 if (block.text) assistantTextSeenRef.current = true;
@@ -787,13 +935,44 @@ export function useChat(options: UseChatOptions) {
             debugChat('claude result event', 'len', res.result.length);
             ensureTurnAssistantText(res.result);
           }
+          appendTurnOutcome({
+            status:
+              res.subtype === 'error_max_turns'
+                ? 'maxTurns'
+                : res.is_error
+                  ? 'error'
+                  : 'success',
+            subtype: res.subtype,
+            durationMs: res.duration_ms,
+            numTurns: res.num_turns,
+            completedAt: Date.now(),
+          });
+          break;
+        }
+        case 'streamEvent': {
+          const stream = event.event as ClaudePartialStreamEvent;
+          const inner = stream.event;
+          if (!inner) break;
+          if (inner.type === 'content_block_start') {
+            // Block boundary — the next delta starts a fresh content item.
+            partialBlockOpenRef.current = false;
+          } else if (inner.type === 'content_block_delta') {
+            const delta = inner.delta;
+            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+              appendPartialDelta('text', delta.text);
+            } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+              appendPartialDelta('reasoning', delta.thinking);
+            }
+            // input_json_delta (tool inputs) is intentionally ignored — tool
+            // cards come from the complete assistant event.
+          }
           break;
         }
         case 'unknown':
           break;
       }
     },
-    [appendAssistantText, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
+    [appendAssistantText, appendPartialDelta, appendTurnOutcome, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
   );
 
   const handleCodexEvent = useCallback(
@@ -992,6 +1171,13 @@ export function useChat(options: UseChatOptions) {
         case 'turnCompleted':
           debugChat('codex turn completed', elapsedSince(turnTimingRef.current.startedAt));
           agentTurnCompleteRef.current = true;
+          appendTurnOutcome({
+            status: 'success',
+            durationMs: turnTimingRef.current.startedAt
+              ? Date.now() - turnTimingRef.current.startedAt
+              : undefined,
+            completedAt: Date.now(),
+          });
           if (activeRunRef.current?.transport === 'codexAppServer') {
             const sessionId = execSessionIdRef.current ?? activeRunRef.current.execSessionId;
             if (sessionId) {
@@ -1002,13 +1188,14 @@ export function useChat(options: UseChatOptions) {
         case 'error':
           debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);
           setErrorMessage(event.message);
+          appendTurnOutcome({ status: 'error', completedAt: Date.now() });
           break;
         case 'unknown':
           debugChat('codex unknown event', elapsedSince(turnTimingRef.current.startedAt), codexEventDebugLabel(event));
           break;
       }
     },
-    [appendAssistantText, updateActiveAssistant, setCodexSessionId, spriteName]
+    [appendAssistantText, appendTurnOutcome, updateActiveAssistant, setCodexSessionId, spriteName]
   );
 
   const reportCodexAuthIssue = useCallback(
@@ -1054,6 +1241,7 @@ export function useChat(options: UseChatOptions) {
               if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
               handleClaudeEvent(parsed);
             }
+            if (events.length > 0) schedulePersist();
           } else {
             const events = codexParserRef.current.parse(dataStr);
             if (events.length > 0) {
@@ -1070,6 +1258,7 @@ export function useChat(options: UseChatOptions) {
             for (const parsed of events) {
               handleCodexEvent(parsed);
             }
+            if (events.length > 0) schedulePersist();
           }
           break;
         }
@@ -1081,6 +1270,14 @@ export function useChat(options: UseChatOptions) {
           }
           if (isCodexProvider(provider) && event.data) {
             codexStderrRef.current += `\n${event.data}`;
+          }
+          if (
+            provider === 'claude' &&
+            event.data &&
+            /unknown option/i.test(event.data) &&
+            event.data.includes('include-partial-messages')
+          ) {
+            partialFlagRejectedRef.current = true;
           }
           if (event.data) {
             if (isHeartbeatStderr(event.data)) {
@@ -1125,49 +1322,28 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [handleClaudeEvent, handleCodexEvent, provider, setStatusTracked]
+    [handleClaudeEvent, handleCodexEvent, provider, schedulePersist, setStatusTracked]
   );
   processServiceEventRef.current = processServiceEvent;
 
-  const sendMessage = useCallback(
-    async (text?: string) => {
-      if (statusRef.current !== 'idle') return;
-      if (activeRunRef.current) {
-        loadSession();
-        return;
-      }
-
-      const prompt = (text ?? inputText).trim();
-      if (!prompt) return;
-
-      if (!text) setInputText('');
-
-      // Invalidate any in-flight history load to prevent clobbering this turn.
-      loadRequestRef.current += 1;
-      const historyBeforeSend = messagesRef.current;
-
-      const userMessage: ChatMessage = {
-        id: makeId(),
-        timestamp: Date.now(),
-        role: 'user',
-        content: [{ type: 'text', text: prompt }],
-      };
-
-      const assistantMessage: ChatMessage = {
-        id: makeId(),
-        timestamp: Date.now(),
-        role: 'assistant',
-        content: [],
-      };
-
-      activeUserMessageIdRef.current = userMessage.id;
-      activeAssistantMessageIdRef.current = assistantMessage.id;
+  /**
+   * Launch the agent process for one turn and stream it back. Shared by
+   * sendMessage and retryFailedSend — the turn's user/assistant messages must
+   * already exist in the conversation.
+   */
+  const executeTurn = useCallback(
+    async (
+      prompt: string,
+      userMessageId: string,
+      assistantMessageId: string,
+      historyForFallback: ChatMessage[]
+    ) => {
+      activeUserMessageIdRef.current = userMessageId;
+      activeAssistantMessageIdRef.current = assistantMessageId;
       assistantTextSeenRef.current = false;
-      const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
-      updateMessages(() => pendingMessages);
-      await chatRepository.setMessages(chatId, pendingMessages);
       turnTimingRef.current = { startedAt: Date.now() };
-      debugChat('sendMessage', provider, 'user', userMessage.id, 'assistant', assistantMessage.id);
+      setFailedSend(undefined);
+      debugChat('executeTurn', provider, 'user', userMessageId, 'assistant', assistantMessageId);
 
       const commandParts: string[] = [];
       let codexAppServerPrompt: string | undefined;
@@ -1188,12 +1364,17 @@ export function useChat(options: UseChatOptions) {
       if (provider === 'claude') {
         const claudePrompt = claudeSessionIdRef.current
           ? prompt
-          : buildFallbackPrompt(historyBeforeSend, prompt);
+          : buildFallbackPrompt(historyForFallback, prompt);
 
         commandParts.push('export NO_DNA=1');
 
         let claudeCmd =
           'claude -p --verbose --output-format stream-json --dangerously-skip-permissions';
+        if (!partialMessagesUnsupportedRef.current) {
+          // Token-level streaming; old CLIs that reject the flag are sniffed
+          // from stderr and the turn retried once without it.
+          claudeCmd += ' --include-partial-messages';
+        }
 
         const [modelId, maxTurns, customInstructions] = await Promise.all([
           getSetting('claudeModel'),
@@ -1223,7 +1404,7 @@ export function useChat(options: UseChatOptions) {
         setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
-          : buildFallbackPrompt(historyBeforeSend, prompt);
+          : buildFallbackPrompt(historyForFallback, prompt);
 
         if (provider === 'codexAppServer') {
           codexAppServerPrompt = codexPrompt;
@@ -1245,8 +1426,23 @@ export function useChat(options: UseChatOptions) {
         }
       }
 
-      const taskName = safeTaskName(`wisp-chat-${provider}-${userMessage.id}`);
-      const fullCommand = withSpriteTaskHeartbeat(commandParts.join(' && '), taskName);
+      const taskName = safeTaskName(`wisp-chat-${provider}-${userMessageId}`);
+      const [ntfyTopic, ntfyServer] = await Promise.all([
+        getSetting('ntfyTopic'),
+        getSetting('ntfyServer'),
+      ]);
+      let turnCommand = commandParts.join(' && ');
+      if (ntfyTopic?.trim()) {
+        // Push a phone notification from the sprite when the turn ends, so
+        // "send and walk away" doesn't require reopening the app to find out.
+        turnCommand += buildTurnNotifySuffix({
+          server: ntfyServer ?? '',
+          topic: ntfyTopic,
+          title: `${spriteName} · ${providerDisplayName(provider)}`,
+          promptPreview: prompt,
+        });
+      }
+      const fullCommand = withSpriteTaskHeartbeat(turnCommand, taskName);
 
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
@@ -1254,6 +1450,9 @@ export function useChat(options: UseChatOptions) {
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
       agentTurnCompleteRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
       turnTimingRef.current = { startedAt: turnTimingRef.current.startedAt ?? Date.now() };
       setStatusTracked('connecting');
       setErrorMessage(undefined);
@@ -1264,6 +1463,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = abortController;
       execSessionIdRef.current = undefined;
       let disconnectedBeforeExit = false;
+      let sendError: string | undefined;
       const streamActiveRunRef: { current?: ActiveChatRun } = {};
 
       try {
@@ -1274,8 +1474,8 @@ export function useChat(options: UseChatOptions) {
             taskName,
             provider,
             transport,
-            userMessageId: userMessage.id,
-            assistantMessageId: assistantMessage.id,
+            userMessageId,
+            assistantMessageId,
             workingDirectory,
             startedAt: Date.now(),
           };
@@ -1325,7 +1525,14 @@ export function useChat(options: UseChatOptions) {
         if (err.name !== 'AbortError') {
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
-          setErrorMessage(message);
+          if (streamActiveRunRef.current && !agentTurnCompleteRef.current) {
+            // The exec session may still be running on the sprite — treat the
+            // dropped stream like a disconnect and let the reconnect loop decide.
+            disconnectedBeforeExit = true;
+          } else {
+            sendError = message;
+            setErrorMessage(message);
+          }
           if (isCodexProvider(provider)) {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
@@ -1368,8 +1575,13 @@ export function useChat(options: UseChatOptions) {
         }
 
         if (disconnectedBeforeExit && streamActiveRun && !agentTurnCompleteRef.current) {
-          if (isCurrentStream) setStatusTracked('idle');
           await persistMessages();
+          const runNow = activeRunRef.current as ActiveChatRun | undefined;
+          if (runNow?.execSessionId === streamActiveRun.execSessionId) {
+            scheduleReconnect(streamActiveRun, loadRequestRef.current);
+          } else if (isCurrentStream) {
+            setStatusTracked('idle');
+          }
           return;
         }
         const streamExecSessionId = streamActiveRunRef.current?.execSessionId;
@@ -1377,50 +1589,178 @@ export function useChat(options: UseChatOptions) {
         if (!streamExecSessionId || currentActiveRun?.execSessionId === streamExecSessionId) {
           setActiveRun(undefined);
         }
+        const neverStarted =
+          !streamActiveRunRef.current &&
+          turnTimingRef.current.firstStdoutAt === undefined &&
+          turnTimingRef.current.firstStderrAt === undefined;
+        if (sendError && neverStarted && !agentTurnCompleteRef.current) {
+          // Nothing launched on the sprite, so re-running the same send is safe.
+          setFailedSend({ prompt, userMessageId, assistantMessageId });
+        }
         execSessionIdRef.current = undefined;
         activeUserMessageIdRef.current = undefined;
         activeAssistantMessageIdRef.current = undefined;
         assistantTextSeenRef.current = false;
         if (isCurrentStream) setStatusTracked('idle');
         await persistMessages();
+        if (
+          partialFlagRejectedRef.current &&
+          !agentTurnCompleteRef.current &&
+          provider === 'claude' &&
+          isCurrentStream
+        ) {
+          // The installed claude CLI predates --include-partial-messages: the
+          // process exited on argument parsing, so nothing ran. Remember that
+          // for the rest of the session and repeat this turn without the flag.
+          partialFlagRejectedRef.current = false;
+          partialMessagesUnsupportedRef.current = true;
+          debugChat('claude CLI rejected --include-partial-messages; retrying without it');
+          setErrorMessage(undefined);
+          await executeTurn(prompt, userMessageId, assistantMessageId, historyForFallback);
+          return;
+        }
+        if (agentTurnCompleteRef.current && !sendError) maybeSendNextQueued();
       }
     },
     [
-      inputText,
-      chatId,
-      loadSession,
+      maybeSendNextQueued,
       persistMessages,
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
+      scheduleReconnect,
       setActiveRun,
+      setFailedSend,
       setStatusTracked,
       spriteName,
       handleClaudeEvent,
       handleCodexEvent,
-      updateMessages,
       workingDirectory,
     ]
   );
 
+  const sendMessage = useCallback(
+    async (text?: string) => {
+      const prompt = (text ?? inputText).trim();
+      if (!prompt) return;
+
+      if (statusRef.current !== 'idle' || activeRunRef.current) {
+        // A turn is in flight — queue the message; it auto-sends when the
+        // current turn completes.
+        if (!text) setInputText('');
+        setQueuedPrompts([...queuedPromptsRef.current, { id: makeId(), text: prompt }]);
+        return;
+      }
+
+      if (!text) setInputText('');
+
+      // Invalidate any in-flight history load to prevent clobbering this turn.
+      loadRequestRef.current += 1;
+      const historyBeforeSend = messagesRef.current;
+
+      const userMessage: ChatMessage = {
+        id: makeId(),
+        timestamp: Date.now(),
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+      };
+
+      const assistantMessage: ChatMessage = {
+        id: makeId(),
+        timestamp: Date.now(),
+        role: 'assistant',
+        content: [],
+      };
+
+      const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
+      updateMessages(() => pendingMessages);
+      await persistMessages(pendingMessages);
+      await executeTurn(prompt, userMessage.id, assistantMessage.id, historyBeforeSend);
+    },
+    [executeTurn, inputText, persistMessages, setQueuedPrompts, updateMessages]
+  );
+  sendMessageRef.current = sendMessage;
+
+  const removeQueuedPrompt = useCallback(
+    (id: string) => {
+      setQueuedPrompts(queuedPromptsRef.current.filter((q) => q.id !== id));
+    },
+    [setQueuedPrompts]
+  );
+
+  /** Send a queued message immediately (only when the chat is idle). */
+  const sendQueuedNow = useCallback(
+    (id: string) => {
+      if (statusRef.current !== 'idle' || activeRunRef.current) return;
+      const target = queuedPromptsRef.current.find((q) => q.id === id);
+      if (!target) return;
+      setQueuedPrompts(queuedPromptsRef.current.filter((q) => q.id !== id));
+      sendMessageRef.current(target.text);
+    },
+    [setQueuedPrompts]
+  );
+
+  /**
+   * Re-run a send that failed before anything launched on the sprite, reusing
+   * the already-rendered user/assistant messages.
+   */
+  const retryFailedSend = useCallback(async () => {
+    const failed = failedSendRef.current;
+    if (!failed) return;
+    if (statusRef.current !== 'idle' || activeRunRef.current) return;
+    setErrorMessage(undefined);
+    loadRequestRef.current += 1;
+    const msgs = messagesRef.current;
+    const userIndex = msgs.findIndex((m) => m.id === failed.userMessageId);
+    const historyForFallback = userIndex > 0 ? msgs.slice(0, userIndex) : [];
+    await executeTurn(
+      failed.prompt,
+      failed.userMessageId,
+      failed.assistantMessageId,
+      historyForFallback
+    );
+  }, [executeTurn]);
+
   const interrupt = useCallback(() => {
+    clearReconnectTimer();
+    clearPersistTimer();
+    reconnectAttemptRef.current = 0;
     const sessionId = execSessionIdRef.current ?? activeRunRef.current?.execSessionId;
     if (sessionId) {
       api.killExecSession(spriteName, sessionId).catch(() => {});
       execSessionIdRef.current = undefined;
     }
+    // killExecSession SIGTERMs the bash wrapper, which defers its trap while
+    // the agent runs in the foreground — the agent itself can survive. Also
+    // kill the turn's whole process group, found via its task-name marker.
+    const taskName = activeRunRef.current?.taskName;
+    if (taskName) {
+      api.runExec(spriteName, buildProcessGroupKillCommand(taskName), 15).catch(() => {});
+    }
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
+    }
+    // Mark the aborted turn before the active-message refs are cleared.
+    const hadActiveTurn =
+      activeUserMessageIdRef.current !== undefined || activeRunRef.current !== undefined;
+    if (hadActiveTurn && !agentTurnCompleteRef.current) {
+      appendTurnOutcome({ status: 'interrupted', completedAt: Date.now() });
     }
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
     assistantTextSeenRef.current = false;
     setActiveRun(undefined);
     setStatusTracked('idle');
-  }, [setActiveRun, setStatusTracked, spriteName]);
+    // Persist after React has flushed the outcome into messagesRef.
+    setTimeout(() => {
+      persistMessages().catch(() => {});
+    }, 0);
+  }, [appendTurnOutcome, clearPersistTimer, clearReconnectTimer, persistMessages, setActiveRun, setStatusTracked, spriteName]);
 
   const detachStream = useCallback(() => {
+    clearReconnectTimer();
+    clearPersistTimer();
     const controller = abortRef.current;
     if (controller) {
       detachingControllersRef.current.add(controller);
@@ -1428,7 +1768,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = null;
     }
     setStatusTracked('idle');
-  }, [setStatusTracked]);
+  }, [clearPersistTimer, clearReconnectTimer, setStatusTracked]);
 
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
@@ -1449,5 +1789,10 @@ export function useChat(options: UseChatOptions) {
     sessionId: isCodexProvider(provider) ? codexSessionIdRef.current : claudeSessionIdRef.current,
     codexAuthIssue,
     clearCodexAuthIssue,
+    failedSend,
+    retryFailedSend,
+    queuedPrompts,
+    removeQueuedPrompt,
+    sendQueuedNow,
   };
 }

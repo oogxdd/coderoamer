@@ -560,6 +560,32 @@ export const chatRepository = {
     });
   },
 
+  /**
+   * Replace a chat's messages from `fromSeq` onward using pre-serialized
+   * payloads (`payloads[i]` is the JSON for seq i). Callers that diff against
+   * their last-persisted snapshot touch just the changed tail instead of
+   * rewriting the whole transcript on every save.
+   */
+  async replaceMessagesFrom(chatId: string, payloads: string[], fromSeq: number): Promise<void> {
+    const db = await getDatabase();
+    await ensureMigrated(db);
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        'DELETE FROM chat_messages WHERE chat_id = ? AND seq >= ?',
+        chatId,
+        fromSeq
+      );
+      for (let seq = fromSeq; seq < payloads.length; seq++) {
+        await db.runAsync(
+          'INSERT INTO chat_messages (chat_id, seq, payload) VALUES (?, ?, ?)',
+          chatId,
+          seq,
+          payloads[seq]
+        );
+      }
+    });
+  },
+
   /** Remove a chat's message transcript. */
   async removeMessages(chatId: string): Promise<void> {
     const db = await getDatabase();

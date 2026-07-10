@@ -39,6 +39,7 @@ import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
+import { reconcileActiveRuns } from '@/services/run-reconcile';
 import { getSetting, setSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
@@ -216,6 +217,10 @@ export default function SpriteDetailScreen() {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      // Drop "Running" flags whose exec session is gone (turn finished while
+      // the app was away) before binding chat state, so we don't try to attach
+      // to dead runs and the list doesn't show stale spinners.
+      await reconcileActiveRuns(spriteName).catch(() => {});
       const [chats, savedDefaultDir, savedTranscriptionProvider] = await Promise.all([
         chatRepository.listBySprite(spriteName),
         getSetting('defaultWorkingDirectory'),
@@ -300,6 +305,16 @@ export default function SpriteDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, reloadNonce]);
 
+  // On leaving the sprite screen, detach any live stream (the exec keeps
+  // running; reopening the chat reattaches) and stop pending reconnects.
+  const detachStreamRef = useRef(chat.detachStream);
+  detachStreamRef.current = chat.detachStream;
+  useEffect(() => {
+    return () => {
+      detachStreamRef.current();
+    };
+  }, []);
+
   // Re-sync the current chat whenever the app returns from the background or lock screen.
   // The hook will reattach to a still-running exec session, or merge the on-disk transcript
   // if the agent finished while the app was suspended.
@@ -309,12 +324,23 @@ export default function SpriteDetailScreen() {
         appStateRef.current === 'inactive' || appStateRef.current === 'background';
       appStateRef.current = nextState;
       if (nextState === 'active' && wasAway && chatId) {
-        setReloadNonce((n) => n + 1);
+        (async () => {
+          const cleared = await reconcileActiveRuns(spriteName).catch(() => [] as string[]);
+          if (cleared.length > 0) {
+            commitChatList(
+              chatListRef.current.map((c) =>
+                cleared.includes(c.id) ? { ...c, activeRun: undefined } : c
+              )
+            );
+            if (cleared.includes(chatId)) setActiveRun(undefined);
+          }
+          setReloadNonce((n) => n + 1);
+        })();
       }
     });
 
     return () => subscription.remove();
-  }, [chatId]);
+  }, [chatId, commitChatList, spriteName]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -353,6 +379,11 @@ export default function SpriteDetailScreen() {
   const handleSend = () => {
     chat.sendMessage();
   };
+
+  // One-tap recovery when a turn ended on --max-turns.
+  const handleContinueTurn = useCallback(() => {
+    chat.sendMessage('Continue where you left off.');
+  }, [chat.sendMessage]);
 
   const handleTranscriptionProviderChange = useCallback(async (provider: TranscriptionProvider) => {
     setTranscriptionProvider(provider);
@@ -706,6 +737,8 @@ export default function SpriteDetailScreen() {
                   index === chat.messages.length - 1 &&
                   item.role === 'assistant'
                 }
+                showTurnActions={index === chat.messages.length - 1 && !chat.isStreaming}
+                onContinueTurn={handleContinueTurn}
               />
             )}
             keyExtractor={(item) => item.id}
@@ -752,11 +785,51 @@ export default function SpriteDetailScreen() {
               </Text>
             </View>
           )}
+          {chat.queuedPrompts.length > 0 && (
+            <View style={styles.queuedBar}>
+              {chat.queuedPrompts.map((q) => (
+                <View
+                  key={q.id}
+                  style={[
+                    styles.queuedChip,
+                    { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                  ]}
+                >
+                  <Pressable
+                    style={styles.queuedChipBody}
+                    onPress={() => chat.sendQueuedNow(q.id)}
+                    disabled={chat.isStreaming}
+                  >
+                    <Text
+                      style={[styles.queuedChipText, { color: colors.textSecondary }]}
+                      numberOfLines={1}
+                    >
+                      ⏳ {q.text}
+                    </Text>
+                  </Pressable>
+                  <Pressable hitSlop={8} onPress={() => chat.removeQueuedPrompt(q.id)}>
+                    <Text style={[styles.queuedChipRemove, { color: colors.textSecondary }]}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
           {chat.errorMessage && (
             <View style={[styles.errorBar, { backgroundColor: colors.destructive + '15' }]}>
               <Text style={[styles.errorBarText, { color: colors.destructive }]}>
                 {chat.errorMessage}
               </Text>
+              {chat.failedSend && (
+                <Pressable
+                  style={[styles.retryButton, { borderColor: colors.destructive }]}
+                  onPress={chat.retryFailedSend}
+                  hitSlop={8}
+                >
+                  <Text style={[styles.retryButtonText, { color: colors.destructive }]}>
+                    Retry send
+                  </Text>
+                </Pressable>
+              )}
             </View>
           )}
           <ChatInputBar
@@ -1271,6 +1344,43 @@ const styles = StyleSheet.create({
   errorBarText: {
     fontSize: FontSize.sm,
     textAlign: 'center',
+  },
+  retryButton: {
+    alignSelf: 'center',
+    marginTop: Spacing.sm,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 3,
+  },
+  retryButtonText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  queuedBar: {
+    paddingHorizontal: Spacing.lg,
+    gap: Spacing.xs,
+    marginBottom: Spacing.xs,
+  },
+  queuedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    gap: Spacing.sm,
+  },
+  queuedChipBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  queuedChipText: {
+    fontSize: FontSize.sm,
+  },
+  queuedChipRemove: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
   },
   centerView: {
     flex: 1,
