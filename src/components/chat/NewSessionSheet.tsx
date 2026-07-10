@@ -12,13 +12,21 @@ import {
 } from 'react-native';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
-import { AgentProvider, providerDisplayName } from '@/models/chat';
+import {
+  AgentEffort,
+  AgentProvider,
+  effortDisplayName,
+  isCodexProvider,
+  providerDisplayName,
+} from '@/models/chat';
 import { normalizeWorkingDirectory } from '@/constants/session';
 import { setSetting } from '@/services/storage';
 
 export interface NewSessionConfig {
   workingDirectory: string;
   provider: AgentProvider;
+  model: string;
+  effort: AgentEffort;
 }
 
 interface NewSessionSheetProps {
@@ -26,35 +34,71 @@ interface NewSessionSheetProps {
   confirmLabel?: string;
   defaultDirectory: string;
   defaultProvider: AgentProvider;
+  defaultModel: string;
+  defaultEffort: AgentEffort;
+  defaultClaudeModel?: string;
+  defaultClaudeEffort?: AgentEffort;
+  defaultCodexModel?: string;
+  defaultCodexEffort?: AgentEffort;
   /** Hide the provider picker (e.g. while we only support Claude). */
   showProviderPicker?: boolean;
+  locked?: boolean;
   onClose: () => void;
   onCreate: (config: NewSessionConfig) => void;
 }
 
-const PROVIDERS: AgentProvider[] = ['claude', 'codex', 'codexAppServer'];
+const PROVIDERS: AgentProvider[] = ['claude', 'codexAppServer', 'codex'];
+const CLAUDE_MODELS = ['sonnet', 'opus', 'haiku'] as const;
+const CLAUDE_EFFORTS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CODEX_EFFORTS: AgentEffort[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 
 export function NewSessionSheet({
   title = 'New Session',
   confirmLabel = 'Start Session',
   defaultDirectory,
   defaultProvider,
+  defaultModel,
+  defaultEffort,
+  defaultClaudeModel = 'sonnet',
+  defaultClaudeEffort = 'high',
+  defaultCodexModel = '',
+  defaultCodexEffort = 'high',
   showProviderPicker = true,
+  locked = false,
   onClose,
   onCreate,
 }: NewSessionSheetProps) {
   const colors = useTheme();
   const [directory, setDirectory] = useState(defaultDirectory);
   const [provider, setProvider] = useState<AgentProvider>(defaultProvider);
+  const [model, setModel] = useState(defaultModel);
+  const [effort, setEffort] = useState<AgentEffort>(defaultEffort);
   const [rememberDirectory, setRememberDirectory] = useState(false);
 
   const handleCreate = async () => {
+    if (locked) {
+      onClose();
+      return;
+    }
     const workingDirectory = normalizeWorkingDirectory(directory);
     if (rememberDirectory) {
       await setSetting('defaultWorkingDirectory', workingDirectory);
     }
-    onCreate({ workingDirectory, provider });
+    onCreate({ workingDirectory, provider, model: model.trim(), effort });
   };
+
+  const handleProviderChange = (nextProvider: AgentProvider) => {
+    setProvider(nextProvider);
+    if (isCodexProvider(nextProvider)) {
+      setModel(defaultCodexModel);
+      setEffort(defaultCodexEffort);
+    } else {
+      setModel(defaultClaudeModel);
+      setEffort(defaultClaudeEffort);
+    }
+  };
+
+  const effortOptions = isCodexProvider(provider) ? CODEX_EFFORTS : CLAUDE_EFFORTS;
 
   return (
     <KeyboardAvoidingView
@@ -65,6 +109,14 @@ export function NewSessionSheet({
       <View style={[styles.sheet, { backgroundColor: colors.card }]}>
         <ScrollView keyboardShouldPersistTaps="handled">
           <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
+
+          {locked && (
+            <View style={[styles.lockedNotice, { backgroundColor: colors.backgroundElement }]}>
+              <Text style={[styles.lockedNoticeText, { color: colors.textSecondary }]}>
+                Agent, model, effort, and directory are locked after the first message.
+              </Text>
+            </View>
+          )}
 
           <Text style={[styles.label, { color: colors.textSecondary }]}>Working directory</Text>
           <TextInput
@@ -80,25 +132,28 @@ export function NewSessionSheet({
             placeholderTextColor={colors.textSecondary}
             value={directory}
             onChangeText={setDirectory}
+            editable={!locked}
             autoCapitalize="none"
             autoCorrect={false}
-            autoFocus
+            autoFocus={!locked}
           />
           <Text style={[styles.hint, { color: colors.textSecondary }]}>
             The agent runs `cd` here before starting. Point it at the folder where you cloned
             your repo. It&apos;s created if it doesn&apos;t exist.
           </Text>
 
-          <View style={styles.rememberRow}>
-            <Text style={[styles.rememberLabel, { color: colors.text }]}>
-              Remember as default
-            </Text>
-            <Switch
-              value={rememberDirectory}
-              onValueChange={setRememberDirectory}
-              trackColor={{ false: colors.backgroundElement, true: colors.success }}
-            />
-          </View>
+          {!locked && (
+            <View style={styles.rememberRow}>
+              <Text style={[styles.rememberLabel, { color: colors.text }]}>
+                Remember directory as default
+              </Text>
+              <Switch
+                value={rememberDirectory}
+                onValueChange={setRememberDirectory}
+                trackColor={{ false: colors.backgroundElement, true: colors.success }}
+              />
+            </View>
+          )}
 
           {showProviderPicker && (
             <>
@@ -111,7 +166,8 @@ export function NewSessionSheet({
                       styles.segment,
                       provider === option && { backgroundColor: colors.card },
                     ]}
-                    onPress={() => setProvider(option)}
+                    onPress={() => handleProviderChange(option)}
+                    disabled={locked}
                   >
                     <Text
                       style={[
@@ -127,6 +183,75 @@ export function NewSessionSheet({
             </>
           )}
 
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Model</Text>
+          {isCodexProvider(provider) ? (
+            <TextInput
+              style={[
+                styles.input,
+                {
+                  color: colors.text,
+                  backgroundColor: colors.inputBackground,
+                  borderColor: colors.border,
+                },
+              ]}
+              value={model}
+              onChangeText={setModel}
+              editable={!locked}
+              placeholder="Codex default"
+              placeholderTextColor={colors.textSecondary}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          ) : (
+            <View style={[styles.segmented, { backgroundColor: colors.backgroundElement }]}>
+              {CLAUDE_MODELS.map((option) => (
+                <Pressable
+                  key={option}
+                  style={[
+                    styles.segment,
+                    model === option && { backgroundColor: colors.card },
+                  ]}
+                  onPress={() => setModel(option)}
+                  disabled={locked}
+                >
+                  <Text
+                    style={[
+                      styles.segmentText,
+                      { color: model === option ? colors.tint : colors.textSecondary },
+                    ]}
+                  >
+                    {option.charAt(0).toUpperCase() + option.slice(1)}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Effort</Text>
+          <View style={styles.effortGrid}>
+            {effortOptions.map((option) => (
+              <Pressable
+                key={option}
+                style={[
+                  styles.effortChip,
+                  { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                  effort === option && { borderColor: colors.tint, backgroundColor: colors.tint + '12' },
+                ]}
+                onPress={() => setEffort(option)}
+                disabled={locked}
+              >
+                <Text
+                  style={[
+                    styles.effortChipText,
+                    { color: effort === option ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {effortDisplayName(option)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
           <View style={styles.buttons}>
             <Pressable
               style={[styles.button, { backgroundColor: colors.backgroundElement }]}
@@ -138,7 +263,9 @@ export function NewSessionSheet({
               style={[styles.button, { backgroundColor: colors.tint }]}
               onPress={handleCreate}
             >
-              <Text style={[styles.buttonText, { color: '#fff' }]}>{confirmLabel}</Text>
+              <Text style={[styles.buttonText, { color: '#fff' }]}>
+                {locked ? 'Done' : confirmLabel}
+              </Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -166,6 +293,15 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xl,
     fontWeight: '700',
     marginBottom: Spacing.lg,
+  },
+  lockedNotice: {
+    borderRadius: 10,
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  lockedNoticeText: {
+    fontSize: FontSize.sm,
+    lineHeight: 19,
   },
   label: {
     fontSize: FontSize.xs,
@@ -208,6 +344,21 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   segmentText: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+  },
+  effortGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  effortChip: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  effortChipText: {
     fontSize: FontSize.sm,
     fontWeight: '600',
   },

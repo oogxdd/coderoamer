@@ -1,5 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { AgentProvider, ChatMessage } from '@/models/chat';
+import {
+  AgentEffort,
+  AgentProvider,
+  ChatMessage,
+  normalizeAgentEffort,
+} from '@/models/chat';
 import { Database, getDatabase } from './database';
 
 /**
@@ -22,6 +27,8 @@ export interface PersistedChat {
   chatNumber: number;
   customName?: string;
   provider: AgentProvider;
+  model?: string;
+  effort?: AgentEffort;
   claudeSessionId?: string;
   codexSessionId?: string;
   currentServiceName?: string;
@@ -61,6 +68,8 @@ export function normalizePersistedChat(value: unknown): PersistedChat {
     chatNumber: Number(raw.chatNumber ?? 1),
     customName: typeof raw.customName === 'string' ? raw.customName : undefined,
     provider: normalizeProvider(raw.provider),
+    model: typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : undefined,
+    effort: normalizeAgentEffort(raw.effort),
     claudeSessionId: typeof raw.claudeSessionId === 'string' ? raw.claudeSessionId : undefined,
     codexSessionId: typeof raw.codexSessionId === 'string' ? raw.codexSessionId : undefined,
     currentServiceName:
@@ -109,6 +118,8 @@ interface ChatRow {
   sprite_name: string;
   chat_number: number;
   provider: string;
+  model: string | null;
+  effort: string | null;
   custom_name: string | null;
   claude_session_id: string | null;
   codex_session_id: string | null;
@@ -153,6 +164,8 @@ function rowToChat(row: ChatRow, activeRun?: ActiveChatRun): PersistedChat {
     spriteName: row.sprite_name,
     chatNumber: row.chat_number,
     provider: normalizeProvider(row.provider),
+    model: row.model ?? undefined,
+    effort: normalizeAgentEffort(row.effort),
     customName: row.custom_name ?? undefined,
     claudeSessionId: row.claude_session_id ?? undefined,
     codexSessionId: row.codex_session_id ?? undefined,
@@ -181,15 +194,17 @@ function safeParseStringArray(raw: string): string[] {
 
 const CHAT_UPSERT_SQL = `
 INSERT INTO chats (
-  id, sprite_name, chat_number, provider, custom_name, claude_session_id,
+  id, sprite_name, chat_number, provider, model, effort, custom_name, claude_session_id,
   codex_session_id, current_service_name, working_directory, created_at,
   last_used, is_closed, first_message_preview, last_session_complete,
   processed_event_uuids
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   sprite_name = excluded.sprite_name,
   chat_number = excluded.chat_number,
   provider = excluded.provider,
+  model = excluded.model,
+  effort = excluded.effort,
   custom_name = excluded.custom_name,
   claude_session_id = excluded.claude_session_id,
   codex_session_id = excluded.codex_session_id,
@@ -209,6 +224,8 @@ function chatParams(chat: PersistedChat) {
     chat.spriteName,
     chat.chatNumber,
     chat.provider,
+    chat.model ?? null,
+    chat.effort ?? null,
     chat.customName ?? null,
     chat.claudeSessionId ?? null,
     chat.codexSessionId ?? null,
@@ -483,7 +500,7 @@ export const chatRepository = {
   /**
    * Apply a partial scalar update to a chat (lastUsed, firstMessagePreview,
    * provider, workingDirectory, isClosed, lastSessionComplete, customName,
-   * currentServiceName). Undefined fields are left untouched.
+   * currentServiceName, model, effort). Undefined fields are left untouched.
    */
   async patch(
     chatId: string,
@@ -493,6 +510,8 @@ export const chatRepository = {
         | 'lastUsed'
         | 'firstMessagePreview'
         | 'provider'
+        | 'model'
+        | 'effort'
         | 'workingDirectory'
         | 'isClosed'
         | 'lastSessionComplete'
@@ -509,6 +528,8 @@ export const chatRepository = {
       ['lastUsed', 'last_used'],
       ['firstMessagePreview', 'first_message_preview'],
       ['provider', 'provider'],
+      ['model', 'model'],
+      ['effort', 'effort'],
       ['workingDirectory', 'working_directory'],
       ['isClosed', 'is_closed'],
       ['lastSessionComplete', 'last_session_complete'],

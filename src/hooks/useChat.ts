@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import {
+  AgentEffort,
   AgentProvider,
   ChatContent,
   ChatMessage,
@@ -9,6 +10,7 @@ import {
   TurnOutcome,
   isCodexProvider,
   makeId,
+  normalizeAgentEffort,
   providerDisplayName,
 } from '@/models/chat';
 import {
@@ -32,6 +34,7 @@ import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
 import { getSetting } from '@/services/storage';
 import {
   buildFallbackPrompt,
+  buildCodexAppServerCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
   classifyCodexAuthIssue,
@@ -75,6 +78,8 @@ interface UseChatOptions {
   chatId: string;
   workingDirectory: string;
   provider: AgentProvider;
+  model?: string;
+  effort?: AgentEffort;
   initialClaudeSessionId?: string;
   initialCodexSessionId?: string;
   initialActiveRun?: ActiveChatRun;
@@ -98,7 +103,7 @@ type ChatTurnTiming = {
 };
 
 export function useChat(options: UseChatOptions) {
-  const { spriteName, chatId, workingDirectory, provider } = options;
+  const { spriteName, chatId, workingDirectory, provider, model, effort } = options;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>('idle');
@@ -499,9 +504,11 @@ export function useChat(options: UseChatOptions) {
         if (isCurrentStream) {
           abortRef.current = null;
         }
-        if (wasDetaching && !agentTurnCompleteRef.current) {
-          debugChat('active exec detached', provider, activeRun.execSessionId);
-          if (isCurrentStream) setStatusTracked('idle');
+        if (wasDetaching) {
+          if (!agentTurnCompleteRef.current) {
+            debugChat('active exec detached', provider, activeRun.execSessionId);
+            if (isCurrentStream) setStatusTracked('idle');
+          }
           await persistMessages();
           return;
         }
@@ -834,6 +841,57 @@ export function useChat(options: UseChatOptions) {
     [updateActiveAssistant]
   );
 
+  /**
+   * A provider's terminal event is authoritative. Close the local stream and
+   * clear the persisted run immediately instead of keeping a stale Stop button
+   * visible until the WebSocket happens to close.
+   */
+  const completeTurnFromEvent = useCallback(
+    (opts?: { terminateProcess?: boolean; autoSendQueued?: boolean }) => {
+      clearPersistTimer();
+      const run = activeRunRef.current;
+      const sessionId = execSessionIdRef.current ?? run?.execSessionId;
+
+      if (opts?.terminateProcess && sessionId) {
+        api.killExecSession(spriteName, sessionId).catch(() => {});
+      }
+      if (opts?.terminateProcess && run?.taskName) {
+        api.runExec(spriteName, buildProcessGroupKillCommand(run.taskName), 15).catch(() => {});
+      }
+
+      const controller = abortRef.current;
+      if (controller) {
+        detachingControllersRef.current.add(controller);
+        controller.abort();
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+
+      execSessionIdRef.current = undefined;
+      activeUserMessageIdRef.current = undefined;
+      activeAssistantMessageIdRef.current = undefined;
+      assistantTextSeenRef.current = false;
+      setActiveRun(undefined);
+      setStatusTracked('idle');
+
+      // Let React apply the final content updater before serializing it.
+      setTimeout(() => {
+        persistMessages()
+          .catch(() => {})
+          .finally(() => {
+            if (opts?.autoSendQueued !== false) maybeSendNextQueued();
+          });
+      }, 0);
+    },
+    [
+      clearPersistTimer,
+      maybeSendNextQueued,
+      persistMessages,
+      setActiveRun,
+      setStatusTracked,
+      spriteName,
+    ]
+  );
+
   const handleClaudeEvent = useCallback(
     (event: ClaudeStreamEvent) => {
       switch (event.type) {
@@ -947,6 +1005,7 @@ export function useChat(options: UseChatOptions) {
             numTurns: res.num_turns,
             completedAt: Date.now(),
           });
+          completeTurnFromEvent();
           break;
         }
         case 'streamEvent': {
@@ -972,7 +1031,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [appendAssistantText, appendPartialDelta, appendTurnOutcome, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
+    [appendAssistantText, appendPartialDelta, appendTurnOutcome, completeTurnFromEvent, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
   );
 
   const handleCodexEvent = useCallback(
@@ -1178,24 +1237,24 @@ export function useChat(options: UseChatOptions) {
               : undefined,
             completedAt: Date.now(),
           });
-          if (activeRunRef.current?.transport === 'codexAppServer') {
-            const sessionId = execSessionIdRef.current ?? activeRunRef.current.execSessionId;
-            if (sessionId) {
-              api.killExecSession(spriteName, sessionId).catch(() => {});
-            }
-          }
+          completeTurnFromEvent();
           break;
         case 'error':
           debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);
+          agentTurnCompleteRef.current = true;
           setErrorMessage(event.message);
           appendTurnOutcome({ status: 'error', completedAt: Date.now() });
+          completeTurnFromEvent({
+            terminateProcess: activeRunRef.current?.transport === 'codexAppServer',
+            autoSendQueued: false,
+          });
           break;
         case 'unknown':
           debugChat('codex unknown event', elapsedSince(turnTimingRef.current.startedAt), codexEventDebugLabel(event));
           break;
       }
     },
-    [appendAssistantText, appendTurnOutcome, updateActiveAssistant, setCodexSessionId, spriteName]
+    [appendAssistantText, appendTurnOutcome, completeTurnFromEvent, updateActiveAssistant, setCodexSessionId]
   );
 
   const reportCodexAuthIssue = useCallback(
@@ -1348,6 +1407,7 @@ export function useChat(options: UseChatOptions) {
       const commandParts: string[] = [];
       let codexAppServerPrompt: string | undefined;
       let codexAppServerModel: string | undefined;
+      let codexAppServerEffort: AgentEffort | undefined;
       let transport: ActiveChatRun['transport'] = 'exec';
 
       // Credentials (git identity, GitHub HTTPS auth, Claude OAuth) are written
@@ -1376,13 +1436,19 @@ export function useChat(options: UseChatOptions) {
           claudeCmd += ' --include-partial-messages';
         }
 
-        const [modelId, maxTurns, customInstructions] = await Promise.all([
+        const [globalModel, globalEffort, maxTurns, customInstructions] = await Promise.all([
           getSetting('claudeModel'),
+          getSetting('claudeEffort'),
           getSetting('maxTurns'),
           getSetting('customInstructions'),
         ]);
 
-        claudeCmd += ` --model ${shellQuote(modelId ?? 'sonnet')}`;
+        const modelId = model?.trim() || globalModel || 'sonnet';
+        const selectedEffort = effort ?? normalizeAgentEffort(globalEffort) ?? 'high';
+
+        claudeCmd += ` --model ${shellQuote(modelId)}`;
+        claudeCmd += ` --effort ${shellQuote(selectedEffort)}`;
+        setModelName(modelId);
 
         if (maxTurns && maxTurns !== '0') {
           claudeCmd += ` --max-turns ${shellQuote(maxTurns)}`;
@@ -1399,8 +1465,12 @@ export function useChat(options: UseChatOptions) {
 
         commandParts.push(claudeCmd);
       } else {
-        const codexModelSetting = await getSetting('codexModel');
-        const codexModel = codexModelSetting?.trim();
+        const [codexModelSetting, codexEffortSetting] = await Promise.all([
+          getSetting('codexModel'),
+          getSetting('codexEffort'),
+        ]);
+        const codexModel = model?.trim() || codexModelSetting?.trim();
+        const selectedEffort = effort ?? normalizeAgentEffort(codexEffortSetting) ?? 'high';
         setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
@@ -1409,8 +1479,9 @@ export function useChat(options: UseChatOptions) {
         if (provider === 'codexAppServer') {
           codexAppServerPrompt = codexPrompt;
           codexAppServerModel = codexModel || undefined;
+          codexAppServerEffort = selectedEffort;
           transport = 'codexAppServer';
-          commandParts.push('codex app-server --stdio');
+          commandParts.push(buildCodexAppServerCommand());
         } else {
           let codexCmd = codexSessionIdRef.current
             ? 'codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox'
@@ -1418,6 +1489,7 @@ export function useChat(options: UseChatOptions) {
           if (codexModel) {
             codexCmd += ` --model ${shellQuote(codexModel)}`;
           }
+          codexCmd += ` -c ${shellQuote(`model_reasoning_effort="${selectedEffort}"`)}`;
           if (codexSessionIdRef.current) {
             codexCmd += ` ${shellQuote(codexSessionIdRef.current)}`;
           }
@@ -1501,6 +1573,7 @@ export function useChat(options: UseChatOptions) {
             prompt: codexAppServerPrompt,
             threadId: codexSessionIdRef.current,
             model: codexAppServerModel,
+            effort: codexAppServerEffort,
             maxRunAfterDisconnect: CHAT_MAX_RUN_AFTER_DISCONNECT,
             signal: abortController.signal,
             onEvent,
@@ -1525,13 +1598,22 @@ export function useChat(options: UseChatOptions) {
         if (err.name !== 'AbortError') {
           const message = err.message ?? 'Stream error';
           debugChat('stream error', provider, message);
-          if (streamActiveRunRef.current && !agentTurnCompleteRef.current) {
+          if (
+            streamActiveRunRef.current &&
+            !agentTurnCompleteRef.current &&
+            err?.terminal !== true
+          ) {
             // The exec session may still be running on the sprite — treat the
             // dropped stream like a disconnect and let the reconnect loop decide.
             disconnectedBeforeExit = true;
           } else {
             sendError = message;
             setErrorMessage(message);
+            if (err?.terminal === true) {
+              agentTurnCompleteRef.current = true;
+              appendTurnOutcome({ status: 'error', completedAt: Date.now() });
+              completeTurnFromEvent({ terminateProcess: true, autoSendQueued: false });
+            }
           }
           if (isCodexProvider(provider)) {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
@@ -1635,6 +1717,10 @@ export function useChat(options: UseChatOptions) {
       spriteName,
       handleClaudeEvent,
       handleCodexEvent,
+      appendTurnOutcome,
+      completeTurnFromEvent,
+      effort,
+      model,
       workingDirectory,
     ]
   );
