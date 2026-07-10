@@ -23,7 +23,8 @@ npx expo run:ios            # dev build on iOS simulator (NOT Expo Go — custom
 npx expo run:ios --device   # dev build on a connected physical iPhone
 npm run android             # expo run:android
 npm run web                 # starts scripts/ws-proxy.js (background) + expo start --web
-npm run lint                # expo lint (ESLint). There is NO test suite.
+npm run lint                # expo lint (ESLint, flat config in eslint.config.js)
+npm run test                # vitest — unit tests for parsers/transcripts/helpers (src/**/__tests__)
 npm run reset-project       # node ./scripts/reset-project.js (resets the Expo template bits)
 ```
 
@@ -57,9 +58,12 @@ node scripts/ws-proxy.js         # WS auth proxy for web (browsers can't auth WS
   2. Strips trailing `.js` from `@babel/runtime/helpers` internal requires, because
      v7.28+'s package exports map omits `.js` but the helpers require with `.js`,
      which Metro can't match. The custom `resolveRequest` fixes this.
-- **No tests.** There is no test runner configured. `scripts/test-ws-server.js`
-  is a *manual* dummy server for terminal development, not an automated test.
-  Don't claim to "run tests" — run `npm run lint` instead.
+- **Unit tests exist; no e2e.** `npm run test` runs vitest over the pure chat
+  logic (stream parsers, transcript rendering/merging, shell command builders)
+  with `react-native`/`expo-secure-store` aliased to stubs (`vitest.config.ts`).
+  UI and hooks are untested — verify those by running the app.
+  `scripts/test-ws-server.js` is a *manual* dummy server for terminal
+  development, not an automated test.
 - **Bundle identifier inconsistency in the repo:** `app.json` uses
   `com.digital.spritespack` (both `ios.bundleIdentifier` and `android.package`),
   but `README.md`/`DEPLOYMENT.md` reference `com.digital.spritesmanager`. Treat
@@ -97,35 +101,55 @@ api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
 
 ### The chat streaming pipeline (the core of the app)
 
-`src/hooks/useChat.ts` is the single hook that drives chat. Flow:
+`src/hooks/useChat.ts` drives chat; its pure helpers (shell quoting, heartbeat
+wrapper, transcript merge/signature, auth sniffing, notify/kill command
+builders) live in `src/services/chat-helpers.ts` and are unit-tested. Flow:
 
-1. On send, it builds a shell command: `mkdir -p <wd> && cd <wd> && git config ... &&
-   export CLAUDE_CODE_OAUTH_TOKEN=... && export NO_DNA=1 && claude -p --verbose
-   --output-format stream-json --dangerously-skip-permissions --model <m>
-   [--max-turns N] [--append-system-prompt '...'] [--resume <id>] '<prompt>'`.
-   The whole thing is wrapped in a **heartbeat subshell**
-   `{ (while true; do sleep 20; printf . >&2; done) & HBEAT=$!; trap "kill $HBEAT" EXIT; <cmd>; kill $HBEAT; }`
-   to keep the Sprites service log stream alive.
-2. It starts a Sprites **service** via `api.streamService()` (`PUT /sprites/{name}/services/{svc}`)
-   with `cmd: 'bash', args: ['-c', fullCommand]`. Output streams back as NDJSON.
-3. Each service log line is `ServiceLogEvent` (`{type:'stdout'|'stderr'|'exit'|..., data}`).
-   The `data` of a `stdout` line is itself a line of Claude's `stream-json` NDJSON,
-   prefixed by a log timestamp like `2026-02-19T09:13:24.665Z [stdout] `.
-   `stripLogTimestamps()` strips that prefix; `ClaudeStreamParser` parses the inner NDJSON.
-   This is a **two-level NDJSON** parse — easy to miss.
-4. Parsed `ClaudeStreamEvent`s (`system`/`assistant`/`user`(tool_result)/`result`)
-   are applied to the in-memory `ChatMessage[]` via `updateActiveAssistant`. Tool-use
-   blocks become `ToolUseCard`s; matching tool_results attach the `result` back to the
-   card and also push a `toolResult` content item.
-5. `processedUUIDsRef` dedupes Claude events by `uuid`, because service-log replay can
-   re-emit lines.
-6. If `streamService` returns zero events, it falls back to `streamServiceLogs` (replay).
-7. On reopen, if the chat has a `claudeSessionId`, `loadSession` pulls the on-disk
-   transcript (`readClaudeSessionMessages`) and `mergeTranscript` overlays it,
-   **preserving message ids for the shared prefix** so React reuses bubbles instead
-   of remounting/re-scrolling. `conversationSignature` short-circuits the setState if
-   nothing actually changed (this was a real bug: reopening looked like the last turn
-   was duplicated and re-answered).
+1. `sendMessage` appends the user + empty assistant messages, persists them,
+   then hands off to **`executeTurn`**, which builds a shell command:
+   `mkdir -p <wd> && cd <wd> && . ~/.sprite_env && export NO_DNA=1 && claude -p
+   --verbose --output-format stream-json --dangerously-skip-permissions
+   --model <m> [--max-turns N] [--append-system-prompt '...'] [--resume <id>]
+   '<prompt>'` (Codex: `codex exec --json ...` or `codex app-server --stdio`).
+   If a ntfy topic is configured, `buildTurnNotifySuffix` appends a curl that
+   pushes a phone notification when the agent exits. The whole thing is wrapped
+   by `withSpriteTaskHeartbeat` (sprite task re-put every 60s + a stderr dot
+   every 20s + cleanup trap) so the sprite stays awake for the entire turn.
+2. The turn runs over the **Exec WebSocket** (`api.streamExec`,
+   `WSS /v1/sprites/{name}/exec`, `max_run_after_disconnect=8h`) — *not* the
+   Services API (supervised services can restart and replay the prompt; see
+   `docs/codex-chat-transport-architecture.md`). Binary frames are
+   `[streamId][payload]`; stdout carries the agent's NDJSON with **no** log
+   timestamps (`stripLogTimestamps` is defensive for legacy/service paths).
+3. Once the exec session id arrives, an **`ActiveChatRun`** (exec session id,
+   unique task name `wisp-chat-<provider>-<userMessageId>`, message ids) is
+   persisted via `chatRepository` — that row is what makes a turn survive app
+   restarts, chat switches, and network drops.
+4. Parsed `ClaudeStreamEvent`s / `CodexStreamEvent`s are applied to the
+   in-memory `ChatMessage[]` via `updateActiveAssistant`; tool_use blocks
+   become `ToolUseCard`s, tool_results attach back to their card.
+   `processedUUIDsRef` dedupes Claude events by `uuid`. Claude `result` events
+   (and Codex `turn.completed`/`error`, plus local interrupts) append a
+   **`turnOutcome`** content item — the footer that distinguishes
+   success / max-turns (with a Continue action) / error / interrupted.
+5. **Disconnects are not failures.** A dropped socket or attach error enters a
+   reconnect loop (`scheduleReconnect`, 1s→30s backoff): each tick probes
+   `GET /exec` — unreachable → keep backing off; session gone → the run
+   finished while away, finalize from the on-disk transcript
+   (`finishActiveRun`); alive → `attachToRun` reattaches. Reattach pulls the
+   on-disk transcript *before* opening the socket (the attach socket has no
+   replay). `reconcileActiveRuns` (`src/services/run-reconcile.ts`) does the
+   same probe for *all* of a sprite's persisted runs on screen open/foreground.
+6. A send that errored before any exec session/output existed becomes a
+   `failedSend` with a Retry button; messages sent while a turn streams are
+   queued (`queuedPrompts`) and auto-sent when a turn completes normally.
+7. On reopen, if the chat has a `claudeSessionId`/`codexSessionId`,
+   `loadSession` pulls the on-disk transcript (`readClaudeSessionMessages` /
+   `readCodexSessionMessages`) and `mergeTranscript` overlays it, **preserving
+   message ids for the shared prefix** (React reuses bubbles instead of
+   remounting) and **carrying over locally recorded `turnOutcome` items**
+   (transcripts have no result lines). `conversationSignature` short-circuits
+   the setState if nothing changed.
 
 ### Codex provider
 
@@ -201,11 +225,15 @@ and `exec-poc.tsx` `require()`s the native component conditionally.
   (`CLAUDE_CODE_OAUTH_TOKEN`, injected at launch time), `githubToken` (device flow,
   optional — used to auto-fill git name/email), plus optional `assemblyAiToken`
   and `openAiToken` for client-side audio transcription. `AuthContext` exposes state.
-- **Chats & settings** (`src/services/storage.ts`): AsyncStorage with prefixes
-  `sprite_chats_<spriteName>` (the list of `PersistedChat`), `chat_meta_<chatId>`
-  (the `ChatMessage[]`), `setting_<key>` (string settings) / `setting_<key>`=`'true'|'false'`
-  for bools. `normalizePersistedChat` defensively sanitizes on load and re-saves
-  if the shape changed (migration).
+- **Chats** (`src/services/chat-repository.ts` + `database.ts`): SQLite
+  (`expo-sqlite`, WAL). Tables `chats`, `chat_messages` (one row per message),
+  `active_runs` (the persisted `ActiveChatRun` per chat). A one-time
+  AsyncStorage → SQLite import runs on first launch (`migration_meta` flag).
+  `normalizePersistedChat` defensively sanitizes on load.
+- **Settings** (`src/services/storage.ts`): AsyncStorage, `setting_<key>`
+  strings (bools as `'true'|'false'`). Notable keys: `claudeModel`, `maxTurns`,
+  `customInstructions`, `defaultProvider`, `defaultWorkingDirectory`,
+  `transcriptionProvider`, `ntfyTopic`/`ntfyServer` (turn-finished push).
 
 ### API layer (`src/services/api.ts`)
 
@@ -242,11 +270,17 @@ update this doc.**
   are always passed.** No approval prompts — autonomous coding is the point.
   Safety net is the Checkpoints tab (snapshot/restore the filesystem).
 - **One `useChat` instance is shared across all chats in a sprite.** Switching
-  sessions calls `chat.interrupt()` first to stop any in-flight stream, then
-  swaps `chatId`/`workingDirectory`/session ids. Don't instantiate per-session.
-- **Service names are random** (`wisp-<provider>-<id>` via `makeServiceName`),
-  so each send is a fresh service. `interrupt()` aborts the stream and
-  `deleteService()`s the current one.
+  sessions calls `chat.detachStream()` first — the exec session **keeps
+  running** on the sprite and is reattached when its chat reopens (via the
+  persisted `ActiveChatRun`). `interrupt()` is the *stop* action: it kills the
+  exec session **and** runs a process-group kill found via the turn's unique
+  task name (`buildProcessGroupKillCommand` — a plain session SIGTERM only hits
+  the bash wrapper, whose trap is deferred while the agent runs). Don't
+  instantiate `useChat` per-session, and don't confuse detach with interrupt.
+- **Each turn is a fresh exec session** named by task
+  `wisp-chat-<provider>-<userMessageId>` (`safeTaskName`). Old builds ran turns
+  as supervised services — `cleanupLegacyChatServices` still deletes stale
+  `wisp-claude-*`/`wisp-codex-*`/`wisp-exec-*` services on sprite open.
 - **Path aliases** (`tsconfig.json`): `@/*` → `./src/*`, `@/assets/*` → `./assets/*`.
 - **Theming:** `useTheme()` (`src/hooks/use-theme.ts`) returns the active
   `Colors` palette from `src/constants/theme.ts` (light/dark aware via
@@ -278,9 +312,12 @@ update this doc.**
   `useChat.handleClaudeEvent`.
 - **Touching `useChat`** → it's large and ref-heavy. Read the whole file first.
   The refs (`messagesRef`, `activeUser/AssistantMessageIdRef`,
-  `toolUseIndexRef`, `processedUUIDsRef`, `loadRequestRef`) are the source of
+  `toolUseIndexRef`, `processedUUIDsRef`, `loadRequestRef`, `activeRunRef`,
+  `reconnectTimerRef`, `queuedPromptsRef`, `failedSendRef`) are the source of
   truth inside callbacks; `useState` mirrors them for render. Don't split
-  without preserving the ref-mirror invariant.
+  without preserving the ref-mirror invariant. Pure logic belongs in
+  `src/services/chat-helpers.ts` (unit-tested, no RN imports) — put new
+  side-effect-free helpers there, not in the hook.
 - **Touching the terminal** → `TerminalBuffer` is a faithful xterm.js port;
   preserve its semantics. Test with `scripts/test-ws-server.js` against a real
   `claude` TUI.
