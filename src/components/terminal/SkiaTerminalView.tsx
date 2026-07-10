@@ -22,5 +22,6 @@ const SkiaTerminalView = forwardRef<SkiaTerminalHandle, SkiaTerminalViewProps>(
     />
   )
 );
+SkiaTerminalView.displayName = 'SkiaTerminalView';
 
 export default SkiaTerminalView;
