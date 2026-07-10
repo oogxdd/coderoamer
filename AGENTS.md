@@ -109,8 +109,13 @@ builders) live in `src/services/chat-helpers.ts` and are unit-tested. Flow:
    then hands off to **`executeTurn`**, which builds a shell command:
    `mkdir -p <wd> && cd <wd> && . ~/.sprite_env && export NO_DNA=1 && claude -p
    --verbose --output-format stream-json --dangerously-skip-permissions
-   --model <m> [--max-turns N] [--append-system-prompt '...'] [--resume <id>]
-   '<prompt>'` (Codex: `codex exec --json ...` or `codex app-server --stdio`).
+   --include-partial-messages --model <m> [--max-turns N]
+   [--append-system-prompt '...'] [--resume <id>] '<prompt>'`
+   (Codex: `codex exec --json ...` or `codex app-server --stdio`).
+   `--include-partial-messages` gives token-level `stream_event` deltas,
+   rendered as a live preview and **replaced** by each complete `assistant`
+   event (`partialDeltaCountRef` tracks the preview tail); a CLI that rejects
+   the flag is sniffed from stderr and the turn retried once without it.
    If a ntfy topic is configured, `buildTurnNotifySuffix` appends a curl that
    pushes a phone notification when the agent exits. The whole thing is wrapped
    by `withSpriteTaskHeartbeat` (sprite task re-put every 60s + a stderr dot

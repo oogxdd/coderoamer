@@ -13,6 +13,7 @@ import {
 } from '@/models/chat';
 import {
   ClaudeAssistantEvent,
+  ClaudePartialStreamEvent,
   ClaudeResultEvent,
   ClaudeStreamEvent,
   ClaudeSystemEvent,
@@ -138,6 +139,15 @@ export function useChat(options: UseChatOptions) {
   const failedSendRef = useRef<FailedSend | undefined>(undefined);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
+  // Token streaming (--include-partial-messages): count of trailing content
+  // items in the active assistant message built from deltas of the in-flight
+  // API message, and whether the newest one is still appendable. The complete
+  // `assistant` event replaces these with the authoritative blocks.
+  const partialDeltaCountRef = useRef(0);
+  const partialBlockOpenRef = useRef(false);
+  // Old CLIs reject the flag; sniffed from stderr, retried once without it.
+  const partialFlagRejectedRef = useRef(false);
+  const partialMessagesUnsupportedRef = useRef(false);
   // Serialized snapshot of the last persisted transcript, keyed by chat, so
   // saves can write only the rows that changed since the previous save.
   const persistedPayloadsRef = useRef<{ chatId: string; payloads: string[] } | null>(null);
@@ -440,6 +450,9 @@ export function useChat(options: UseChatOptions) {
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
       agentTurnCompleteRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
       serviceEventsSeenRef.current = 0;
       turnTimingRef.current = { startedAt: Date.now() };
       setStatusTracked('reconnecting');
@@ -534,6 +547,9 @@ export function useChat(options: UseChatOptions) {
       codexParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
       turnTimingRef.current = {};
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
@@ -773,6 +789,34 @@ export function useChat(options: UseChatOptions) {
     [provider, updateMessages]
   );
 
+  /**
+   * Render a token-streaming delta. Delta-built blocks are a live preview of
+   * the in-flight API message; handleClaudeEvent's `assistant` case swaps them
+   * for the authoritative blocks when the message completes.
+   */
+  const appendPartialDelta = useCallback(
+    (kind: 'text' | 'reasoning', text: string) => {
+      if (!text) return;
+      updateActiveAssistant((newContent) => {
+        if (kind === 'text') assistantTextSeenRef.current = true;
+        const last = newContent[newContent.length - 1];
+        const appendable =
+          partialDeltaCountRef.current > 0 && partialBlockOpenRef.current && last?.type === kind;
+        if (appendable && last?.type === 'text') {
+          newContent[newContent.length - 1] = { type: 'text', text: last.text + text };
+        } else if (appendable && last?.type === 'reasoning') {
+          newContent[newContent.length - 1] = { type: 'reasoning', text: last.text + text };
+        } else {
+          newContent.push(kind === 'text' ? { type: 'text', text } : { type: 'reasoning', text });
+          partialDeltaCountRef.current += 1;
+        }
+        partialBlockOpenRef.current = true;
+        return newContent;
+      });
+    },
+    [updateActiveAssistant]
+  );
+
   // A turn has exactly one outcome; replace rather than stack when a merge or
   // replay already recorded one.
   const appendTurnOutcome = useCallback(
@@ -803,6 +847,13 @@ export function useChat(options: UseChatOptions) {
           const asst = event.event as ClaudeAssistantEvent;
           debugChat('claude assistant event', asst.message.content.map((b) => b.type));
           updateActiveAssistant((newContent, targetIndex) => {
+            // Swap the delta-built preview of this API message for its
+            // authoritative blocks (same text, plus complete tool_use inputs).
+            if (partialDeltaCountRef.current > 0) {
+              newContent.splice(newContent.length - partialDeltaCountRef.current);
+              partialDeltaCountRef.current = 0;
+              partialBlockOpenRef.current = false;
+            }
             for (const block of asst.message.content) {
               if (block.type === 'text' && 'text' in block) {
                 if (block.text) assistantTextSeenRef.current = true;
@@ -898,11 +949,30 @@ export function useChat(options: UseChatOptions) {
           });
           break;
         }
+        case 'streamEvent': {
+          const stream = event.event as ClaudePartialStreamEvent;
+          const inner = stream.event;
+          if (!inner) break;
+          if (inner.type === 'content_block_start') {
+            // Block boundary — the next delta starts a fresh content item.
+            partialBlockOpenRef.current = false;
+          } else if (inner.type === 'content_block_delta') {
+            const delta = inner.delta;
+            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+              appendPartialDelta('text', delta.text);
+            } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+              appendPartialDelta('reasoning', delta.thinking);
+            }
+            // input_json_delta (tool inputs) is intentionally ignored — tool
+            // cards come from the complete assistant event.
+          }
+          break;
+        }
         case 'unknown':
           break;
       }
     },
-    [appendAssistantText, appendTurnOutcome, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
+    [appendAssistantText, appendPartialDelta, appendTurnOutcome, ensureTurnAssistantText, setClaudeSessionId, updateActiveAssistant]
   );
 
   const handleCodexEvent = useCallback(
@@ -1201,6 +1271,14 @@ export function useChat(options: UseChatOptions) {
           if (isCodexProvider(provider) && event.data) {
             codexStderrRef.current += `\n${event.data}`;
           }
+          if (
+            provider === 'claude' &&
+            event.data &&
+            /unknown option/i.test(event.data) &&
+            event.data.includes('include-partial-messages')
+          ) {
+            partialFlagRejectedRef.current = true;
+          }
           if (event.data) {
             if (isHeartbeatStderr(event.data)) {
               debugChat('stderr heartbeat', provider, elapsedSince(turnTimingRef.current.startedAt));
@@ -1292,6 +1370,11 @@ export function useChat(options: UseChatOptions) {
 
         let claudeCmd =
           'claude -p --verbose --output-format stream-json --dangerously-skip-permissions';
+        if (!partialMessagesUnsupportedRef.current) {
+          // Token-level streaming; old CLIs that reject the flag are sniffed
+          // from stderr and the turn retried once without it.
+          claudeCmd += ' --include-partial-messages';
+        }
 
         const [modelId, maxTurns, customInstructions] = await Promise.all([
           getSetting('claudeModel'),
@@ -1367,6 +1450,9 @@ export function useChat(options: UseChatOptions) {
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
       agentTurnCompleteRef.current = false;
+      partialDeltaCountRef.current = 0;
+      partialBlockOpenRef.current = false;
+      partialFlagRejectedRef.current = false;
       turnTimingRef.current = { startedAt: turnTimingRef.current.startedAt ?? Date.now() };
       setStatusTracked('connecting');
       setErrorMessage(undefined);
@@ -1517,6 +1603,22 @@ export function useChat(options: UseChatOptions) {
         assistantTextSeenRef.current = false;
         if (isCurrentStream) setStatusTracked('idle');
         await persistMessages();
+        if (
+          partialFlagRejectedRef.current &&
+          !agentTurnCompleteRef.current &&
+          provider === 'claude' &&
+          isCurrentStream
+        ) {
+          // The installed claude CLI predates --include-partial-messages: the
+          // process exited on argument parsing, so nothing ran. Remember that
+          // for the rest of the session and repeat this turn without the flag.
+          partialFlagRejectedRef.current = false;
+          partialMessagesUnsupportedRef.current = true;
+          debugChat('claude CLI rejected --include-partial-messages; retrying without it');
+          setErrorMessage(undefined);
+          await executeTurn(prompt, userMessageId, assistantMessageId, historyForFallback);
+          return;
+        }
         if (agentTurnCompleteRef.current && !sendError) maybeSendNextQueued();
       }
     },

@@ -57,4 +57,20 @@ describe('ClaudeStreamParser', () => {
     const events = parser.parse('{"type":"system","session_id":"s","uuid":"u-1"}\n');
     expect(events[0].uuid).toBe('u-1');
   });
+
+  it('parses stream_event lines (token streaming) with their deltas', () => {
+    const parser = new ClaudeStreamParser();
+    const events = parser.parse(
+      '{"type":"stream_event","session_id":"s","uuid":"u-2","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}\n' +
+        '{"type":"stream_event","session_id":"s","uuid":"u-3","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"hmm"}}}\n' +
+        '{"type":"stream_event","session_id":"s","uuid":"u-4","event":{"type":"content_block_start","index":2,"content_block":{"type":"text"}}}\n'
+    );
+    expect(events.map((e) => e.type)).toEqual(['streamEvent', 'streamEvent', 'streamEvent']);
+    const first = events[0];
+    if (first.type !== 'streamEvent') throw new Error('expected streamEvent');
+    expect(first.event.event?.delta?.text).toBe('Hel');
+    const second = events[1];
+    if (second.type !== 'streamEvent') throw new Error('expected streamEvent');
+    expect(second.event.event?.delta?.thinking).toBe('hmm');
+  });
 });
