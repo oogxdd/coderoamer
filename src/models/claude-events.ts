@@ -42,7 +42,32 @@ export type ClaudeStreamEvent =
   | { type: 'assistant'; event: ClaudeAssistantEvent; uuid?: string }
   | { type: 'user'; event: ClaudeToolResultEvent; uuid?: string }
   | { type: 'result'; event: ClaudeResultEvent; uuid?: string }
+  | { type: 'streamEvent'; event: ClaudePartialStreamEvent; uuid?: string }
   | { type: 'unknown'; uuid?: string };
+
+/**
+ * A `stream_event` line emitted with `--include-partial-messages`: the raw
+ * Anthropic streaming envelope (message_start / content_block_start /
+ * content_block_delta / ... / message_stop). Text and thinking deltas render
+ * token-by-token; the complete `assistant` event that follows each API message
+ * remains the authoritative content.
+ */
+export interface ClaudePartialStreamEvent {
+  type: 'stream_event';
+  session_id?: string;
+  event?: {
+    type?: string;
+    index?: number;
+    delta?: {
+      type?: string;
+      text?: string;
+      thinking?: string;
+      partial_json?: string;
+    };
+    content_block?: { type?: string };
+  };
+  uuid?: string;
+}
 
 export interface ClaudeSystemEvent {
   type: 'system';
@@ -108,6 +133,8 @@ export function parseClaudeEvent(json: any): ClaudeStreamEvent | null {
         return { type: 'user', event: json as ClaudeToolResultEvent, uuid };
       case 'result':
         return { type: 'result', event: json as ClaudeResultEvent, uuid };
+      case 'stream_event':
+        return { type: 'streamEvent', event: json as ClaudePartialStreamEvent, uuid };
       default:
         return { type: 'unknown', uuid };
     }
