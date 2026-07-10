@@ -157,6 +157,19 @@ export function countUserMessages(messages: ChatMessage[]): number {
   return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
 }
 
+/**
+ * Index of the first position where two serialized-message snapshots differ.
+ * Streaming appends/edits only the conversation tail, so persisting from this
+ * index skips rewriting everything before it. Equal arrays return their common
+ * length — callers use that to skip the write entirely.
+ */
+export function firstDivergentIndex(prev: string[], next: string[]): number {
+  const min = Math.min(prev.length, next.length);
+  let i = 0;
+  while (i < min && prev[i] === next[i]) i++;
+  return i;
+}
+
 /** Stable content fingerprint — two conversations with the same signature render identically. */
 export function conversationSignature(messages: ChatMessage[]): string {
   return messages

@@ -39,6 +39,7 @@ import {
   conversationSignature,
   countUserMessages,
   elapsedSince,
+  firstDivergentIndex,
   isHeartbeatStderr,
   mergeTranscript,
   nextAssistantAfterUser,
@@ -137,6 +138,13 @@ export function useChat(options: UseChatOptions) {
   const failedSendRef = useRef<FailedSend | undefined>(undefined);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
+  // Serialized snapshot of the last persisted transcript, keyed by chat, so
+  // saves can write only the rows that changed since the previous save.
+  const persistedPayloadsRef = useRef<{ chatId: string; payloads: string[] } | null>(null);
+  // All DB writes go through one promise chain — SQLite transactions on the
+  // shared connection must not interleave.
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setFailedSend = useCallback((value: FailedSend | undefined) => {
     failedSendRef.current = value;
@@ -212,12 +220,58 @@ export function useChat(options: UseChatOptions) {
     });
   }, []);
 
+  /**
+   * Persist the conversation, writing only the rows that changed since the
+   * last save for this chat (during streaming that's just the active
+   * assistant message). Falls back to a full rewrite when the snapshot cache
+   * belongs to another chat or a write failed. Calls are serialized.
+   */
   const persistMessages = useCallback(
-    async (msgs?: ChatMessage[]) => {
-      await chatRepository.setMessages(chatId, msgs ?? messagesRef.current);
+    (msgs?: ChatMessage[]) => {
+      const run = async () => {
+        const messages = msgs ?? messagesRef.current;
+        const payloads = messages.map((m) => JSON.stringify(m));
+        const cache = persistedPayloadsRef.current;
+        const prev = cache?.chatId === chatId ? cache.payloads : null;
+        persistedPayloadsRef.current = { chatId, payloads };
+        try {
+          const firstDiff = prev ? firstDivergentIndex(prev, payloads) : 0;
+          if (prev && firstDiff === prev.length && firstDiff === payloads.length) return;
+          await chatRepository.replaceMessagesFrom(chatId, payloads, firstDiff);
+        } catch (error) {
+          // Unknown DB state — force a full rewrite on the next save.
+          persistedPayloadsRef.current = null;
+          throw error;
+        }
+      };
+      const next = persistChainRef.current.then(run, run);
+      persistChainRef.current = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
     },
     [chatId]
   );
+
+  const clearPersistTimer = useCallback(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+  }, []);
+
+  /** Throttled persist while a turn streams — at most one write per 3s. */
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current) return;
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      // The timer may outlive a chat switch; never write another chat's
+      // in-memory messages under this closure's chat id.
+      if (loadedChatIdRef.current !== chatId) return;
+      persistMessages().catch(() => {});
+    }, 3000);
+  }, [chatId, persistMessages]);
 
   const syncClaudeTranscript = useCallback(
     async (
@@ -246,12 +300,12 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await chatRepository.setMessages(chatId, merged);
+        await persistMessages(merged);
       } catch {
         // Offline / no transcript yet — keep the local copy.
       }
     },
-    [chatId, provider, spriteName]
+    [persistMessages, provider, spriteName]
   );
 
   // Codex counterpart of syncClaudeTranscript: pull the on-disk rollout for a
@@ -281,12 +335,12 @@ export function useChat(options: UseChatOptions) {
         if (conversationSignature(merged) === conversationSignature(local)) return;
         messagesRef.current = merged;
         setMessages(merged);
-        await chatRepository.setMessages(chatId, merged);
+        await persistMessages(merged);
       } catch {
         // Offline / no rollout yet — keep the local copy.
       }
     },
-    [chatId, provider, spriteName]
+    [persistMessages, provider, spriteName]
   );
 
   const clearReconnectTimer = useCallback(() => {
@@ -485,6 +539,8 @@ export function useChat(options: UseChatOptions) {
       setCodexAuthIssue(undefined);
       setFailedSend(undefined);
       setQueuedPrompts([]);
+      clearPersistTimer();
+      persistedPayloadsRef.current = null;
       claudeSessionIdRef.current = options.initialClaudeSessionId;
       codexSessionIdRef.current = options.initialCodexSessionId;
       activeRunRef.current = options.initialActiveRun;
@@ -510,6 +566,8 @@ export function useChat(options: UseChatOptions) {
     messagesRef.current = saved;
     loadedChatIdRef.current = chatId;
     setMessages(saved);
+    // The DB is the source we just read — seed the diff cache from it.
+    persistedPayloadsRef.current = { chatId, payloads: saved.map((m) => JSON.stringify(m)) };
     activeRunRef.current = options.initialActiveRun;
     activeUserMessageIdRef.current = undefined;
     activeAssistantMessageIdRef.current = undefined;
@@ -557,6 +615,7 @@ export function useChat(options: UseChatOptions) {
   }, [
     attachToRun,
     chatId,
+    clearPersistTimer,
     clearReconnectTimer,
     options.initialActiveRun,
     options.initialClaudeSessionId,
@@ -1112,6 +1171,7 @@ export function useChat(options: UseChatOptions) {
               if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
               handleClaudeEvent(parsed);
             }
+            if (events.length > 0) schedulePersist();
           } else {
             const events = codexParserRef.current.parse(dataStr);
             if (events.length > 0) {
@@ -1128,6 +1188,7 @@ export function useChat(options: UseChatOptions) {
             for (const parsed of events) {
               handleCodexEvent(parsed);
             }
+            if (events.length > 0) schedulePersist();
           }
           break;
         }
@@ -1183,7 +1244,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [handleClaudeEvent, handleCodexEvent, provider, setStatusTracked]
+    [handleClaudeEvent, handleCodexEvent, provider, schedulePersist, setStatusTracked]
   );
   processServiceEventRef.current = processServiceEvent;
 
@@ -1511,10 +1572,10 @@ export function useChat(options: UseChatOptions) {
 
       const pendingMessages = [...historyBeforeSend, userMessage, assistantMessage];
       updateMessages(() => pendingMessages);
-      await chatRepository.setMessages(chatId, pendingMessages);
+      await persistMessages(pendingMessages);
       await executeTurn(prompt, userMessage.id, assistantMessage.id, historyBeforeSend);
     },
-    [chatId, executeTurn, inputText, setQueuedPrompts, updateMessages]
+    [executeTurn, inputText, persistMessages, setQueuedPrompts, updateMessages]
   );
   sendMessageRef.current = sendMessage;
 
@@ -1560,6 +1621,7 @@ export function useChat(options: UseChatOptions) {
 
   const interrupt = useCallback(() => {
     clearReconnectTimer();
+    clearPersistTimer();
     reconnectAttemptRef.current = 0;
     const sessionId = execSessionIdRef.current ?? activeRunRef.current?.execSessionId;
     if (sessionId) {
@@ -1592,10 +1654,11 @@ export function useChat(options: UseChatOptions) {
     setTimeout(() => {
       persistMessages().catch(() => {});
     }, 0);
-  }, [appendTurnOutcome, clearReconnectTimer, persistMessages, setActiveRun, setStatusTracked, spriteName]);
+  }, [appendTurnOutcome, clearPersistTimer, clearReconnectTimer, persistMessages, setActiveRun, setStatusTracked, spriteName]);
 
   const detachStream = useCallback(() => {
     clearReconnectTimer();
+    clearPersistTimer();
     const controller = abortRef.current;
     if (controller) {
       detachingControllersRef.current.add(controller);
@@ -1603,7 +1666,7 @@ export function useChat(options: UseChatOptions) {
       abortRef.current = null;
     }
     setStatusTracked('idle');
-  }, [clearReconnectTimer, setStatusTracked]);
+  }, [clearPersistTimer, clearReconnectTimer, setStatusTracked]);
 
   const clearCodexAuthIssue = useCallback(() => {
     setCodexAuthIssue(undefined);
