@@ -1,4 +1,5 @@
 import { ServiceLogEvent } from '@/models/service';
+import { AgentEffort } from '@/models/chat';
 import * as api from '@/services/api';
 
 type JsonObject = Record<string, unknown>;
@@ -9,6 +10,10 @@ interface RpcResponse {
   error?: { message?: string; code?: number } | string;
 }
 
+export interface CodexAppServerProtocolError extends Error {
+  terminal: true;
+}
+
 export interface CodexAppServerTurnOptions {
   spriteName: string;
   command: string[];
@@ -17,7 +22,9 @@ export interface CodexAppServerTurnOptions {
   prompt: string;
   threadId?: string;
   model?: string;
+  effort?: AgentEffort;
   maxRunAfterDisconnect?: string;
+  handshakeTimeoutMs?: number;
   signal?: AbortSignal;
   onEvent: (event: ServiceLogEvent) => void;
   onSessionId?: (sessionId: string) => void;
@@ -77,12 +84,19 @@ function makeThreadParams(workingDirectory: string, model?: string): JsonObject 
   });
 }
 
-function makeTurnParams(threadId: string, workingDirectory: string, prompt: string, model?: string): JsonObject {
+function makeTurnParams(
+  threadId: string,
+  workingDirectory: string,
+  prompt: string,
+  model?: string,
+  effort?: AgentEffort
+): JsonObject {
   return compactObject({
     threadId,
     input: [{ type: 'text', text: prompt, text_elements: [] }],
     cwd: workingDirectory,
     model: model || undefined,
+    effort,
     approvalPolicy: 'never',
     sandboxPolicy: { type: 'dangerFullAccess' },
   });
@@ -95,15 +109,35 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
   let activeThreadId = options.threadId;
   let execSessionId: string | undefined;
   let rpcError: Error | undefined;
+  let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  const streamController = new AbortController();
   const pendingRequests = new Map<string | number, string>();
+
+  const clearHandshakeTimer = () => {
+    if (handshakeTimer) clearTimeout(handshakeTimer);
+    handshakeTimer = undefined;
+  };
+
+  const armHandshakeTimer = (stage: string) => {
+    clearHandshakeTimer();
+    handshakeTimer = setTimeout(
+      () => fail(`Codex app-server timed out during ${stage}`),
+      options.handshakeTimeoutMs ?? 15_000
+    );
+  };
 
   const fail = (message: string) => {
     if (rpcError) return;
-    rpcError = new Error(message);
+    const error = new Error(message) as CodexAppServerProtocolError;
+    error.name = 'CodexAppServerProtocolError';
+    error.terminal = true;
+    rpcError = error;
+    clearHandshakeTimer();
     options.onEvent({ type: 'error', data: message });
     if (execSessionId) {
       api.killExecSession(options.spriteName, execSessionId).catch(() => {});
     }
+    streamController.abort();
   };
 
   const sendJson = (payload: JsonObject) => {
@@ -121,7 +155,7 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
   const sendRequest = (method: string, params: JsonObject) => {
     const id = nextRequestId++;
     pendingRequests.set(id, method);
-    sendJson({ jsonrpc: '2.0', id, method, params });
+    sendJson({ id, method, params });
   };
 
   const startOrResumeThread = () => {
@@ -143,8 +177,15 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
     }
     sendRequest(
       'turn/start',
-      makeTurnParams(activeThreadId, options.workingDirectory, options.prompt, options.model)
+      makeTurnParams(
+        activeThreadId,
+        options.workingDirectory,
+        options.prompt,
+        options.model,
+        options.effort
+      )
     );
+    armHandshakeTimer('turn/start');
   };
 
   const handleResponse = (message: RpcResponse) => {
@@ -157,14 +198,20 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
     }
 
     if (method === 'initialize') {
-      sendNotification('initialized');
+      sendNotification('initialized', {});
       startOrResumeThread();
+      armHandshakeTimer('thread start');
       return;
     }
 
     if (method === 'thread/start' || method === 'thread/resume') {
       activeThreadId = readThreadId(message.result) ?? activeThreadId;
       startTurn();
+      return;
+    }
+
+    if (method === 'turn/start') {
+      clearHandshakeTimer();
     }
   };
 
@@ -184,12 +231,9 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
 
     if (isObject(message)) {
       const method = readString(message.method);
-      if (method === 'turn/completed') {
-        if (execSessionId) {
-          api.killExecSession(options.spriteName, execSessionId).catch(() => {});
-        }
-      } else if (method === 'error') {
+      if (method === 'error') {
         const params = isObject(message.params) ? message.params : undefined;
+        if (params?.willRetry === true) return;
         const error = params && isObject(params.error) ? params.error : undefined;
         fail(readString(error?.message) ?? 'Codex app-server turn failed');
       }
@@ -208,41 +252,50 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
     }
   };
 
-  await api.streamExec(
-    options.spriteName,
-    options.command,
-    (event) => {
-      options.onEvent(event);
-      if (event.type === 'stdout' && event.data) {
-        handleStdout(event.data);
+  const abortFromParent = () => streamController.abort();
+  if (options.signal?.aborted) abortFromParent();
+  options.signal?.addEventListener('abort', abortFromParent, { once: true });
+
+  try {
+    await api.streamExec(
+      options.spriteName,
+      options.command,
+      (event) => {
+        options.onEvent(event);
+        if (event.type === 'stdout' && event.data) {
+          handleStdout(event.data);
+        }
+      },
+      streamController.signal,
+      {
+        path: options.path,
+        stdin: true,
+        stdinReadyAfterSessionInfo: true,
+        maxRunAfterDisconnect: options.maxRunAfterDisconnect,
+        onDisconnectBeforeExit: options.onDisconnectBeforeExit,
+        onSessionId: (sessionId) => {
+          execSessionId = sessionId;
+          options.onSessionId?.(sessionId);
+        },
+        onStdinReady: (writer) => {
+          stdin = writer;
+          sendRequest('initialize', {
+            clientInfo: {
+              name: 'sprites-rn-manager',
+              title: 'Sprites Manager',
+              version: '1.3.0',
+            },
+          });
+          armHandshakeTimer('initialize');
+        },
       }
-    },
-    options.signal,
-    {
-      path: options.path,
-      stdin: true,
-      maxRunAfterDisconnect: options.maxRunAfterDisconnect,
-      onDisconnectBeforeExit: options.onDisconnectBeforeExit,
-      onSessionId: (sessionId) => {
-        execSessionId = sessionId;
-        options.onSessionId?.(sessionId);
-      },
-      onStdinReady: (writer) => {
-        stdin = writer;
-        sendRequest('initialize', {
-          clientInfo: {
-            name: 'sprites-rn-manager',
-            title: 'Sprites Manager',
-            version: '0.0.0',
-          },
-          capabilities: {
-            experimentalApi: true,
-            requestAttestation: false,
-          },
-        });
-      },
-    }
-  );
+    );
+  } catch (error: any) {
+    if (!rpcError || error?.name !== 'AbortError') throw error;
+  } finally {
+    clearHandshakeTimer();
+    options.signal?.removeEventListener('abort', abortFromParent);
+  }
 
   if (rpcError) throw rpcError;
 }

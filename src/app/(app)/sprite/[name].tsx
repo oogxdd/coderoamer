@@ -16,9 +16,12 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
 import {
+  AgentEffort,
   AgentProvider,
   ChatMessage,
+  effortDisplayName,
   isCodexProvider,
+  normalizeAgentEffort,
   providerDisplayName,
   toolUseActivityLabel,
 } from '@/models/chat';
@@ -40,15 +43,31 @@ import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
 import { reconcileActiveRuns } from '@/services/run-reconcile';
-import { getSetting, setSetting } from '@/services/storage';
+import { getSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
-import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory, shortWorkingDirectory } from '@/constants/session';
+import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 
 // The sprite screen is a hub with three tabs. "chats" (center) is the default
 // and shows the conversation list; opening a conversation switches to a
 // full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
-type Tab = 'options' | 'chats' | 'filesystem' | 'settings';
+type Tab = 'chats' | 'filesystem' | 'settings';
+
+interface AgentDefaults {
+  provider: AgentProvider;
+  claudeModel: string;
+  claudeEffort: AgentEffort;
+  codexModel: string;
+  codexEffort: AgentEffort;
+}
+
+const INITIAL_AGENT_DEFAULTS: AgentDefaults = {
+  provider: 'claude',
+  claudeModel: 'sonnet',
+  claudeEffort: 'high',
+  codexModel: '',
+  codexEffort: 'high',
+};
 
 function normalizeProvider(provider: unknown): AgentProvider {
   if (provider === 'codexAppServer') return 'codexAppServer';
@@ -56,7 +75,16 @@ function normalizeProvider(provider: unknown): AgentProvider {
 }
 
 function normalizeTranscriptionProvider(provider: unknown): TranscriptionProvider {
-  return provider === 'assemblyai' || provider === 'openai' ? provider : 'sprite';
+  if (provider === 'sprite' || provider === 'openai') return provider;
+  return 'assemblyai';
+}
+
+function defaultModelFor(provider: AgentProvider, defaults: AgentDefaults): string {
+  return isCodexProvider(provider) ? defaults.codexModel : defaults.claudeModel;
+}
+
+function defaultEffortFor(provider: AgentProvider, defaults: AgentDefaults): AgentEffort {
+  return isCodexProvider(provider) ? defaults.codexEffort : defaults.claudeEffort;
 }
 
 /** Find the active tool label from the last assistant message's content */
@@ -92,6 +120,8 @@ export default function SpriteDetailScreen() {
   const [chatId, setChatId] = useState<string>('');
   const [chatName, setChatName] = useState<string>('Session 1');
   const [chatProvider, setChatProvider] = useState<AgentProvider>('claude');
+  const [chatModel, setChatModel] = useState('sonnet');
+  const [chatEffort, setChatEffort] = useState<AgentEffort>('high');
   const [claudeSessionId, setClaudeSessionId] = useState<string | undefined>();
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
   const [activeRun, setActiveRun] = useState<ActiveChatRun | undefined>();
@@ -106,8 +136,8 @@ export default function SpriteDetailScreen() {
   // Bumped to force the current chat to reload its persisted messages (e.g. after
   // seeding a resumed session's transcript) even when chatId is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
-  // null = closed. 'new' creates a fresh session; 'edit' changes the current session's directory.
-  const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'edit' | null>(null);
+  // null = closed. Chat settings become read-only after the first user message.
+  const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'settings' | null>(null);
   // Reactive mirror of chatListRef so the inline Chats tab re-renders on change.
   const [chatList, setChatList] = useState<PersistedChat[]>([]);
   const chatListRef = useRef<PersistedChat[]>([]);
@@ -123,8 +153,10 @@ export default function SpriteDetailScreen() {
   const spriteName = name ?? '';
   const [workingDirectory, setWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
   const [defaultDirectory, setDefaultDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
+  const [agentDefaults, setAgentDefaults] =
+    useState<AgentDefaults>(INITIAL_AGENT_DEFAULTS);
   const [transcriptionProvider, setTranscriptionProvider] =
-    useState<TranscriptionProvider>('sprite');
+    useState<TranscriptionProvider>('assemblyai');
 
   // Scan the sprite for CLI-started (console) Claude/Codex conversations so they
   // show up alongside the phone's own chats. Best-effort: failure just leaves the
@@ -172,6 +204,8 @@ export default function SpriteDetailScreen() {
     chatId,
     workingDirectory,
     provider: chatProvider,
+    model: chatModel,
+    effort: chatEffort,
     initialClaudeSessionId: claudeSessionId,
     initialCodexSessionId: codexSessionId,
     initialActiveRun: activeRun,
@@ -221,10 +255,24 @@ export default function SpriteDetailScreen() {
       // the app was away) before binding chat state, so we don't try to attach
       // to dead runs and the list doesn't show stale spinners.
       await reconcileActiveRuns(spriteName).catch(() => {});
-      const [chats, savedDefaultDir, savedTranscriptionProvider] = await Promise.all([
+      const [
+        chats,
+        savedDefaultDir,
+        savedTranscriptionProvider,
+        savedDefaultProvider,
+        savedClaudeModel,
+        savedClaudeEffort,
+        savedCodexModel,
+        savedCodexEffort,
+      ] = await Promise.all([
         chatRepository.listBySprite(spriteName),
         getSetting('defaultWorkingDirectory'),
         getSetting('transcriptionProvider'),
+        getSetting('defaultProvider'),
+        getSetting('claudeModel'),
+        getSetting('claudeEffort'),
+        getSetting('codexModel'),
+        getSetting('codexEffort'),
       ]);
       if (!mounted) return;
 
@@ -233,6 +281,14 @@ export default function SpriteDetailScreen() {
         : DEFAULT_WORKING_DIRECTORY;
       setDefaultDirectory(fallbackDir);
       setTranscriptionProvider(normalizeTranscriptionProvider(savedTranscriptionProvider));
+      const defaults: AgentDefaults = {
+        provider: normalizeProvider(savedDefaultProvider),
+        claudeModel: savedClaudeModel?.trim() || 'sonnet',
+        claudeEffort: normalizeAgentEffort(savedClaudeEffort) ?? 'high',
+        codexModel: savedCodexModel?.trim() || '',
+        codexEffort: normalizeAgentEffort(savedCodexEffort) ?? 'high',
+      };
+      setAgentDefaults(defaults);
 
       if (chats.length > 0) {
         commitChatList(chats);
@@ -244,18 +300,22 @@ export default function SpriteDetailScreen() {
         setChatId(current.id);
         setChatName(current.customName ?? `Session ${current.chatNumber}`);
         setChatProvider(normalizeProvider(current.provider));
+        setChatModel(current.model ?? defaultModelFor(current.provider, defaults));
+        setChatEffort(current.effort ?? defaultEffortFor(current.provider, defaults));
         setClaudeSessionId(current.claudeSessionId);
         setCodexSessionId(current.codexSessionId);
         setActiveRun(current.activeRun);
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
-        const defaultProvider = normalizeProvider(await getSetting('defaultProvider'));
+        const defaultProvider = defaults.provider;
         // Create the first chat
         const firstChat: PersistedChat = {
           id: `${spriteName}-chat-1`,
           spriteName,
           chatNumber: 1,
           provider: defaultProvider,
+          model: defaultModelFor(defaultProvider, defaults),
+          effort: defaultEffortFor(defaultProvider, defaults),
           workingDirectory: fallbackDir,
           createdAt: Date.now(),
           lastUsed: Date.now(),
@@ -268,6 +328,8 @@ export default function SpriteDetailScreen() {
         setChatId(firstChat.id);
         setChatName('Session 1');
         setChatProvider(defaultProvider);
+        setChatModel(firstChat.model ?? 'sonnet');
+        setChatEffort(firstChat.effort ?? 'high');
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
         setActiveRun(undefined);
@@ -385,11 +447,6 @@ export default function SpriteDetailScreen() {
     chat.sendMessage('Continue where you left off.');
   }, [chat.sendMessage]);
 
-  const handleTranscriptionProviderChange = useCallback(async (provider: TranscriptionProvider) => {
-    setTranscriptionProvider(provider);
-    await setSetting('transcriptionProvider', provider);
-  }, []);
-
   const createChat = useCallback(async (config: NewSessionConfig) => {
     // One useChat instance is shared across sessions. Detach the local stream
     // before switching so the remote exec can keep running and be reattached later.
@@ -403,6 +460,8 @@ export default function SpriteDetailScreen() {
       spriteName,
       chatNumber: newNumber,
       provider: config.provider,
+      model: config.model || undefined,
+      effort: config.effort,
       workingDirectory: dir,
       createdAt: Date.now(),
       lastUsed: Date.now(),
@@ -415,6 +474,8 @@ export default function SpriteDetailScreen() {
     setChatId(newChat.id);
     setChatName(`Session ${newNumber}`);
     setChatProvider(config.provider);
+    setChatModel(config.model);
+    setChatEffort(config.effort);
     setWorkingDirectory(dir);
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
@@ -426,17 +487,37 @@ export default function SpriteDetailScreen() {
     setChatOpen(true);
   }, [chat.detachStream, chat.isStreaming, spriteName, commitChatList]);
 
-  // Change the directory of the *current* session (only allowed before its first message).
-  const updateCurrentDirectory = useCallback(async (config: NewSessionConfig) => {
+  // Change the current session configuration before its first message.
+  const updateCurrentSettings = useCallback(async (config: NewSessionConfig) => {
+    if (isProviderLocked) {
+      setSessionSheetMode(null);
+      return;
+    }
     const dir = normalizeWorkingDirectory(config.workingDirectory);
     setWorkingDirectory(dir);
+    setChatProvider(config.provider);
+    setChatModel(config.model);
+    setChatEffort(config.effort);
     const updated = chatListRef.current.map((c) =>
-      c.id === chatId ? { ...c, workingDirectory: dir } : c
+      c.id === chatId
+        ? {
+            ...c,
+            workingDirectory: dir,
+            provider: config.provider,
+            model: config.model || undefined,
+            effort: config.effort,
+          }
+        : c
     );
     commitChatList(updated);
-    await chatRepository.patch(chatId, { workingDirectory: dir });
+    await chatRepository.patch(chatId, {
+      workingDirectory: dir,
+      provider: config.provider,
+      model: config.model || undefined,
+      effort: config.effort,
+    });
     setSessionSheetMode(null);
-  }, [chatId, commitChatList]);
+  }, [chatId, commitChatList, isProviderLocked]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
     const latestChat = chatListRef.current.find((c) => c.id === selectedChat.id) ?? selectedChat;
@@ -451,7 +532,10 @@ export default function SpriteDetailScreen() {
     if (chat.isStreaming) chat.detachStream();
     setChatId(latestChat.id);
     setChatName(latestChat.customName ?? `Session ${latestChat.chatNumber}`);
-    setChatProvider(normalizeProvider(latestChat.provider));
+    const nextProvider = normalizeProvider(latestChat.provider);
+    setChatProvider(nextProvider);
+    setChatModel(latestChat.model ?? defaultModelFor(nextProvider, agentDefaults));
+    setChatEffort(latestChat.effort ?? defaultEffortFor(nextProvider, agentDefaults));
     setClaudeSessionId(latestChat.claudeSessionId);
     setCodexSessionId(latestChat.codexSessionId);
     setActiveRun(latestChat.activeRun);
@@ -465,7 +549,7 @@ export default function SpriteDetailScreen() {
     chatRepository.patch(latestChat.id, { lastUsed: Date.now() });
     setChatListVisible(false);
     setChatOpen(true);
-  }, [chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
+  }, [agentDefaults, chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
 
   const handleDeleteChat = useCallback((target: PersistedChat) => {
     const remaining = chatListRef.current.filter((c) => c.id !== target.id);
@@ -477,9 +561,12 @@ export default function SpriteDetailScreen() {
     if (chat.isStreaming) chat.detachStream();
     if (remaining.length > 0) {
       const next = [...remaining].sort((a, b) => b.lastUsed - a.lastUsed)[0];
+      const nextProvider = normalizeProvider(next.provider);
       setChatId(next.id);
       setChatName(next.customName ?? `Session ${next.chatNumber}`);
-      setChatProvider(normalizeProvider(next.provider));
+      setChatProvider(nextProvider);
+      setChatModel(next.model ?? defaultModelFor(nextProvider, agentDefaults));
+      setChatEffort(next.effort ?? defaultEffortFor(nextProvider, agentDefaults));
       setClaudeSessionId(next.claudeSessionId);
       setCodexSessionId(next.codexSessionId);
       setActiveRun(next.activeRun);
@@ -489,7 +576,7 @@ export default function SpriteDetailScreen() {
       setChatId('');
     }
     setChatOpen(false);
-  }, [chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
+  }, [agentDefaults, chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
 
   // Resume a session discovered on the sprite (its on-disk transcript).
   // Reuses an existing local chat bound to the same session id, or creates one,
@@ -518,11 +605,15 @@ export default function SpriteDetailScreen() {
         };
       } else {
         const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
+        const importedProvider: AgentProvider =
+          session.provider === 'claude' ? 'claude' : 'codexAppServer';
         target = {
           id: `${spriteName}-chat-${maxNumber + 1}`,
           spriteName,
           chatNumber: maxNumber + 1,
-          provider: session.provider,
+          provider: importedProvider,
+          model: defaultModelFor(importedProvider, agentDefaults),
+          effort: defaultEffortFor(importedProvider, agentDefaults),
           claudeSessionId: session.provider === 'claude' ? session.id : undefined,
           codexSessionId: isCodexProvider(session.provider) ? session.id : undefined,
           workingDirectory: dir,
@@ -543,6 +634,8 @@ export default function SpriteDetailScreen() {
       await chatRepository.setMessages(target.id, messages);
 
       setChatProvider(target.provider);
+      setChatModel(target.model ?? defaultModelFor(target.provider, agentDefaults));
+      setChatEffort(target.effort ?? defaultEffortFor(target.provider, agentDefaults));
       setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
       setCodexSessionId(isCodexProvider(session.provider) ? session.id : target.codexSessionId);
       setActiveRun(undefined);
@@ -555,7 +648,7 @@ export default function SpriteDetailScreen() {
       // Force a reload even if chatId didn't change (resuming the open chat).
       setReloadNonce((n) => n + 1);
     },
-    [chat.detachStream, chat.isStreaming, defaultDirectory, spriteName, commitChatList]
+    [agentDefaults, chat.detachStream, chat.isStreaming, defaultDirectory, spriteName, commitChatList]
   );
 
   // Tapping a computer-started conversation in the list: pull its transcript, then
@@ -581,12 +674,22 @@ export default function SpriteDetailScreen() {
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
     setChatProvider(nextProvider);
+    const nextModel = defaultModelFor(nextProvider, agentDefaults);
+    const nextEffort = defaultEffortFor(nextProvider, agentDefaults);
+    setChatModel(nextModel);
+    setChatEffort(nextEffort);
     const updated = chatListRef.current.map((c) =>
-      c.id === chatId ? { ...c, provider: nextProvider } : c
+      c.id === chatId
+        ? { ...c, provider: nextProvider, model: nextModel || undefined, effort: nextEffort }
+        : c
     );
     commitChatList(updated);
-    chatRepository.patch(chatId, { provider: nextProvider });
-  }, [chat.isStreaming, chatId, isProviderLocked, commitChatList]);
+    chatRepository.patch(chatId, {
+      provider: nextProvider,
+      model: nextModel || undefined,
+      effort: nextEffort,
+    });
+  }, [agentDefaults, chat.isStreaming, chatId, isProviderLocked, commitChatList]);
 
   useEffect(() => {
     if (!chat.codexAuthIssue) return;
@@ -606,7 +709,12 @@ export default function SpriteDetailScreen() {
           text: isLocked ? 'New Claude Session' : 'Switch to Claude',
           onPress: () => {
             if (isLocked) {
-              createChat({ workingDirectory, provider: 'claude' });
+              createChat({
+                workingDirectory,
+                provider: 'claude',
+                model: agentDefaults.claudeModel,
+                effort: agentDefaults.claudeEffort,
+              });
             } else {
               handleProviderChange('claude');
             }
@@ -615,7 +723,7 @@ export default function SpriteDetailScreen() {
         },
       ]
     );
-  }, [chat.codexAuthIssue, chat.clearCodexAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
+  }, [agentDefaults, chat.codexAuthIssue, chat.clearCodexAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
 
   const handleInsertBashOutput = useCallback((text: string) => {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
@@ -627,7 +735,6 @@ export default function SpriteDetailScreen() {
     : undefined;
 
   const tabItems: { key: Tab; label: string }[] = [
-    { key: 'options', label: 'Options' },
     { key: 'chats', label: 'Chats' },
     { key: 'filesystem', label: 'Files' },
     { key: 'settings', label: 'Settings' },
@@ -651,7 +758,8 @@ export default function SpriteDetailScreen() {
                 </Text>
               </Pressable>
               <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {providerDisplayName(chatProvider)} · {shortWorkingDirectory(workingDirectory)}
+                {providerDisplayName(chatProvider)} · {chatModel || 'Default'} ·{' '}
+                {effortDisplayName(chatEffort)}
               </Text>
             </>
           ) : (
@@ -673,13 +781,20 @@ export default function SpriteDetailScreen() {
           )}
         </View>
         <View style={styles.headerRight}>
-          <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
-            {chatOpen ? (
-              <Text style={[styles.headerActionNew, { color: colors.tint }]}>＋ New</Text>
-            ) : (
+          {chatOpen ? (
+            <Pressable
+              onPress={() => setSessionSheetMode('settings')}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="Chat settings"
+            >
+              <Text style={[styles.headerActionMore, { color: colors.tint }]}>•••</Text>
+            </Pressable>
+          ) : (
+            <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
               <Text style={[styles.headerActionAdd, { color: colors.tint }]}>＋</Text>
-            )}
-          </Pressable>
+            </Pressable>
+          )}
         </View>
       </View>
 
@@ -757,14 +872,14 @@ export default function SpriteDetailScreen() {
                     Chat with {providerDisplayName(chatProvider)}
                   </Text>
                   <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
-                    Send a message to start a Claude Code session on this sprite.
+                    Send a message to start this coding session on the sprite.
                   </Text>
                   <Pressable
                     style={[
                       styles.cwdChip,
                       { borderColor: colors.border, backgroundColor: colors.backgroundElement },
                     ]}
-                    onPress={() => setSessionSheetMode('edit')}
+                    onPress={() => setSessionSheetMode('settings')}
                   >
                     <Text
                       style={[styles.cwdChipText, { color: colors.textSecondary }]}
@@ -840,19 +955,12 @@ export default function SpriteDetailScreen() {
             isStreaming={chat.isStreaming}
             disabled={dictation.isTranscribing}
             provider={chatProvider}
-            providerLocked={isProviderLocked}
-            onProviderChange={handleProviderChange}
-            onToggleClientDictation={dictation.toggleClientDictation}
-            onToggleSpriteRecording={dictation.toggleSpriteRecording}
-            onPickAudioFile={dictation.pickAudioFile}
-            isClientDictating={dictation.isClientDictating}
-            isSpriteRecording={dictation.isSpriteRecording}
-            isTranscribingAudio={dictation.isTranscribing}
+            onToggleDictation={dictation.toggleSpriteRecording}
+            isDictating={dictation.isSpriteRecording}
+            isTranscribing={dictation.isTranscribing}
             dictationStatus={dictation.status}
             dictationError={dictation.error}
             onClearDictationError={dictation.clearDictationError}
-            transcriptionProvider={transcriptionProvider}
-            onTranscriptionProviderChange={handleTranscriptionProviderChange}
           />
         </KeyboardAvoidingView>
       ) : (
@@ -871,15 +979,6 @@ export default function SpriteDetailScreen() {
             />
           )}
 
-          {tab === 'options' && (
-            <OptionsTab
-              spriteName={spriteName}
-              workingDirectory={workingDirectory}
-              onQuickBash={() => setQuickBashVisible(true)}
-              onBrowseSessions={() => setSessionBrowserVisible(true)}
-            />
-          )}
-
           {tab === 'filesystem' && (
             <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
           )}
@@ -892,6 +991,8 @@ export default function SpriteDetailScreen() {
               workingDirectory={workingDirectory}
               isActive={tab === 'settings'}
               onSpriteUpdated={setSprite}
+              onQuickBash={() => setQuickBashVisible(true)}
+              onBrowseSessions={() => setSessionBrowserVisible(true)}
             />
           )}
         </>
@@ -915,13 +1016,32 @@ export default function SpriteDetailScreen() {
       {/* New Session / Edit Directory Sheet */}
       {sessionSheetMode && (
         <NewSessionSheet
-          title={sessionSheetMode === 'edit' ? 'Session Directory' : 'New Session'}
-          confirmLabel={sessionSheetMode === 'edit' ? 'Update Directory' : 'Start Session'}
-          defaultDirectory={sessionSheetMode === 'edit' ? workingDirectory : defaultDirectory}
-          defaultProvider={chatProvider}
-          showProviderPicker={sessionSheetMode === 'new'}
+          title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
+          confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
+          defaultDirectory={
+            sessionSheetMode === 'settings' ? workingDirectory : defaultDirectory
+          }
+          defaultProvider={
+            sessionSheetMode === 'settings' ? chatProvider : agentDefaults.provider
+          }
+          defaultModel={
+            sessionSheetMode === 'settings'
+              ? chatModel
+              : defaultModelFor(agentDefaults.provider, agentDefaults)
+          }
+          defaultEffort={
+            sessionSheetMode === 'settings'
+              ? chatEffort
+              : defaultEffortFor(agentDefaults.provider, agentDefaults)
+          }
+          defaultClaudeModel={agentDefaults.claudeModel}
+          defaultClaudeEffort={agentDefaults.claudeEffort}
+          defaultCodexModel={agentDefaults.codexModel}
+          defaultCodexEffort={agentDefaults.codexEffort}
+          showProviderPicker
+          locked={sessionSheetMode === 'settings' && isProviderLocked}
           onClose={() => setSessionSheetMode(null)}
-          onCreate={sessionSheetMode === 'edit' ? updateCurrentDirectory : createChat}
+          onCreate={sessionSheetMode === 'settings' ? updateCurrentSettings : createChat}
         />
       )}
 
@@ -946,7 +1066,7 @@ export default function SpriteDetailScreen() {
   );
 }
 
-/** A tappable card row used across the Options and Settings tabs. */
+/** A tappable card row used in sprite settings. */
 function ConnectRow({
   title,
   subtitle,
@@ -978,69 +1098,6 @@ function ConnectRow({
   );
 }
 
-// Options Tab — terminals, fast bash, and resuming previous sessions.
-function OptionsTab({
-  spriteName,
-  workingDirectory,
-  onQuickBash,
-  onBrowseSessions,
-}: {
-  spriteName: string;
-  workingDirectory: string;
-  onQuickBash: () => void;
-  onBrowseSessions: () => void;
-}) {
-  const colors = useTheme();
-  return (
-    <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
-      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>QUICK ACTIONS</Text>
-      <ConnectRow
-        title="⚡ Fast bash exec"
-        subtitle="Run a one-off shell command on the sprite and drop its output into the chat input."
-        onPress={onQuickBash}
-      />
-      <ConnectRow
-        title="Connect to a previous session"
-        subtitle="Browse Claude and Codex transcripts on this sprite and resume one in the native chat UI."
-        onPress={onBrowseSessions}
-      />
-
-      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>LIVE TERMINALS</Text>
-      <ConnectRow
-        title="Stream terminal (next-term)"
-        subtitle="Experimental renderer using the vendored next-term engine over the same WebSocket TTY."
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/exec-poc',
-            params: { name: spriteName, cwd: workingDirectory, engine: 'next-term' },
-          })
-        }
-      />
-      <ConnectRow
-        title="Stream terminal"
-        subtitle="Real TTY over WebSocket. Run anything — including `claude --resume` — and watch the live TUI."
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/exec-poc',
-            params: { name: spriteName, cwd: workingDirectory },
-          })
-        }
-      />
-      <ConnectRow
-        title="Web Terminal (ttyd) · legacy"
-        subtitle="Installs & starts ttyd in the sprite and opens it in a WebView. Makes the sprite URL public."
-        muted
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/ttyd-terminal',
-            params: { name: spriteName, cwd: workingDirectory },
-          })
-        }
-      />
-    </ScrollView>
-  );
-}
-
 type SettingsView = 'menu' | 'checkpoints' | 'accounts';
 
 // Settings Tab — checkpoints, accounts, sprite info, and delete. A lightweight
@@ -1053,6 +1110,8 @@ function SettingsTab({
   workingDirectory,
   isActive,
   onSpriteUpdated,
+  onQuickBash,
+  onBrowseSessions,
 }: {
   sprite: Sprite | null;
   isLoading: boolean;
@@ -1060,6 +1119,8 @@ function SettingsTab({
   workingDirectory: string;
   isActive: boolean;
   onSpriteUpdated: (sprite: Sprite) => void;
+  onQuickBash: () => void;
+  onBrowseSessions: () => void;
 }) {
   const colors = useTheme();
   const [view, setView] = useState<SettingsView>('menu');
@@ -1142,6 +1203,39 @@ function SettingsTab({
 
   return (
     <ScrollView style={styles.tabScroll} contentContainerStyle={styles.tabScrollContent}>
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>TOOLS</Text>
+      <ConnectRow
+        title="Fast bash exec"
+        subtitle="Run a one-off command and insert its output into the chat composer."
+        onPress={onQuickBash}
+      />
+      <ConnectRow
+        title="Previous agent sessions"
+        subtitle="Browse on-sprite Claude and Codex transcripts and continue one in chat."
+        onPress={onBrowseSessions}
+      />
+      <ConnectRow
+        title="Interactive terminal"
+        subtitle="Open a real TTY over the Exec WebSocket."
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/exec-poc',
+            params: { name: spriteName, cwd: workingDirectory, engine: 'next-term' },
+          })
+        }
+      />
+      <ConnectRow
+        title="Web terminal · legacy"
+        subtitle="Open ttyd in a WebView. This may make the sprite URL public."
+        muted
+        onPress={() =>
+          router.push({
+            pathname: '/(app)/ttyd-terminal',
+            params: { name: spriteName, cwd: workingDirectory },
+          })
+        }
+      />
+
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>CONFIGURATION</Text>
       <ConnectRow
         title="Checkpoints"
@@ -1262,9 +1356,10 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '400',
   },
-  headerActionNew: {
-    fontSize: FontSize.sm,
-    fontWeight: '700',
+  headerActionMore: {
+    fontSize: FontSize.md,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
   statusRow: {
     flexDirection: 'row',

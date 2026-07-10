@@ -289,6 +289,7 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
       break;
     }
     case 'error': {
+      if (jsonGet(params as any, 'willRetry') === true) break;
       const error = jsonGet(params as any, 'error');
       events.push({
         type: 'error',

@@ -40,6 +40,51 @@ export function withSpriteTaskHeartbeat(command: string, taskName: string): stri
   ].join('; ');
 }
 
+/**
+ * App-server is a long-lived process, but mobile chat runs are one process per
+ * turn. This tiny Node proxy forwards stdin/stdout and terminates app-server
+ * after its terminal `turn/completed` notification. Keeping that lifecycle on
+ * the sprite means a disconnected phone does not leave a heartbeat-backed
+ * app-server running for hours.
+ */
+export function buildCodexAppServerCommand(): string {
+  const source = [
+    `const { spawn } = require('node:child_process')`,
+    `const child = spawn('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'inherit'] })`,
+    `let buffer = ''`,
+    `let turnCompleted = false`,
+    `let stopping = false`,
+    `process.stdin.on('data', (chunk) => { if (child.exitCode === null) child.stdin.write(chunk) })`,
+    `child.stdout.on('data', (chunk) => {`,
+    `  process.stdout.write(chunk)`,
+    `  buffer += chunk.toString('utf8')`,
+    `  while (true) {`,
+    `    const newline = buffer.indexOf('\\n')`,
+    `    if (newline < 0) break`,
+    `    const line = buffer.slice(0, newline).trim()`,
+    `    buffer = buffer.slice(newline + 1)`,
+    `    if (!line) continue`,
+    `    try {`,
+    `      const message = JSON.parse(line)`,
+    `      if (message && message.method === 'turn/completed') {`,
+    `        turnCompleted = true`,
+    `        if (!stopping) {`,
+    `          stopping = true`,
+    `          setTimeout(() => { if (child.exitCode === null) child.kill('SIGTERM') }, 50)`,
+    `        }`,
+    `      }`,
+    `    } catch {}`,
+    `  }`,
+    `})`,
+    `for (const signal of ['SIGINT', 'SIGTERM']) {`,
+    `  process.on(signal, () => { if (child.exitCode === null) child.kill(signal) })`,
+    `}`,
+    `child.on('exit', (code, signal) => process.exit(turnCompleted ? 0 : (code ?? (signal ? 1 : 0))))`,
+    `child.on('error', (error) => { console.error(error.message); process.exit(1) })`,
+  ].join(';\n');
+  return `node -e ${shellQuote(source)}`;
+}
+
 /** Strip characters that would break an HTTP header, keep it one line. */
 function sanitizeNotifyText(value: string, max: number): string {
   return value

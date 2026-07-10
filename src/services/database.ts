@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS chats (
   sprite_name TEXT NOT NULL,
   chat_number INTEGER NOT NULL DEFAULT 1,
   provider TEXT NOT NULL DEFAULT 'claude',
+  model TEXT,
+  effort TEXT,
   custom_name TEXT,
   claude_session_id TEXT,
   codex_session_id TEXT,
@@ -64,6 +66,13 @@ export type Database = SQLite.SQLiteDatabase;
 
 let dbPromise: Promise<Database> | null = null;
 
+async function ensureChatAgentColumns(db: Database): Promise<void> {
+  const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(chats)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('model')) await db.execAsync('ALTER TABLE chats ADD COLUMN model TEXT;');
+  if (!names.has('effort')) await db.execAsync('ALTER TABLE chats ADD COLUMN effort TEXT;');
+}
+
 /**
  * Returns the shared database connection, opening it (and running the schema)
  * on first call. Safe to call repeatedly — always returns the same promise.
@@ -75,6 +84,7 @@ export function getDatabase(): Promise<Database> {
       await db.execAsync('PRAGMA journal_mode = WAL;');
       await db.execAsync('PRAGMA foreign_keys = ON;');
       await db.execAsync(SCHEMA_SQL);
+      await ensureChatAgentColumns(db);
       return db;
     })();
   }
