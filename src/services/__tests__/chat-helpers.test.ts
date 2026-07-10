@@ -7,6 +7,7 @@ import {
   classifyCodexAuthIssue,
   conversationSignature,
   countUserMessages,
+  firstDivergentIndex,
   isHeartbeatStderr,
   mergeTranscript,
   safeTaskName,
@@ -118,6 +119,29 @@ describe('mergeTranscript', () => {
     const incoming = [msg('assistant', 'da', [incomingOutcome])];
     const merged = mergeTranscript(local, incoming);
     expect(merged[0].content).toEqual([incomingOutcome]);
+  });
+});
+
+describe('firstDivergentIndex', () => {
+  it('returns the common length for identical snapshots', () => {
+    expect(firstDivergentIndex(['a', 'b'], ['a', 'b'])).toBe(2);
+    expect(firstDivergentIndex([], [])).toBe(0);
+  });
+
+  it('points at the appended tail', () => {
+    expect(firstDivergentIndex(['a', 'b'], ['a', 'b', 'c'])).toBe(2);
+  });
+
+  it('points at an in-place change (streaming assistant message)', () => {
+    expect(firstDivergentIndex(['u', 'partial'], ['u', 'partial+more'])).toBe(1);
+  });
+
+  it('points at an early change after a transcript merge', () => {
+    expect(firstDivergentIndex(['a', 'b', 'c'], ['a', 'B', 'c'])).toBe(1);
+  });
+
+  it('handles truncation', () => {
+    expect(firstDivergentIndex(['a', 'b', 'c'], ['a'])).toBe(1);
   });
 });
 
