@@ -70,6 +70,15 @@ describe('CodexStreamParser — app-server notifications', () => {
     expect(parseOne({ method: 'turn/completed', params: {} })).toEqual([{ type: 'turnCompleted' }]);
   });
 
+  it('does not turn retryable transport errors into terminal chat errors', () => {
+    expect(
+      parseOne({
+        method: 'error',
+        params: { error: { message: 'temporary disconnect' }, willRetry: true },
+      })
+    ).toEqual([]);
+  });
+
   it('ignores JSON-RPC responses (handled by the app-server driver)', () => {
     expect(parseOne({ id: 1, result: { threadId: 't' } })).toEqual([]);
   });
