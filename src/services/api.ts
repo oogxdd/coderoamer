@@ -514,6 +514,10 @@ export interface StreamExecOptions {
   tty?: boolean;
   stdin?: boolean;
   onStdinReady?: (writer: ExecStdinWriter) => void;
+  /** Wait for exec `session_info` before the first stdin write. */
+  stdinReadyAfterSessionInfo?: boolean;
+  /** Safety fallback for older exec servers that omit `session_info`. */
+  stdinReadyFallbackMs?: number;
   onSessionId?: (sessionId: string) => void;
   onDisconnectBeforeExit?: () => void;
 }
@@ -637,9 +641,14 @@ export async function streamExec(
     let socket: WebSocket | null = null;
     let settled = false;
     let sawExit = false;
+    let socketOpen = false;
+    let sessionInfoSeen = false;
+    let stdinReadySent = false;
+    let stdinReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanup = () => {
       signal?.removeEventListener('abort', handleAbort);
+      if (stdinReadyTimer) clearTimeout(stdinReadyTimer);
       if (socket) {
         socket.onopen = null;
         socket.onmessage = null;
@@ -678,6 +687,20 @@ export async function streamExec(
       writeBytes: writeStdinBytes,
     };
 
+    const notifyStdinReady = () => {
+      if (stdinReadySent || !socketOpen || !options.onStdinReady) return;
+      stdinReadySent = true;
+      if (stdinReadyTimer) {
+        clearTimeout(stdinReadyTimer);
+        stdinReadyTimer = null;
+      }
+      try {
+        options.onStdinReady(stdinWriter);
+      } catch (error) {
+        settle(error as Error);
+      }
+    };
+
     function handleAbort() {
       closeSocket();
       settle(createAbortError());
@@ -690,7 +713,9 @@ export async function streamExec(
       if (sessionId) options.onSessionId?.(sessionId);
 
       if (obj.type === 'session_info') {
+        sessionInfoSeen = true;
         onEvent({ type: 'started' });
+        if (options.stdinReadyAfterSessionInfo) notifyStdinReady();
         return true;
       }
 
@@ -754,9 +779,17 @@ export async function streamExec(
     socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => {
+      socketOpen = true;
       onEvent({ type: 'started' });
       try {
-        options.onStdinReady?.(stdinWriter);
+        if (!options.stdinReadyAfterSessionInfo || sessionInfoSeen) {
+          notifyStdinReady();
+        } else if (options.onStdinReady) {
+          stdinReadyTimer = setTimeout(
+            notifyStdinReady,
+            options.stdinReadyFallbackMs ?? 5000
+          );
+        }
       } catch (err) {
         settle(err as Error);
       }

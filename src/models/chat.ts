@@ -2,6 +2,7 @@ import { JSONValue, jsonGet, jsonString, jsonPretty } from './claude-events';
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type AgentProvider = 'claude' | 'codex' | 'codexAppServer';
+export type AgentEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
 
@@ -211,9 +212,9 @@ export function makeId(): string {
 export function providerDisplayName(provider: AgentProvider): string {
   switch (provider) {
     case 'codex':
-      return 'Codex';
+      return 'Codex Legacy';
     case 'codexAppServer':
-      return 'Codex Server';
+      return 'Codex Live';
     default:
       return 'Claude';
   }
@@ -221,4 +222,23 @@ export function providerDisplayName(provider: AgentProvider): string {
 
 export function isCodexProvider(provider: AgentProvider): boolean {
   return provider === 'codex' || provider === 'codexAppServer';
+}
+
+export function normalizeAgentEffort(value: unknown): AgentEffort | undefined {
+  switch (value) {
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+export function effortDisplayName(effort: AgentEffort): string {
+  if (effort === 'xhigh') return 'Extra high';
+  return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
