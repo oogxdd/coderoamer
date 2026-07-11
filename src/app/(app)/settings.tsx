@@ -17,7 +17,13 @@ import { useTheme } from '@/hooks/use-theme';
 import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
 import { deleteToken, hasToken, saveToken } from '@/services/auth';
 import { FontSize, Spacing } from '@/constants/theme';
-import { AgentProvider } from '@/models/chat';
+import {
+  AgentEffort,
+  AgentProvider,
+  effortDisplayName,
+  normalizeAgentEffort,
+} from '@/models/chat';
+import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
@@ -26,8 +32,8 @@ type ProviderOption = { label: string; value: AgentProvider };
 
 const PROVIDER_OPTIONS: ProviderOption[] = [
   { label: 'Claude', value: 'claude' },
-  { label: 'Codex', value: 'codex' },
-  { label: 'Codex Server', value: 'codexAppServer' },
+  { label: 'Codex Live', value: 'codexAppServer' },
+  { label: 'Legacy', value: 'codex' },
 ];
 
 const MODEL_OPTIONS: { label: string; value: ClaudeModel }[] = [
@@ -44,6 +50,14 @@ const MAX_TURNS_OPTIONS: { label: string; value: MaxTurns }[] = [
   { label: '50', value: 50 },
 ];
 
+const CLAUDE_EFFORT_OPTIONS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CODEX_EFFORT_OPTIONS: AgentEffort[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+const TRANSCRIPTION_PROVIDER_OPTIONS: { label: string; value: TranscriptionProvider }[] = [
+  { label: 'AssemblyAI', value: 'assemblyai' },
+  { label: 'OpenAI', value: 'openai' },
+  { label: 'Sprite', value: 'sprite' },
+];
+
 export default function SettingsScreen() {
   const colors = useTheme();
   const auth = useAuth();
@@ -53,6 +67,9 @@ export default function SettingsScreen() {
   // Claude Configuration
   const [defaultProvider, setDefaultProvider] = useState<AgentProvider>('claude');
   const [claudeModel, setClaudeModel] = useState<ClaudeModel>('sonnet');
+  const [claudeEffort, setClaudeEffort] = useState<AgentEffort>('high');
+  const [codexModel, setCodexModel] = useState('');
+  const [codexEffort, setCodexEffort] = useState<AgentEffort>('high');
   const [maxTurns, setMaxTurns] = useState<MaxTurns>(0);
   const [customInstructions, setCustomInstructions] = useState('');
   const [defaultWorkingDirectory, setDefaultWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
@@ -77,6 +94,8 @@ export default function SettingsScreen() {
   const [openAiTokenInput, setOpenAiTokenInput] = useState('');
   const [hasAssemblyAiToken, setHasAssemblyAiToken] = useState(false);
   const [hasOpenAiToken, setHasOpenAiToken] = useState(false);
+  const [transcriptionProvider, setTranscriptionProvider] =
+    useState<TranscriptionProvider>('assemblyai');
   const [savingAssemblyAi, setSavingAssemblyAi] = useState(false);
   const [savingOpenAi, setSavingOpenAi] = useState(false);
 
@@ -141,6 +160,9 @@ export default function SettingsScreen() {
         const [
           providerSetting,
           model,
+          savedClaudeEffort,
+          savedCodexModel,
+          savedCodexEffort,
           turns,
           instructions,
           name,
@@ -151,10 +173,14 @@ export default function SettingsScreen() {
           openAiSaved,
           savedNtfyTopic,
           savedNtfyServer,
+          savedTranscriptionProvider,
         ] =
           await Promise.all([
             getSetting('defaultProvider'),
             getSetting('claudeModel'),
+            getSetting('claudeEffort'),
+            getSetting('codexModel'),
+            getSetting('codexEffort'),
             getSetting('maxTurns'),
             getSetting('customInstructions'),
             getSetting('gitName'),
@@ -165,6 +191,7 @@ export default function SettingsScreen() {
             hasToken('openAiToken'),
             getSetting('ntfyTopic'),
             getSetting('ntfyServer'),
+            getSetting('transcriptionProvider'),
           ]);
 
         if (
@@ -177,6 +204,9 @@ export default function SettingsScreen() {
         if (model && ['sonnet', 'opus', 'haiku'].includes(model)) {
           setClaudeModel(model as ClaudeModel);
         }
+        setClaudeEffort(normalizeAgentEffort(savedClaudeEffort) ?? 'high');
+        if (savedCodexModel !== null) setCodexModel(savedCodexModel);
+        setCodexEffort(normalizeAgentEffort(savedCodexEffort) ?? 'high');
         if (turns !== null) {
           const parsed = parseInt(turns, 10);
           if ([0, 5, 10, 25, 50].includes(parsed)) {
@@ -192,6 +222,15 @@ export default function SettingsScreen() {
         setAutoCheckpoint(checkpoint);
         if (savedNtfyTopic !== null) setNtfyTopic(savedNtfyTopic);
         if (savedNtfyServer !== null) setNtfyServer(savedNtfyServer);
+        if (
+          savedTranscriptionProvider === 'sprite' ||
+          savedTranscriptionProvider === 'openai' ||
+          savedTranscriptionProvider === 'assemblyai'
+        ) {
+          setTranscriptionProvider(savedTranscriptionProvider);
+        } else {
+          setTranscriptionProvider('assemblyai');
+        }
       } catch {
         // Settings load failed silently
       }
@@ -204,6 +243,29 @@ export default function SettingsScreen() {
     setClaudeModel(model);
     await setSetting('claudeModel', model);
   }, []);
+
+  const handleClaudeEffortChange = useCallback(async (nextEffort: AgentEffort) => {
+    setClaudeEffort(nextEffort);
+    await setSetting('claudeEffort', nextEffort);
+  }, []);
+
+  const handleCodexModelChange = useCallback(async (text: string) => {
+    setCodexModel(text);
+    await setSetting('codexModel', text.trim());
+  }, []);
+
+  const handleCodexEffortChange = useCallback(async (nextEffort: AgentEffort) => {
+    setCodexEffort(nextEffort);
+    await setSetting('codexEffort', nextEffort);
+  }, []);
+
+  const handleTranscriptionProviderChange = useCallback(
+    async (nextProvider: TranscriptionProvider) => {
+      setTranscriptionProvider(nextProvider);
+      await setSetting('transcriptionProvider', nextProvider);
+    },
+    []
+  );
 
   const handleDefaultProviderChange = useCallback(async (nextProvider: AgentProvider) => {
     setDefaultProvider(nextProvider);
@@ -381,6 +443,54 @@ export default function SettingsScreen() {
 
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>TRANSCRIPTION</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Default provider</Text>
+        </View>
+        <View
+          style={[
+            styles.pickerRow,
+            styles.rowWithBorder,
+            { borderBottomColor: colors.border },
+          ]}
+        >
+          <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
+            {TRANSCRIPTION_PROVIDER_OPTIONS.map((option) => (
+              <Pressable
+                key={option.value}
+                style={[
+                  styles.segmentButton,
+                  transcriptionProvider === option.value && {
+                    backgroundColor: colors.card,
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: 0.15,
+                    shadowRadius: 2,
+                    elevation: 2,
+                  },
+                ]}
+                onPress={() => handleTranscriptionProviderChange(option.value)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    {
+                      color:
+                        transcriptionProvider === option.value
+                          ? colors.tint
+                          : colors.textSecondary,
+                    },
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            The chat microphone records audio and transcribes it with this provider.
+          </Text>
+        </View>
+
         <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
           <Text style={[styles.rowLabel, { color: colors.text }]}>AssemblyAI</Text>
           <View style={styles.statusContainer}>
@@ -618,6 +728,39 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Effort</Text>
+        </View>
+        <View
+          style={[
+            styles.pickerRow,
+            styles.rowWithBorder,
+            { borderBottomColor: colors.border },
+          ]}
+        >
+          <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
+            {CLAUDE_EFFORT_OPTIONS.map((option) => (
+              <Pressable
+                key={option}
+                style={[
+                  styles.segmentButton,
+                  claudeEffort === option && { backgroundColor: colors.card },
+                ]}
+                onPress={() => handleClaudeEffortChange(option)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: claudeEffort === option ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {effortDisplayName(option)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
         {/* Max Turns Picker */}
         <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
           <Text style={[styles.rowLabel, { color: colors.text }]}>Max Turns</Text>
@@ -684,6 +827,51 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>CODEX CONFIGURATION</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.inputLabel, { color: colors.text }]}>Model</Text>
+          <TextInput
+            style={[styles.textInput, { color: colors.text }]}
+            value={codexModel}
+            onChangeText={handleCodexModelChange}
+            placeholder="Codex default"
+            placeholderTextColor={colors.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </View>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Effort</Text>
+        </View>
+        <View style={styles.pickerRow}>
+          <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
+            {CODEX_EFFORT_OPTIONS.map((option) => (
+              <Pressable
+                key={option}
+                style={[
+                  styles.segmentButton,
+                  codexEffort === option && { backgroundColor: colors.card },
+                ]}
+                onPress={() => handleCodexEffortChange(option)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: codexEffort === option ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {effortDisplayName(option)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            The model field is optional. Empty uses the model configured inside the sprite.
+          </Text>
+        </View>
+      </View>
+
       {/* Git Identity Section */}
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>GIT IDENTITY</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
@@ -713,32 +901,6 @@ export default function SettingsScreen() {
             autoCorrect={false}
           />
         </View>
-      </View>
-
-      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>EXPERIMENTS</Text>
-      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
-        <Pressable
-          style={({ pressed }) => [
-            styles.row,
-            styles.rowWithBorder,
-            { borderBottomColor: colors.border, opacity: pressed ? 0.7 : 1 },
-          ]}
-          onPress={() => router.push('/(app)/ttyd-terminal')}
-        >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Web Terminal (ttyd)</Text>
-          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
-        </Pressable>
-
-        <Pressable
-          style={({ pressed }) => [
-            styles.row,
-            { opacity: pressed ? 0.7 : 1 },
-          ]}
-          onPress={() => router.push('/(app)/exec-poc')}
-        >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Interactive Terminal</Text>
-          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
-        </Pressable>
       </View>
 
       {/* Notifications Section */}

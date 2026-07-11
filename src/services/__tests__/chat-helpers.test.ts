@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ChatMessage } from '@/models/chat';
 import {
   buildFallbackPrompt,
+  buildCodexAppServerCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
   classifyCodexAuthIssue,
@@ -161,6 +162,16 @@ describe('withSpriteTaskHeartbeat', () => {
     expect(wrapped).toContain('sleep 20; printf . >&2');
     expect(wrapped).toContain('trap cleanup EXIT INT TERM');
     expect(wrapped.endsWith('echo hi')).toBe(true);
+  });
+});
+
+describe('buildCodexAppServerCommand', () => {
+  it('forwards stdio and self-terminates after the terminal turn notification', () => {
+    const command = buildCodexAppServerCommand();
+    expect(command).toContain('app-server');
+    expect(command).toContain('turn/completed');
+    expect(command).toContain('SIGTERM');
+    expect(command).toContain('process.stdin.on');
   });
 });
 
