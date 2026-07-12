@@ -37,6 +37,7 @@ import {
   buildCodexAppServerCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
+  CHAT_DEBUG_LOG_DIR,
   classifyCodexAuthIssue,
   codexEventDebugLabel,
   compactDebugChunk,
@@ -49,6 +50,7 @@ import {
   nextAssistantAfterUser,
   safeTaskName,
   shellQuote,
+  withSpriteDebugLogging,
   withSpriteTaskHeartbeat,
 } from '@/services/chat-helpers';
 
@@ -1282,6 +1284,17 @@ export function useChat(options: UseChatOptions) {
 
           const dataStr = stripLogTimestamps(event.data);
 
+          if (isCodexProvider(provider)) {
+            // Raw wire content, not just parsed event labels — the thing to
+            // paste back when the parsed view doesn't explain a bug.
+            debugChat(
+              'stdout raw',
+              provider,
+              elapsedSince(turnTimingRef.current.startedAt),
+              compactDebugChunk(dataStr, 4000)
+            );
+          }
+
           if (provider === 'claude') {
             const events = claudeParserRef.current.parse(dataStr);
             if (events.length > 0) {
@@ -1404,6 +1417,16 @@ export function useChat(options: UseChatOptions) {
       setFailedSend(undefined);
       debugChat('executeTurn', provider, 'user', userMessageId, 'assistant', assistantMessageId);
 
+      // __DEV__-only: mirrors this turn's exact command + raw stdout/stderr
+      // (and, for Codex Live, every JSON-RPC frame) into files on the sprite
+      // under CHAT_DEBUG_LOG_DIR, so a broken turn can be diagnosed from the
+      // sprite side even when the client-side parsed view doesn't explain it.
+      const debugLoggingEnabled = __DEV__ && isCodexProvider(provider);
+      const debugLogName = safeTaskName(`${provider}-${userMessageId}`);
+      if (debugLoggingEnabled) {
+        debugChat('debug logging', provider, `${CHAT_DEBUG_LOG_DIR}/${debugLogName}.*`);
+      }
+
       const commandParts: string[] = [];
       let codexAppServerPrompt: string | undefined;
       let codexAppServerModel: string | undefined;
@@ -1481,7 +1504,10 @@ export function useChat(options: UseChatOptions) {
           codexAppServerModel = codexModel || undefined;
           codexAppServerEffort = selectedEffort;
           transport = 'codexAppServer';
-          commandParts.push(buildCodexAppServerCommand());
+          const rpcLogPath = debugLoggingEnabled
+            ? `${CHAT_DEBUG_LOG_DIR}/${debugLogName}.rpc.jsonl`
+            : undefined;
+          commandParts.push(buildCodexAppServerCommand(rpcLogPath));
         } else {
           let codexCmd = codexSessionIdRef.current
             ? 'codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox'
@@ -1515,6 +1541,9 @@ export function useChat(options: UseChatOptions) {
         });
       }
       const fullCommand = withSpriteTaskHeartbeat(turnCommand, taskName);
+      const commandToRun = debugLoggingEnabled
+        ? withSpriteDebugLogging(fullCommand, debugLogName, turnCommand)
+        : fullCommand;
 
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
@@ -1567,7 +1596,7 @@ export function useChat(options: UseChatOptions) {
         if (provider === 'codexAppServer' && codexAppServerPrompt !== undefined) {
           await streamCodexAppServerTurn({
             spriteName,
-            command: ['bash', '-c', fullCommand],
+            command: ['bash', '-c', commandToRun],
             path: '/bin/bash',
             workingDirectory,
             prompt: codexAppServerPrompt,
@@ -1583,7 +1612,7 @@ export function useChat(options: UseChatOptions) {
         } else {
           await api.streamExec(
             spriteName,
-            ['bash', '-c', fullCommand],
+            ['bash', '-c', commandToRun],
             onEvent,
             abortController.signal,
             {

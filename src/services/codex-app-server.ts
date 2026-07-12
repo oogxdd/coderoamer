@@ -31,6 +31,12 @@ export interface CodexAppServerTurnOptions {
   onDisconnectBeforeExit?: () => void;
 }
 
+function debugRpc(...args: unknown[]) {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) return;
+  // eslint-disable-next-line no-console
+  console.log('[codex-app-server]', ...args);
+}
+
 function isObject(value: unknown): value is JsonObject {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -145,6 +151,7 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
       fail('Codex app-server stdin is not ready');
       return;
     }
+    debugRpc('→', JSON.stringify(payload));
     stdin.write(`${JSON.stringify(payload)}\n`);
   };
 
@@ -216,6 +223,7 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
   };
 
   const handleRpcLine = (line: string) => {
+    debugRpc('←', line);
     let message: unknown;
     try {
       message = JSON.parse(line);

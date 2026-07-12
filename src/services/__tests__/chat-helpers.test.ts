@@ -5,6 +5,7 @@ import {
   buildCodexAppServerCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
+  CHAT_DEBUG_LOG_DIR,
   classifyCodexAuthIssue,
   conversationSignature,
   countUserMessages,
@@ -13,6 +14,7 @@ import {
   mergeTranscript,
   safeTaskName,
   shellQuote,
+  withSpriteDebugLogging,
   withSpriteTaskHeartbeat,
 } from '@/services/chat-helpers';
 
@@ -172,6 +174,37 @@ describe('buildCodexAppServerCommand', () => {
     expect(command).toContain('turn/completed');
     expect(command).toContain('SIGTERM');
     expect(command).toContain('process.stdin.on');
+    expect(command).not.toContain('CODEX_RPC_LOG=');
+  });
+
+  it('logs JSON-RPC frames in both directions when given a log path', () => {
+    const command = buildCodexAppServerCommand('~/.sprites-chat-debug/x.rpc.jsonl');
+    expect(command).toContain('CODEX_RPC_LOG=~/.sprites-chat-debug/x.rpc.jsonl node -e');
+    expect(command).toContain('to-app-server');
+    expect(command).toContain('from-app-server');
+    expect(command).toContain('rpcLog');
+  });
+});
+
+describe('withSpriteDebugLogging', () => {
+  it('mkdirs the debug dir, logs the command text, and tees stdout/stderr separately', () => {
+    const wrapped = withSpriteDebugLogging('echo hi', 'codex-abc');
+    const base = `${CHAT_DEBUG_LOG_DIR}/codex-abc`;
+    expect(wrapped).toContain(`mkdir -p ${CHAT_DEBUG_LOG_DIR}`);
+    expect(wrapped).toContain(`>> ${base}.cmd.log`);
+    expect(wrapped).toContain(`tee -a ${base}.stdout.log`);
+    expect(wrapped).toContain(`tee -a ${base}.stderr.log >&2`);
+    expect(wrapped.endsWith('echo hi')).toBe(true);
+  });
+
+  it('redacts secrets from the logged command label', () => {
+    const wrapped = withSpriteDebugLogging(
+      'echo hi',
+      'codex-abc',
+      'curl -H "Authorization: Bearer sk-ant-oat01-should-not-leak"'
+    );
+    expect(wrapped).not.toContain('sk-ant-oat01-should-not-leak');
+    expect(wrapped).toContain('Bearer [redacted]');
   });
 });
 

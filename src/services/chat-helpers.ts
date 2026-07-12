@@ -10,6 +10,9 @@ import { stripLogTimestamps } from '@/services/claude-stream';
 
 export const DEBUG_SNIPPET_MAX = 240;
 
+/** Directory on the sprite where debug-logging writes per-turn log files. */
+export const CHAT_DEBUG_LOG_DIR = '~/.sprites-chat-debug';
+
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -46,15 +49,22 @@ export function withSpriteTaskHeartbeat(command: string, taskName: string): stri
  * after its terminal `turn/completed` notification. Keeping that lifecycle on
  * the sprite means a disconnected phone does not leave a heartbeat-backed
  * app-server running for hours.
+ *
+ * When `rpcLogPath` is set, every JSON-RPC frame in both directions is also
+ * appended (with a direction tag + timestamp) to that file on the sprite, so
+ * a bug in the handshake/turn protocol can be inspected after the fact even
+ * if the client-side stream never rendered it.
  */
-export function buildCodexAppServerCommand(): string {
+export function buildCodexAppServerCommand(rpcLogPath?: string): string {
   const source = [
     `const { spawn } = require('node:child_process')`,
+    `const rpcLogPath = process.env.CODEX_RPC_LOG`,
+    `const rpcLog = (dir, line) => { if (!rpcLogPath) return; try { require('node:fs').appendFileSync(rpcLogPath, JSON.stringify({ ts: new Date().toISOString(), dir, line }) + '\\n') } catch {} }`,
     `const child = spawn('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'inherit'] })`,
     `let buffer = ''`,
     `let turnCompleted = false`,
     `let stopping = false`,
-    `process.stdin.on('data', (chunk) => { if (child.exitCode === null) child.stdin.write(chunk) })`,
+    `process.stdin.on('data', (chunk) => { rpcLog('to-app-server', chunk.toString('utf8')); if (child.exitCode === null) child.stdin.write(chunk) })`,
     `child.stdout.on('data', (chunk) => {`,
     `  process.stdout.write(chunk)`,
     `  buffer += chunk.toString('utf8')`,
@@ -64,6 +74,7 @@ export function buildCodexAppServerCommand(): string {
     `    const line = buffer.slice(0, newline).trim()`,
     `    buffer = buffer.slice(newline + 1)`,
     `    if (!line) continue`,
+    `    rpcLog('from-app-server', line)`,
     `    try {`,
     `      const message = JSON.parse(line)`,
     `      if (message && message.method === 'turn/completed') {`,
@@ -82,7 +93,33 @@ export function buildCodexAppServerCommand(): string {
     `child.on('exit', (code, signal) => process.exit(turnCompleted ? 0 : (code ?? (signal ? 1 : 0))))`,
     `child.on('error', (error) => { console.error(error.message); process.exit(1) })`,
   ].join(';\n');
-  return `node -e ${shellQuote(source)}`;
+  const script = `node -e ${shellQuote(source)}`;
+  // Unquoted so bash tilde-expands it at assignment time; rpcLogPath is
+  // always built from safeTaskName()-sanitized segments (alnum/._- only).
+  return rpcLogPath ? `CODEX_RPC_LOG=${rpcLogPath} ${script}` : script;
+}
+
+/**
+ * Wraps a turn command so its exact text and every byte of stdout/stderr are
+ * mirrored into `${CHAT_DEBUG_LOG_DIR}/<logName>.{cmd,stdout,stderr}.log` on
+ * the sprite, in addition to still flowing to the exec channel normally.
+ * Debug-only (callers gate this on `__DEV__`) — for chasing down Codex
+ * Legacy/Live bugs where the client-side parsed view isn't enough and you
+ * need the raw transcript of what actually ran on the sprite.
+ *
+ * Uses `exec > >(tee …) 2> >(tee … >&2)` so stdout and stderr stay on their
+ * original fds (the exec protocol tells them apart) while also being
+ * appended to a file — a plain `2>&1 | tee` would merge them and break
+ * stderr-based heartbeat/auth-issue detection.
+ */
+export function withSpriteDebugLogging(command: string, logName: string, commandLabel: string = command): string {
+  const base = `${CHAT_DEBUG_LOG_DIR}/${safeTaskName(logName)}`;
+  return [
+    `mkdir -p ${CHAT_DEBUG_LOG_DIR}`,
+    `{ printf '%s ' "$(date -Iseconds)"; printf '%s\\n' ${shellQuote(redactDebugText(commandLabel))}; } >> ${base}.cmd.log`,
+    `exec > >(tee -a ${base}.stdout.log) 2> >(tee -a ${base}.stderr.log >&2)`,
+    command,
+  ].join('; ');
 }
 
 /** Strip characters that would break an HTTP header, keep it one line. */
