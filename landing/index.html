@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Run Claude Code and Codex in persistent cloud sandboxes. Start on your phone, continue on your computer, and never keep a laptop awake for an agent."
+    />
+    <meta name="theme-color" content="#080a0e" />
+    <title>CodeRoamer — coding agents that do not live on your laptop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="CodeRoamer home">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span>
+          <span></span>
+        </span>
+        <span>CodeRoamer</span>
+      </a>
+
+      <nav aria-label="Primary navigation">
+        <a href="#why">Why sandbox-first</a>
+        <a href="#security">Safety</a>
+        <a href="#roadmap">Roadmap</a>
+      </nav>
+
+      <a class="nav-cta" href="https://github.com/oogxdd/coderoamer">View source</a>
+    </header>
+
+    <main id="top">
+      <section class="hero shell">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="live-dot" aria-hidden="true"></span>
+            Claude Code + Codex · sandbox-first
+          </div>
+
+          <h1>
+            Start on your phone.<br />
+            Continue on your computer.<br />
+            <span>Or vice versa.</span>
+          </h1>
+
+          <p class="hero-lede">
+            Your coding agent runs beside your code in an isolated, persistent sandbox—not on
+            either device. Close the app. Close the laptop. The work keeps moving.
+          </p>
+
+          <div class="hero-actions">
+            <a class="button button-primary" href="#workflow">
+              See how it works
+              <span aria-hidden="true">↓</span>
+            </a>
+            <a class="button button-secondary" href="https://github.com/oogxdd/coderoamer">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.23c-3.23.7-3.91-1.37-3.91-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.41-1.27.74-1.56-2.58-.29-5.29-1.29-5.29-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18A10.98 10.98 0 0 1 12 6.09c.98 0 1.95.13 2.87.39 2.19-1.49 3.15-1.18 3.15-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.72 5.39-5.3 5.68.42.36.79 1.07.79 2.16v3.25c0 .31.21.67.8.55A11.5 11.5 0 0 0 12 .7Z"
+                />
+              </svg>
+              GitHub
+            </a>
+          </div>
+
+          <ul class="trust-list" aria-label="Product properties">
+            <li>No CodeRoamer cloud</li>
+            <li>Use your subscriptions</li>
+            <li>Open-source release planned</li>
+          </ul>
+        </div>
+
+        <div class="hero-stage" aria-label="CodeRoamer session continuing across phone and desktop">
+          <div class="orbit orbit-one" aria-hidden="true"></div>
+          <div class="orbit orbit-two" aria-hidden="true"></div>
+
+          <article class="desktop-window">
+            <div class="window-bar">
+              <div class="traffic-lights" aria-hidden="true">
+                <i></i><i></i><i></i>
+              </div>
+              <span>coderoamer / checkout-flow</span>
+              <span class="window-status"><i></i> synced</span>
+            </div>
+
+            <div class="desktop-body">
+              <aside class="session-rail">
+                <span class="rail-title">ACTIVE</span>
+                <button class="session-row active" type="button">
+                  <i></i>
+                  <span>
+                    <b>Checkout flow</b>
+                    <small>Codex · running</small>
+                  </span>
+                </button>
+                <button class="session-row" type="button">
+                  <i></i>
+                  <span>
+                    <b>Fix flaky tests</b>
+                    <small>Claude · done</small>
+                  </span>
+                </button>
+                <span class="rail-title rail-spacer">SANDBOX</span>
+                <div class="sandbox-row">
+                  <span class="cube-icon">◇</span>
+                  <span>
+                    <b>production-app</b>
+                    <small>Fly Sprite</small>
+                  </span>
+                </div>
+              </aside>
+
+              <div class="desktop-thread">
+                <div class="thread-meta">
+                  <span>Implement a resilient checkout flow</span>
+                  <span>Codex Live · high</span>
+                </div>
+
+                <div class="message message-agent">
+                  <div class="avatar">C</div>
+                  <p>
+                    I found the retry boundary. I’m updating the webhook handler and adding
+                    idempotency coverage.
+                  </p>
+                </div>
+
+                <div class="tool-run">
+                  <div class="tool-line">
+                    <span class="tool-icon">$</span>
+                    <span>npm test -- checkout</span>
+                    <b>passed</b>
+                  </div>
+                  <div class="test-output">
+                    <span>✓ handles replayed payment events</span>
+                    <span>✓ does not duplicate fulfillment</span>
+                    <span>✓ recovers after gateway timeout</span>
+                  </div>
+                </div>
+
+                <div class="diff-summary">
+                  <span><b>4</b> files changed</span>
+                  <span class="added">+128</span>
+                  <span class="removed">−24</span>
+                  <span class="commit-chip">ready to review</span>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="phone">
+            <div class="phone-speaker" aria-hidden="true"></div>
+            <div class="phone-screen">
+              <div class="phone-status">
+                <span>9:41</span>
+                <span>◒ 5G ▰</span>
+              </div>
+              <div class="phone-nav">
+                <span class="back">‹</span>
+                <span>
+                  <b>Checkout flow</b>
+                  <small><i></i> running in sandbox</small>
+                </span>
+                <span class="more">•••</span>
+              </div>
+              <div class="phone-chat">
+                <div class="phone-user">Make the payment webhook safe to retry.</div>
+                <div class="phone-agent">
+                  <span class="mini-avatar">C</span>
+                  <p>I’m tracing the current handler and its tests.</p>
+                </div>
+                <div class="phone-tool">
+                  <span>⌁</span>
+                  <div>
+                    <b>Read</b>
+                    <small>src/api/webhooks/payment.ts</small>
+                  </div>
+                  <em>done</em>
+                </div>
+                <div class="phone-tool">
+                  <span>⌘</span>
+                  <div>
+                    <b>Run tests</b>
+                    <small>checkout suite</small>
+                  </div>
+                  <em class="running">running</em>
+                </div>
+              </div>
+              <div class="composer">
+                <span>Steer the agent…</span>
+                <button type="button" aria-label="Send message">↑</button>
+              </div>
+            </div>
+          </article>
+
+          <div class="handoff-card">
+            <div class="handoff-icon">↗</div>
+            <div>
+              <b>Same session. New screen.</b>
+              <span>State lives in the sandbox.</span>
+            </div>
+          </div>
+
+          <div class="laptop-card">
+            <span class="closed-laptop" aria-hidden="true"></span>
+            <div>
+              <b>Laptop closed</b>
+              <small>Agent still running</small>
+            </div>
+            <i></i>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof-strip" aria-label="Key capabilities">
+        <div class="shell proof-grid">
+          <div>
+            <strong>2</strong>
+            <span>agents today</span>
+          </div>
+          <div>
+            <strong>0</strong>
+            <span>approval prompts by default</span>
+          </div>
+          <div>
+            <strong>∞</strong>
+            <span>distance from your laptop</span>
+          </div>
+          <div>
+            <strong>1</strong>
+            <span>persistent place for the work</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section shell" id="why">
+        <div class="section-heading">
+          <span class="kicker">THE RUNTIME IS THE PRODUCT</span>
+          <h2>Not a remote control for your laptop.</h2>
+          <p>
+            A phone should not reach back into a machine you forgot to charge. CodeRoamer puts the
+            agent in a remote environment first, then makes every device an equal control surface.
+          </p>
+        </div>
+
+        <div class="runtime-diagram">
+          <div class="device-node">
+            <span class="device-glyph phone-glyph" aria-hidden="true"></span>
+            <b>Phone</b>
+            <small>start · steer · review</small>
+          </div>
+          <div class="connection-line">
+            <span></span>
+            <em>live exec</em>
+          </div>
+          <div class="sandbox-node">
+            <span class="sandbox-glow" aria-hidden="true"></span>
+            <div class="sandbox-top">
+              <span class="cube-icon large">◇</span>
+              <span>
+                <b>Persistent sandbox</b>
+                <small>the agent lives here</small>
+              </span>
+            </div>
+            <div class="sandbox-process">
+              <span>agent</span>
+              <span>repo</span>
+              <span>tools</span>
+              <span>history</span>
+            </div>
+          </div>
+          <div class="connection-line reverse">
+            <span></span>
+            <em>reattach</em>
+          </div>
+          <div class="device-node">
+            <span class="device-glyph laptop-glyph" aria-hidden="true"></span>
+            <b>Computer</b>
+            <small>continue · inspect · ship</small>
+          </div>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card feature-large">
+            <span class="feature-number">01</span>
+            <div class="feature-visual reconnect-visual" aria-hidden="true">
+              <div class="pulse-ring"></div>
+              <div class="pulse-center">↻</div>
+              <span class="event-chip chip-one">network changed</span>
+              <span class="event-chip chip-two">session found</span>
+              <span class="event-chip chip-three">reattached</span>
+            </div>
+            <h3>Disconnects are not failures.</h3>
+            <p>
+              CodeRoamer persists the remote run, probes it after a drop, and reattaches to the
+              same process. If it already finished, the transcript reconstructs the outcome.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">02</span>
+            <div class="feature-icon">⌁</div>
+            <h3>Use the accounts you already pay for.</h3>
+            <p>
+              Sign in with a Claude subscription or a Codex-capable ChatGPT account. Separate
+              model API billing is not required.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">03</span>
+            <div class="feature-icon">⌘</div>
+            <h3>Chat when it is simple. Drop into a TTY when it is not.</h3>
+            <p>
+              Readable native tool cards for everyday work, plus a real streamed terminal for full
+              control of the environment.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section security-section" id="security">
+        <div class="shell security-layout">
+          <div class="security-copy">
+            <span class="kicker">AUTONOMY THROUGH ISOLATION</span>
+            <h2>Full access inside.<br /><span>Narrow access outside.</span></h2>
+            <p>
+              Agents run with approvals bypassed so they do not stall while you are away. The
+              sandbox—not your personal computer—is the boundary.
+            </p>
+
+            <ul class="security-list">
+              <li>
+                <span>✓</span>
+                <div>
+                  <b>No access to your laptop by design</b>
+                  <small>The code, tools, and process stay in the remote environment.</small>
+                </div>
+              </li>
+              <li>
+                <span>✓</span>
+                <div>
+                  <b>Bring only scoped credentials</b>
+                  <small>Use a fine-grained GitHub PAT limited to the repositories it needs.</small>
+                </div>
+              </li>
+              <li>
+                <span>✓</span>
+                <div>
+                  <b>Checkpoint before risky work</b>
+                  <small>Restore the sandbox filesystem if an autonomous change goes wrong.</small>
+                </div>
+              </li>
+            </ul>
+          </div>
+
+          <div class="boundary-card">
+            <div class="boundary-label">
+              <span>ISOLATION BOUNDARY</span>
+              <small>production-app.sprite</small>
+            </div>
+            <div class="boundary-agent">
+              <span class="agent-orb">C</span>
+              <div>
+                <b>Codex</b>
+                <small>full sandbox access</small>
+              </div>
+              <span class="access-chip">AUTO</span>
+            </div>
+            <div class="boundary-resources">
+              <div><span>▤</span><b>Repository</b><small>read / write</small></div>
+              <div><span>⌘</span><b>Shell</b><small>unrestricted</small></div>
+              <div><span>◫</span><b>Packages</b><small>install</small></div>
+            </div>
+            <div class="boundary-gate">
+              <span class="gate-line"></span>
+              <span class="gate-label">SCOPED GATE</span>
+              <span class="gate-line"></span>
+            </div>
+            <div class="external-resources">
+              <div>
+                <span class="github-glyph">●</span>
+                <span><b>GitHub</b><small>selected repos only</small></span>
+                <em>PAT</em>
+              </div>
+              <div class="blocked-resource">
+                <span>▰</span>
+                <span><b>Your laptop</b><small>not connected</small></span>
+                <em>—</em>
+              </div>
+            </div>
+            <p class="boundary-note">
+              An agent can still perform every action allowed by the credentials you provide.
+              Scope them accordingly.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section shell workflow-section" id="workflow">
+        <div class="section-heading centered">
+          <span class="kicker">ONE SESSION, ANY SCREEN</span>
+          <h2>The handoff happens naturally.</h2>
+          <p>No export. No session link. No laptop acting as a relay.</p>
+        </div>
+
+        <ol class="workflow">
+          <li>
+            <span class="step-number">01</span>
+            <div class="step-device mini-phone" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <h3>Start from your phone</h3>
+            <p>Choose a sandbox, select Claude or Codex, and send the task.</p>
+          </li>
+          <li>
+            <span class="step-number">02</span>
+            <div class="step-device mini-sandbox" aria-hidden="true">
+              <span>◇</span><i></i>
+            </div>
+            <h3>Let the sandbox work</h3>
+            <p>The agent edits, tests, and iterates without keeping either device awake.</p>
+          </li>
+          <li>
+            <span class="step-number">03</span>
+            <div class="step-device mini-desktop" aria-hidden="true">
+              <span></span><i></i>
+            </div>
+            <h3>Continue anywhere</h3>
+            <p>Reopen on mobile or inspect the same environment from a full computer.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="section shell" id="roadmap">
+        <div class="section-heading split-heading">
+          <div>
+            <span class="kicker">AGENTS × ENVIRONMENTS</span>
+            <h2>Choose both sides of the stack.</h2>
+          </div>
+          <p>
+            Sprites are the first runtime, not the product boundary. CodeRoamer is being built so
+            agent choice and environment choice remain independent.
+          </p>
+        </div>
+
+        <div class="matrix">
+          <div class="matrix-axis agent-axis">
+            <span>AGENTS</span>
+            <article class="matrix-card available">
+              <span class="matrix-logo claude-logo">A</span>
+              <div><b>Claude Code</b><small>available now</small></div>
+              <em>LIVE</em>
+            </article>
+            <article class="matrix-card available">
+              <span class="matrix-logo codex-logo">C</span>
+              <div><b>Codex</b><small>Live + legacy transports</small></div>
+              <em>LIVE</em>
+            </article>
+            <article class="matrix-card upcoming">
+              <span class="matrix-logo">O</span>
+              <div><b>OpenCode</b><small>planned</small></div>
+              <em>NEXT</em>
+            </article>
+            <article class="matrix-card upcoming">
+              <span class="matrix-logo">✦</span>
+              <div><b>Crush</b><small>in development</small></div>
+              <em>NEXT</em>
+            </article>
+          </div>
+
+          <div class="matrix-operator" aria-hidden="true">×</div>
+
+          <div class="matrix-axis runtime-axis">
+            <span>ENVIRONMENTS</span>
+            <article class="matrix-card available">
+              <span class="matrix-logo sprite-logo">◇</span>
+              <div><b>Fly Sprites</b><small>persistent sandboxes</small></div>
+              <em>LIVE</em>
+            </article>
+            <article class="matrix-card upcoming">
+              <span class="matrix-logo">⌂</span>
+              <div><b>Custom Linux VM</b><small>remote-agent</small></div>
+              <em>NEXT</em>
+            </article>
+            <article class="matrix-card ghost-card">
+              <span class="matrix-logo">+</span>
+              <div><b>More sandboxes</b><small>provider abstraction</small></div>
+              <em>SOON</em>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta shell">
+        <div class="cta-glow" aria-hidden="true"></div>
+        <span class="kicker">ROAM WITHOUT STOPPING THE WORK</span>
+        <h2>Your coding agent has a place to live.</h2>
+        <p>
+          Start on one screen. Continue on another. Let the sandbox hold everything in between.
+        </p>
+        <div class="hero-actions centered-actions">
+          <a class="button button-primary" href="https://github.com/oogxdd/coderoamer">
+            Follow the project
+            <span aria-hidden="true">↗</span>
+          </a>
+          <a
+            class="button button-secondary"
+            href="https://github.com/oogxdd/coderoamer#readme"
+          >
+            Read the README
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">
+      <a class="brand" href="#top">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span></span>
+        <span>CodeRoamer</span>
+      </a>
+      <p>Sandbox-first control for autonomous coding agents.</p>
+      <div>
+        <a href="https://github.com/oogxdd/coderoamer">GitHub</a>
+        <a href="https://github.com/oogxdd/coderoamer#readme">Docs</a>
+      </div>
+    </footer>
+  </body>
+</html>
