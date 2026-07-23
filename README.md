@@ -1,215 +1,262 @@
-# Sprites Manager
+# CodeRoamer
 
-Run **Claude Code inside a [Fly.io Sprite](https://sprites.dev)** (a cloud dev VM) and
-drive it from your phone. Set up a sprite once on your computer, then start, watch, and guide
-coding sessions from anywhere — close the app and pick the same session back up later.
+Run autonomous coding agents in isolated cloud development environments and control them from
+your phone. Start a task, close your laptop, and come back later: the agent keeps running next to
+the code, tools, and dependencies it needs.
 
-> Personal project against the new Sprites API. Focused on Claude Code today; other agents later.
+CodeRoamer supports **Claude Code** and **Codex** today. Fly.io
+[Sprites](https://sprites.dev) are the first supported sandbox runtime; support for additional
+agent CLIs and remote environments is planned.
 
----
-
-## Quick start (the workflow this app is built around)
-
-The smoothest setup is to prepare a sprite on your computer, then connect from the phone:
-
-1. **Create a sprite** — tap **+** on the dashboard, or use the Sprites CLI on your computer.
-2. **Add an SSH key** so the sprite can reach GitHub. In a sprite shell:
-   ```bash
-   ssh-keygen -t ed25519 -C "you@example.com"
-   cat ~/.ssh/id_ed25519.pub        # add this to GitHub → Settings → SSH and GPG keys
-   ```
-3. **Clone your repo** into the sprite:
-   ```bash
-   git clone git@github.com:you/your-repo.git ~/your-repo
-   ```
-4. **Connect from the phone.** Open the sprite, set the session **working directory** to your
-   repo (e.g. `/home/sprite/your-repo`), type a prompt, and send. Claude starts working with no
-   approval prompts.
-5. **Come back anytime.** Reopen the app and you land in the same session — send another message
-   to continue the conversation.
-
-The same flow is available in-app under **Guides** (dashboard → Guides).
+> CodeRoamer is under active development. The repository is being prepared for an open-source
+> release.
 
 ---
 
-## Connecting: Chat, sessions, and terminals
+## Why sandbox-first?
 
-The default is **Chat**; the terminals and the session browser are reached from a sprite's
-**Overview → "Sessions & terminals"** (the browser is also on the 🕓 clock in the chat header).
+Most mobile companions are remote controls for an agent running on your computer. For example,
+[Happy](https://happy.engineering/) runs the code and agent on your computer, while
+[Omnara](https://remote.omnara.com/) starts from a local workflow and offers optional cloud
+migration for selected repositories.
 
-| | What it is | Best for |
-|---|---|---|
-| **Chat** (default) | Runs Claude non-interactively (`claude -p --output-format stream-json`) in a one-shot exec session and streams the result into a native chat with tool/plan/result cards. Turns survive network drops and app restarts: the app reattaches automatically, shows how each turn ended (done / max-turns / failed / interrupted), queues messages you type mid-turn, and can ping your phone via [ntfy](https://ntfy.sh) when a turn finishes. | Day-to-day prompting and reading results comfortably on a phone. |
-| **Session browser** | Reads Claude's own transcripts (`~/.claude/projects/*/*.jsonl`) off the sprite, lists every past session with a preview, renders its full history natively, and **Continues** it via `--resume <id>`. The same data `claude --resume` shows on a computer. | Picking up any past session — even on a fresh install, since history lives on the sprite, not the phone. |
-| **Stream terminal** | A real TTY over a WebSocket (`/v1/sprites/{name}/exec`) rendered in a Skia terminal. Auto-runs `cd <repo> && claude`; run anything, including `claude --resume`. | Answering Claude's interactive prompts, watching the live TUI, full shell control. |
-| **Web Terminal (ttyd)** · *legacy* | Embeds a [`ttyd`](https://github.com/tsl0922/ttyd) web terminal running *inside* the sprite, via a WebView. Superseded by the above. | Reference / a full xterm in a WebView. Requires starting ttyd in the sprite. |
+CodeRoamer takes the opposite approach: the remote environment is the primary machine from the
+first prompt.
 
-A chat you reopen also auto-syncs from its transcript, so turns that completed (or were started from
-a terminal) while the app was closed show up when you come back.
+- Your laptop does not need to remain awake or connected.
+- The agent keeps running when the phone app closes or changes networks.
+- The repository, toolchain, CLI sessions, and transcripts live together in the remote environment.
+- Your phone is a native control surface, not a relay to a laptop.
+- The same architecture can target other sandbox providers and user-managed Linux machines.
 
-### Dictation and audio transcription
+With a Sprite, the filesystem persists while compute sleeps when idle. CodeRoamer wakes the
+environment when work arrives and keeps it alive for the duration of an agent turn.
 
-The chat input has three experimental audio paths:
+## Autonomy through isolation
 
-- **Mic** uses device speech recognition and streams interim text into the input while you speak.
-  It does not send the message automatically.
-- **Rec** records audio on the phone, then transcribes it with the selected **Transcribe** backend.
-- **File** lets you pick an audio file, then transcribes it with the selected **Transcribe** backend.
+CodeRoamer runs Claude Code and Codex with approvals bypassed by default. The agent can install
+packages, edit files, run tests, and use the network without waiting for the user to approve every
+tool call. This is intentional: a long-running task should not stop five minutes after you put
+your phone away.
 
-`Rec` and `File` can use one of three backends:
+The boundary is the remote environment:
 
-- **Sprite** uploads the audio to the sprite and runs a local backend there. Install one inside the
-  sprite, for example `pip install -U faster-whisper` or `pipx install openai-whisper`.
-- **Assembly** uploads directly from the client to AssemblyAI. Save an AssemblyAI API key under
-  **Settings → Transcription** first.
-- **OpenAI** uploads directly from the client to OpenAI's transcription API. Save an OpenAI API key
-  under **Settings → Transcription** first.
+- The agent receives full control of the sandbox, not your laptop.
+- You decide which repositories and credentials exist inside that sandbox.
+- For GitHub, prefer an OAuth token or a **fine-grained PAT scoped to selected repositories**
+  instead of copying your personal SSH private key.
+- Sprites filesystem checkpoints provide a restore point before risky work.
 
-Transcripts are appended to the input box for review/editing; tap send yourself when it looks right.
+Autonomy is not risk-free. An agent can still delete files inside the sandbox and perform any
+remote action allowed by the credentials you give it. A checkpoint cannot undo a pushed commit,
+deleted branch, or other GitHub-side operation. Use narrowly scoped tokens, protected branches,
+and dedicated credentials when appropriate.
 
-### Session working directory
+## Agents and accounts
 
-Claude is always launched after `cd`-ing into the session's **working directory**. This matters
-twice over:
+### Supported today
 
-- It's where your cloned repo lives, so set it per session (or set a default in Settings).
-- Claude keys its **resumable history by directory**, so resuming only works from the same path.
-  The working directory is therefore locked once a conversation starts — begin a new session to
-  switch folders.
+- **Claude Code** — native streamed chat, resumable sessions, tool cards, partial output, and
+  on-disk transcript discovery.
+- **Codex Live** — the Codex App Server JSON-RPC transport
+  (`codex app-server --stdio`) with thread resume, models, and reasoning effort.
+- **Codex Legacy** — `codex exec --json`, retained as a fallback transport.
 
-If your repo lives at `~/type/type_new`, use `/home/sprite/type/type_new` in the app. `~` resolves
-to the sprite home directory, which is `/home/sprite`.
+### Subscription login
 
-If the session browser does not surface the session you want, use the stream terminal instead:
+You do not have to pay separately for model API usage if you already use a supported subscription:
+
+- Claude Code can authenticate with a Claude subscription through `claude setup-token`.
+- Codex can authenticate with a ChatGPT account through the Codex device-login flow.
+- GitHub can be connected per environment through device login, or with a pasted OAuth token /
+  fine-grained PAT.
+
+Account credentials are stored in the device secure store on native platforms and provisioned
+into the selected remote environment. Provider availability and usage limits still depend on the
+user's Claude or ChatGPT plan.
+
+### Planned
+
+- [OpenCode](https://opencode.ai/)
+- [Crush](https://github.com/charmbracelet/crush)
+- Additional agent CLIs through the existing provider abstraction
+
+## What the app provides
+
+| Surface | What it is |
+|---|---|
+| **Chat** | A native mobile chat for Claude Code and Codex with streaming text, tool calls, plans, turn outcomes, queued prompts, retry, interrupt, model selection, and reasoning effort. |
+| **Session browser** | Discovers Claude and Codex transcripts stored in the remote environment, renders them natively, and continues existing sessions. History survives reinstalling the phone app because the canonical transcript lives beside the agent. |
+| **Stream terminal** | A real TTY over the Exec WebSocket, rendered with a native Skia terminal. Use the interactive agent TUI or run ordinary shell commands. |
+| **Checkpoints** | Creates and restores Sprites filesystem checkpoints before autonomous or otherwise risky work. |
+| **Dictation** | Device speech recognition, local recording, and audio-file transcription. Transcribed text is placed in the composer for review and is never auto-sent. |
+
+Turns survive phone app restarts and network changes. If a WebSocket drops, CodeRoamer probes the
+remote exec session, reattaches when it is still alive, or reconciles the final result from the
+agent's on-disk transcript when it finished while the phone was offline.
+
+## Quick start
+
+### 1. Prepare the accounts
+
+You need:
+
+- a Sprites API token;
+- a Claude subscription token from `claude setup-token`, or a Codex-capable ChatGPT account;
+- optionally, a GitHub OAuth token or fine-grained PAT for cloning and pushing repositories.
+
+On first launch, CodeRoamer asks for the Sprites token and walks through the initial Claude and
+GitHub setup. Claude, Codex, and GitHub accounts can also be connected for an individual Sprite
+from its **Accounts** screen.
+
+### 2. Create or open a Sprite
+
+Create one with the **+** button in CodeRoamer or with the Sprites CLI. Install any project-specific
+tools in the Sprite once; its filesystem persists between sessions.
+
+### 3. Clone a repository
+
+With GitHub connected inside the Sprite:
 
 ```bash
-cd /home/sprite/type/type_new
-claude --resume e6fb688d-8341-40a8-8bc3-00ad84961ce8
+git clone https://github.com/you/your-repo.git /home/sprite/your-repo
 ```
 
-Use the absolute path in the app. `~` expands to `/home/sprite` on the sprite.
+You can run this from the stream terminal. An SSH key still works if you explicitly prefer one,
+but it is not required.
 
-For the third approach, **"Start ttyd in this sprite"** does it for you: it sets the sprite URL to
-`public`, installs `ttyd` if it's missing (apt/apk/dnf, falling back to a static binary), starts it
-on port 8080 (the public URL proxies to port 8080 / the first HTTP port), and connects. To run it by
-hand instead:
+### 4. Start a session
+
+Open the Sprite, create a chat, choose Claude or Codex, and set the working directory:
+
+```text
+/home/sprite/your-repo
+```
+
+Send a prompt and leave. The turn runs inside the Sprite, independently of the laptop and phone.
+
+## Working directories and resumable sessions
+
+The working directory is locked once a conversation starts. Agent CLIs associate resumable
+history with a project path, so changing directories in the middle of a chat can break resume
+semantics. Start a new chat to work in another directory.
+
+Use absolute paths in the app. A repository cloned to `~/your-repo` inside a Sprite is:
+
+```text
+/home/sprite/your-repo
+```
+
+The session browser scans the native transcript locations for both Claude Code and Codex. A chat
+reopened from local storage also reconciles with those transcripts so completed background turns
+appear after reconnecting.
+
+## Privacy and data flow
+
+The current native app has no CodeRoamer-hosted backend. It connects directly to the Sprites API:
+
+```text
+Phone ──authenticated Exec WebSocket──▶ Sprite
+                                          │
+                                          ├── Claude Code ──▶ Anthropic
+                                          ├── Codex ────────▶ OpenAI
+                                          └── Git ──────────▶ GitHub
+```
+
+- CodeRoamer stores chat metadata and messages locally in SQLite.
+- Claude and Codex store their canonical transcripts inside the remote environment.
+- Provider and GitHub credentials are stored with `expo-secure-store` on native devices, then
+  copied into a selected environment when it is provisioned.
+- Optional AssemblyAI or OpenAI transcription sends selected audio to that provider.
+- Optional `ntfy` notifications contact the server configured by the user.
+- The web build uses browser storage and a same-origin API proxy, so native is the preferred
+  environment for sensitive credentials.
+
+The open-source release will include a more detailed threat model and an auditable list of network
+destinations.
+
+## How chat transport works
+
+Each turn runs as a fresh process over the Sprites **Exec WebSocket**, not as a supervised service:
+
+1. CodeRoamer creates a uniquely named exec task in the chat's working directory.
+2. It launches Claude Code or Codex with streamed machine-readable output and approval bypass.
+3. A heartbeat keeps the Sprite awake while the agent is working.
+4. Once the exec session ID is known, the active run is persisted in SQLite.
+5. Parsed text, tool calls, results, and turn outcomes update the native chat.
+6. On disconnect, CodeRoamer repeatedly probes and reattaches to the same exec session.
+7. If the process ended while disconnected, the app finalizes the turn from the on-disk transcript.
+
+Codex Live uses the App Server protocol over the same exec transport:
+
+```text
+initialize → thread/start or thread/resume → turn/start
+```
+
+This design avoids supervised-service restarts replaying a prompt and lets a turn continue for
+hours after the phone disconnects.
+
+## Remote environments
+
+### Available now
+
+- **Fly.io Sprites** — creation, lifecycle, exec, persistent filesystem, and checkpoints.
+
+### In development
+
+- **Custom Linux machines** through the included `remote-agent`, which implements the Sprites
+  service and exec wire protocol.
+- Direct connection profiles with a per-machine URL and token.
+- Additional managed sandbox providers beyond Sprites.
+
+The goal is for agent choice and runtime choice to be independent:
+
+```text
+Claude Code / Codex / OpenCode / Crush
+                    ×
+Sprites / custom VM / future sandbox providers
+```
+
+See [`remote-agent/MIGRATION.md`](./remote-agent/MIGRATION.md) for the current custom-machine
+integration plan.
+
+## Development
+
 ```bash
-ttyd -W -c user:pass -p 8080 claude      # reachable at the sprite's public URL
+npm install
+npx expo start
+npx expo run:ios
+npm run android
+npm run web
+npm run lint
+npm run test
 ```
 
----
-
-## Authentication
-
-First launch walks you through three steps:
-
-1. **Sprites API token** — from your sprites.dev account or the Sprites CLI. Lets the app manage
-   your sprites.
-2. **Claude Code token** — run `claude setup-token` on your computer (requires a Claude
-   subscription) and paste the `sk-ant-oat01-…` value. The app injects it as
-   `CLAUDE_CODE_OAUTH_TOKEN` when it launches Claude in the sprite, so you never log in there.
-3. **GitHub** (optional) — device-flow login used to auto-fill your git commit name/email.
-
-Tokens are stored with `expo-secure-store`. Optional AssemblyAI and OpenAI transcription keys are
-added later in **Settings → Transcription**; they are also stored with `expo-secure-store`.
-
-### What to enter on the sign-in screen
-
-1. Paste your **Sprites API token** from `sprites.dev/account` or from the Sprites CLI, then tap
-   `Continue`.
-2. Paste your **Claude Code OAuth token** from `claude setup-token` on your computer. That token
-   starts with `sk-ant-oat01-...`. Without it, Chat cannot launch Claude.
-3. Optionally connect **GitHub** with the device-flow prompt if you want git name/email auto-fill.
-
----
-
-## No approvals — and safety
-
-Chat launches Claude with `--dangerously-skip-permissions`, so it never pauses to ask before
-running commands. That's the point — autonomous coding from your phone — but it means Claude can
-run anything in the sprite. The sprite is an isolated VM; still, use the **Checkpoints** tab to
-snapshot the filesystem before risky work and restore if needed.
-
----
-
-## Running the app
+The iOS and Android apps require a development build rather than Expo Go because the project uses
+custom native modules. After changing a native dependency or native configuration, rebuild with:
 
 ```bash
-npm install        # .npmrc sets legacy-peer-deps so the web devDependency conflict is handled
-npx expo run:ios   # builds & runs a dev build on the iOS simulator (needed: app uses native modules)
+npx expo prebuild --clean
+npx expo run:ios
 ```
 
-`npx expo start` then `w` works for web. The app uses custom native modules (Skia, WebView), so on
-iOS use a **dev build** (`expo run:ios`) rather than Expo Go.
-
-**Prerequisites:** Node.js 18+, a Sprites API token, and (for Claude) a Claude Code OAuth token.
-
-**Developing on a device and shipping to TestFlight:** see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
-
----
-
-## Architecture
-
-```
-src/
-  app/                          # Expo Router (file-based)
-    _layout.tsx                 # Root layout + AuthProvider
-    index.tsx                   # Auth redirect
-    auth.tsx                    # 3-step auth flow
-    (app)/
-      _layout.tsx               # Authenticated stack
-      index.tsx                 # Dashboard (sprite list) + Guides/Settings
-      guide.tsx                 # In-app guides & setup walkthrough
-      settings.tsx              # Defaults, git id, transcription provider keys
-      sprite/[name].tsx         # Overview / Chat / Checkpoints, + "sessions & terminals"
-      exec-poc.tsx              # Stream terminal (WebSocket exec → Skia terminal)
-      ttyd-terminal.tsx         # Web Terminal (ttyd in a WebView, legacy)
-
-  components/
-    chat/                       # Chat UI: messages, tool cards, plan, input bar,
-                                #   session list, session browser, new-session sheet, quick bash
-    checkpoints/                # Create / list / restore checkpoints
-    dashboard/                  # Sprite row + create sheet
-    terminal/                   # Skia-based terminal (ANSI parser, buffer, renderer)
-
-  hooks/        useChat.ts        # Streaming, two-level NDJSON parsing, persistence, resume
-                useChatDictation.ts# Mic/record/file dictation and transcription routing
-  services/     api.ts            # REST client: sprites, checkpoints, services, exec
-                auth.ts           # Secure token storage
-                audio-transcription.ts # Sprite-side audio upload + Whisper/faster-whisper runner
-                client-transcription.ts# AssemblyAI/OpenAI client-side transcription
-                claude-stream.ts  # NDJSON parser for Claude events
-                claude-sessions.ts# Discover & render on-disk Claude transcripts from a sprite
-                exec-poc.ts       # WebSocket exec client
-                storage.ts        # AsyncStorage: chats + settings
-  models/                        # sprite, chat, claude-events, service, checkpoint
-  constants/    session.ts      # Working-directory defaults/helpers; theme.ts
-```
-
-### How Chat streaming works
-
-1. The app starts a Sprites **service** that runs Claude in your working directory:
-   `claude -p --verbose --output-format stream-json --dangerously-skip-permissions --model <model>
-   [--resume <session-id>] '<prompt>'`.
-2. The service's output streams back as NDJSON over HTTP.
-3. `ClaudeStreamParser` parses the two-level NDJSON (service log events whose `data` field carries
-   Claude's own NDJSON), and `useChat` renders text, tool-use cards, plans, and results live.
-4. Each chat persists Claude's session id and working directory, so the next message resumes the
-   same conversation — across app restarts.
-
----
+See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for simulator, device, EAS, and TestFlight instructions.
 
 ## Tech stack
 
-- **Expo 55** / React Native 0.83, **Expo Router** (file-based navigation)
-- **@shopify/react-native-skia** — high-performance terminal rendering
-- **react-native-webview** — ttyd web terminal
-- **expo-secure-store** — token storage · **AsyncStorage** — chats & settings
-
----
+- Expo 55 / React Native 0.83 / Expo Router
+- TypeScript
+- SQLite for chats, messages, and persisted active runs
+- `expo-secure-store` for credentials on native platforms
+- Skia and a custom ANSI terminal implementation
+- Exec WebSockets for streamed process I/O and reattachment
+- Vitest for parsers, transcript merging, command builders, and transport helpers
 
 ## Roadmap
 
-- Full support for additional agents (the chat layer already abstracts a `provider`).
-- Pushing/observing long-running sessions in the background.
-- Background push notifications when a session finishes or needs input.
+- Open-source release with a documented threat model
+- OpenCode support
+- Crush support
+- Custom Linux machine connections
+- Additional sandbox providers
+- Better repository bootstrap and narrowly scoped GitHub credential setup
