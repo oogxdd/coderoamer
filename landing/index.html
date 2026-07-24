@@ -26,7 +26,7 @@
       <nav aria-label="Primary navigation">
         <a href="#why">Why sandbox-first</a>
         <a href="#security">Safety</a>
-        <a href="#roadmap">Roadmap</a>
+        <a href="#stack">The stack</a>
       </nav>
 
       <a class="nav-cta" href="https://github.com/oogxdd/coderoamer">View source</a>
@@ -434,64 +434,138 @@
         </ol>
       </section>
 
-      <section class="section shell" id="roadmap">
+      <section class="section shell stack-section" id="stack">
         <div class="section-heading split-heading">
           <div>
-            <span class="kicker">AGENTS × ENVIRONMENTS</span>
-            <h2>Choose both sides of the stack.</h2>
+            <span class="kicker">ONE INTERFACE, THREE CHOICES</span>
+            <h2>Bring the stack you actually want.</h2>
           </div>
           <p>
-            Sprites are the first runtime, not the product boundary. CodeRoamer is being built so
-            agent choice and environment choice remain independent.
+            Pick where the work runs, which coding CLI drives it, and which model powers that CLI.
+            CodeRoamer is the interaction layer across all three.
           </p>
         </div>
 
-        <div class="matrix">
-          <div class="matrix-axis agent-axis">
-            <span>AGENTS</span>
-            <article class="matrix-card available">
-              <span class="matrix-logo claude-logo">A</span>
-              <div><b>Claude Code</b><small>available now</small></div>
-              <em>LIVE</em>
+        <figure class="stack-map">
+          <div class="stack-layers">
+            <article class="stack-layer environment-layer">
+              <header>
+                <span class="layer-number">01</span>
+                <div>
+                  <small>WHERE IT RUNS</small>
+                  <h3>Environment</h3>
+                </div>
+              </header>
+              <div class="layer-options">
+                <div class="layer-option active">
+                  <span class="option-mark sprite-mark">◇</span>
+                  <b>Sprites</b>
+                  <em>LIVE</em>
+                </div>
+                <div class="layer-option next">
+                  <span class="option-mark">⌂</span>
+                  <b>Custom VM / home server</b>
+                  <em>NEXT</em>
+                </div>
+                <div class="layer-option research">
+                  <span class="option-mark">E</span>
+                  <b>E2B</b>
+                  <em>EVALUATING</em>
+                </div>
+                <div class="layer-option research">
+                  <span class="option-mark cloud-mark">☁</span>
+                  <b>Cloudflare Sandbox</b>
+                  <em>EVALUATING</em>
+                </div>
+              </div>
+              <p>Filesystem, processes, tools, and the repository live here.</p>
             </article>
-            <article class="matrix-card available">
-              <span class="matrix-logo codex-logo">C</span>
-              <div><b>Codex</b><small>Live + legacy transports</small></div>
-              <em>LIVE</em>
+
+            <article class="stack-layer cli-layer">
+              <header>
+                <span class="layer-number">02</span>
+                <div>
+                  <small>HOW IT CODES</small>
+                  <h3>Coding CLI</h3>
+                </div>
+              </header>
+              <div class="layer-options">
+                <div class="layer-option active">
+                  <span class="option-mark claude-logo">A</span>
+                  <b>Claude Code</b>
+                  <em>LIVE</em>
+                </div>
+                <div class="layer-option active">
+                  <span class="option-mark codex-logo">C</span>
+                  <b>Codex</b>
+                  <em>LIVE</em>
+                </div>
+                <div class="cli-cloud" aria-label="Planned coding CLIs">
+                  <span>OpenCode</span>
+                  <span>Crush</span>
+                  <span>Pi</span>
+                </div>
+              </div>
+              <p>The CLI owns its tools, context, sessions, and agent loop.</p>
             </article>
-            <article class="matrix-card upcoming">
-              <span class="matrix-logo">O</span>
-              <div><b>OpenCode</b><small>planned</small></div>
-              <em>NEXT</em>
-            </article>
-            <article class="matrix-card upcoming">
-              <span class="matrix-logo">✦</span>
-              <div><b>Crush</b><small>in development</small></div>
-              <em>NEXT</em>
+
+            <article class="stack-layer model-layer">
+              <header>
+                <span class="layer-number">03</span>
+                <div>
+                  <small>WHAT POWERS IT</small>
+                  <h3>Model provider</h3>
+                </div>
+              </header>
+              <div class="provider-cloud" aria-label="Model providers">
+                <span>Anthropic</span>
+                <span>OpenAI</span>
+                <span>Gemini</span>
+                <span>GLM</span>
+                <span>Kimi</span>
+                <span>Mistral</span>
+                <span class="local-provider">⌂ Local inference</span>
+                <span>and more</span>
+              </div>
+              <p>Use a subscription, an API, or your own inference when the CLI supports it.</p>
             </article>
           </div>
 
-          <div class="matrix-operator" aria-hidden="true">×</div>
-
-          <div class="matrix-axis runtime-axis">
-            <span>ENVIRONMENTS</span>
-            <article class="matrix-card available">
-              <span class="matrix-logo sprite-logo">◇</span>
-              <div><b>Fly Sprites</b><small>persistent sandboxes</small></div>
-              <em>LIVE</em>
-            </article>
-            <article class="matrix-card upcoming">
-              <span class="matrix-logo">⌂</span>
-              <div><b>Custom Linux VM</b><small>remote-agent</small></div>
-              <em>NEXT</em>
-            </article>
-            <article class="matrix-card ghost-card">
-              <span class="matrix-logo">+</span>
-              <div><b>More sandboxes</b><small>provider abstraction</small></div>
-              <em>SOON</em>
-            </article>
+          <div class="stack-wiring" aria-hidden="true">
+            <span></span><span></span><span></span>
           </div>
-        </div>
+
+          <div class="roamer-hub">
+            <div class="hub-brand">
+              <span class="brand-mark hub-mark" aria-hidden="true">
+                <span></span><span></span>
+              </span>
+              <div>
+                <small>INTERACTION LAYER</small>
+                <b>CodeRoamer</b>
+              </div>
+            </div>
+            <div class="hub-actions" aria-label="CodeRoamer responsibilities">
+              <span>start</span>
+              <i>→</i>
+              <span>steer</span>
+              <i>→</i>
+              <span>reconnect</span>
+              <i>→</i>
+              <span>review</span>
+            </div>
+            <div class="hub-surfaces">
+              <span><i class="surface-phone" aria-hidden="true"></i> Phone</span>
+              <span><i class="surface-desktop" aria-hidden="true"></i> Computer</span>
+              <em>same remote session</em>
+            </div>
+          </div>
+
+          <figcaption>
+            These layers are independent choices, not a promise that every CLI supports every
+            model provider. CodeRoamer exposes the combinations each adapter can actually run.
+          </figcaption>
+        </figure>
       </section>
 
       <section class="final-cta shell">
