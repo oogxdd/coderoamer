@@ -54,6 +54,7 @@ import {
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
+const MAX_LIVE_TOOL_OUTPUT_CHARS = 20_000;
 
 interface SessionIds {
   claudeSessionId?: string;
@@ -1042,6 +1043,9 @@ export function useChat(options: UseChatOptions) {
           setCodexSessionId(event.threadId);
           setModelName((prev) => prev ?? CODEX_DEFAULT_MODEL_LABEL);
           break;
+        case 'turnStarted':
+          debugChat('codex turn started', elapsedSince(turnTimingRef.current.startedAt), event.turnId);
+          break;
         case 'assistantDelta':
           codexSawAssistantRef.current = true;
           if (!turnTimingRef.current.firstAssistantAt) {
@@ -1067,10 +1071,22 @@ export function useChat(options: UseChatOptions) {
             if (last && last.type === 'reasoning') {
               newContent[newContent.length - 1] = {
                 type: 'reasoning',
-                text: `${last.text}\n${event.text}`,
+                text: `${last.text}${event.text}`,
               };
             } else {
               newContent.push({ type: 'reasoning', text: event.text });
+            }
+            return newContent;
+          });
+          break;
+        case 'reasoningBoundary':
+          updateActiveAssistant((newContent) => {
+            const last = newContent[newContent.length - 1];
+            if (last?.type === 'reasoning' && last.text && !last.text.endsWith('\n')) {
+              newContent[newContent.length - 1] = {
+                type: 'reasoning',
+                text: `${last.text}\n`,
+              };
             }
             return newContent;
           });
@@ -1080,7 +1096,10 @@ export function useChat(options: UseChatOptions) {
             const card: ToolUseCard = {
               toolUseId: event.commandId,
               toolName: 'Bash',
-              input: { command: event.command },
+              input: {
+                command: event.command,
+                ...(event.cwd ? { cwd: event.cwd } : {}),
+              },
               startedAt: Date.now(),
             };
             newContent.push({ type: 'toolUse', card });
@@ -1091,13 +1110,38 @@ export function useChat(options: UseChatOptions) {
             return newContent;
           });
           break;
+        case 'commandOutput':
+          updateActiveAssistant((newContent) => {
+            for (let i = 0; i < newContent.length; i++) {
+              const item = newContent[i];
+              if (item.type === 'toolUse' && item.card.toolUseId === event.commandId) {
+                const nextOutput = `${item.card.liveOutput ?? ''}${event.delta}`;
+                newContent[i] = {
+                  type: 'toolUse',
+                  card: {
+                    ...item.card,
+                    liveOutput: nextOutput.slice(-MAX_LIVE_TOOL_OUTPUT_CHARS),
+                  },
+                };
+                break;
+              }
+            }
+            return newContent;
+          });
+          break;
         case 'commandEnd':
           updateActiveAssistant((newContent) => {
             const toolName = toolUseIndexRef.current.get(event.commandId)?.toolName ?? 'Bash';
+            const metadata = [
+              event.status ? `status: ${event.status}` : undefined,
+              event.exitCode !== undefined ? `exit code: ${event.exitCode}` : undefined,
+              event.durationMs !== undefined ? `duration: ${event.durationMs}ms` : undefined,
+            ].filter(Boolean).join('\n');
+            const output = event.output ?? '';
             const resultCard: ToolResultCard = {
               toolUseId: event.commandId,
               toolName,
-              content: event.output ?? null,
+              content: [metadata, output].filter(Boolean).join('\n\n') || null,
               completedAt: Date.now(),
             };
 
@@ -1108,10 +1152,51 @@ export function useChat(options: UseChatOptions) {
               if (item.type === 'toolUse' && item.card.toolUseId === event.commandId) {
                 newContent[i] = {
                   type: 'toolUse',
-                  card: { ...item.card, result: resultCard },
+                  card: { ...item.card, liveOutput: undefined, result: resultCard },
                 };
                 break;
               }
+            }
+            return newContent;
+          });
+          break;
+        case 'fileChangeBegin':
+          updateActiveAssistant((newContent, targetIndex) => {
+            const paths = event.files.map((file) => file.path);
+            const filePath = paths.length === 1 ? paths[0] : `${paths.length} files`;
+            const input = {
+              file_path: filePath,
+              changes: event.files.map((file) => ({
+                path: file.path,
+                kind: file.kind,
+                diff: file.diff ?? null,
+              })),
+            } as unknown as ToolUseCard['input'];
+            const existingIndex = newContent.findIndex(
+              (item) => item.type === 'toolUse' && item.card.toolUseId === event.changeId
+            );
+            if (existingIndex >= 0) {
+              const existing = newContent[existingIndex];
+              if (existing.type === 'toolUse') {
+                newContent[existingIndex] = {
+                  type: 'toolUse',
+                  card: { ...existing.card, input },
+                };
+              }
+            } else {
+              newContent.push({
+                type: 'toolUse',
+                card: {
+                  toolUseId: event.changeId,
+                  toolName: 'Edit',
+                  input,
+                  startedAt: Date.now(),
+                },
+              });
+              toolUseIndexRef.current.set(event.changeId, {
+                messageIndex: targetIndex,
+                toolName: 'Edit',
+              });
             }
             return newContent;
           });
@@ -1120,21 +1205,56 @@ export function useChat(options: UseChatOptions) {
           updateActiveAssistant((newContent, targetIndex) => {
             const paths = event.files.map((f) => f.path);
             const filePath = paths.length === 1 ? paths[0] : `${paths.length} files`;
-            const summary = event.files.map((f) => `${f.kind}: ${f.path}`).join('\n');
+            const summary = event.files
+              .map((f) => [`${f.kind}: ${f.path}`, f.diff].filter(Boolean).join('\n'))
+              .join('\n\n');
             const resultCard: ToolResultCard = {
               toolUseId: event.changeId,
               toolName: 'Edit',
-              content: summary || null,
+              content: [`status: ${event.status}`, summary].filter(Boolean).join('\n\n'),
               completedAt: Date.now(),
             };
-            const card: ToolUseCard = {
-              toolUseId: event.changeId,
-              toolName: 'Edit',
-              input: { file_path: filePath },
-              startedAt: Date.now(),
-              result: resultCard,
-            };
-            newContent.push({ type: 'toolUse', card });
+            const existingIndex = newContent.findIndex(
+              (item) => item.type === 'toolUse' && item.card.toolUseId === event.changeId
+            );
+            if (existingIndex >= 0) {
+              const existing = newContent[existingIndex];
+              if (existing.type === 'toolUse') {
+                newContent[existingIndex] = {
+                  type: 'toolUse',
+                  card: {
+                    ...existing.card,
+                    input: {
+                      file_path: filePath,
+                      changes: event.files.map((file) => ({
+                        path: file.path,
+                        kind: file.kind,
+                        diff: file.diff ?? null,
+                      })),
+                    },
+                    result: resultCard,
+                  },
+                };
+              }
+            } else {
+              newContent.push({
+                type: 'toolUse',
+                card: {
+                  toolUseId: event.changeId,
+                  toolName: 'Edit',
+                  input: {
+                    file_path: filePath,
+                    changes: event.files.map((file) => ({
+                      path: file.path,
+                      kind: file.kind,
+                      diff: file.diff ?? null,
+                    })),
+                  },
+                  startedAt: Date.now(),
+                  result: resultCard,
+                },
+              });
+            }
             toolUseIndexRef.current.set(event.changeId, {
               messageIndex: targetIndex,
               toolName: 'Edit',
@@ -1178,23 +1298,48 @@ export function useChat(options: UseChatOptions) {
             return newContent;
           });
           break;
-        case 'webSearch':
-          updateActiveAssistant((newContent) => {
-            const id = `web-${makeId()}`;
-            const resultCard: ToolResultCard = {
-              toolUseId: id,
-              toolName: 'WebSearch',
-              content: null,
-              completedAt: Date.now(),
-            };
-            const card: ToolUseCard = {
-              toolUseId: id,
-              toolName: 'WebSearch',
-              input: { query: event.query },
-              startedAt: Date.now(),
-              result: resultCard,
-            };
-            newContent.push({ type: 'toolUse', card });
+        case 'activity':
+          updateActiveAssistant((newContent, targetIndex) => {
+            const existingIndex = newContent.findIndex(
+              (item) => item.type === 'toolUse' && item.card.toolUseId === event.activityId
+            );
+            const resultCard: ToolResultCard | undefined = event.completed
+              ? {
+                  toolUseId: event.activityId,
+                  toolName: event.name,
+                  content: event.output ?? (event.isError ? 'Activity failed' : null),
+                  completedAt: Date.now(),
+                }
+              : undefined;
+            if (existingIndex >= 0) {
+              const existing = newContent[existingIndex];
+              if (existing.type === 'toolUse') {
+                newContent[existingIndex] = {
+                  type: 'toolUse',
+                  card: {
+                    ...existing.card,
+                    toolName: event.name,
+                    input: event.input,
+                    result: resultCard ?? existing.card.result,
+                  },
+                };
+              }
+            } else {
+              newContent.push({
+                type: 'toolUse',
+                card: {
+                  toolUseId: event.activityId,
+                  toolName: event.name,
+                  input: event.input,
+                  startedAt: Date.now(),
+                  result: resultCard,
+                },
+              });
+            }
+            toolUseIndexRef.current.set(event.activityId, {
+              messageIndex: targetIndex,
+              toolName: event.name,
+            });
             return newContent;
           });
           break;
@@ -1203,7 +1348,7 @@ export function useChat(options: UseChatOptions) {
             const todos = event.items.map((entry, i) => ({
               id: `todo-${i}`,
               content: entry.text,
-              status: entry.completed ? 'completed' : 'pending',
+              status: entry.status,
             }));
             const input = { todos } as unknown as ToolUseCard['input'];
             for (let i = 0; i < newContent.length; i++) {
@@ -1228,16 +1373,26 @@ export function useChat(options: UseChatOptions) {
           });
           break;
         case 'turnCompleted':
-          debugChat('codex turn completed', elapsedSince(turnTimingRef.current.startedAt));
+          debugChat(
+            'codex turn completed',
+            elapsedSince(turnTimingRef.current.startedAt),
+            event.status
+          );
           agentTurnCompleteRef.current = true;
+          if (event.message) setErrorMessage(event.message);
           appendTurnOutcome({
-            status: 'success',
+            status:
+              event.status === 'completed'
+                ? 'success'
+                : event.status === 'interrupted'
+                  ? 'interrupted'
+                  : 'error',
             durationMs: turnTimingRef.current.startedAt
               ? Date.now() - turnTimingRef.current.startedAt
               : undefined,
             completedAt: Date.now(),
           });
-          completeTurnFromEvent();
+          completeTurnFromEvent({ autoSendQueued: event.status === 'completed' });
           break;
         case 'error':
           debugChat('codex error event', elapsedSince(turnTimingRef.current.startedAt), event.message);

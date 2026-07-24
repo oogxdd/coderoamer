@@ -25,6 +25,8 @@ import {
 } from '@/models/chat';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
+import { CodexModelPicker } from '@/components/chat/CodexModelPicker';
+import { CodexModelOption, getCachedCodexModels } from '@/services/codex-models';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
 type MaxTurns = 0 | 5 | 10 | 25 | 50;
@@ -69,6 +71,7 @@ export default function SettingsScreen() {
   const [claudeModel, setClaudeModel] = useState<ClaudeModel>('sonnet');
   const [claudeEffort, setClaudeEffort] = useState<AgentEffort>('high');
   const [codexModel, setCodexModel] = useState('');
+  const [codexModels, setCodexModels] = useState<CodexModelOption[]>([]);
   const [codexEffort, setCodexEffort] = useState<AgentEffort>('high');
   const [maxTurns, setMaxTurns] = useState<MaxTurns>(0);
   const [customInstructions, setCustomInstructions] = useState('');
@@ -174,6 +177,7 @@ export default function SettingsScreen() {
           savedNtfyTopic,
           savedNtfyServer,
           savedTranscriptionProvider,
+          cachedCodexModels,
         ] =
           await Promise.all([
             getSetting('defaultProvider'),
@@ -192,6 +196,7 @@ export default function SettingsScreen() {
             getSetting('ntfyTopic'),
             getSetting('ntfyServer'),
             getSetting('transcriptionProvider'),
+            getCachedCodexModels(),
           ]);
 
         if (
@@ -211,6 +216,7 @@ export default function SettingsScreen() {
         setCodexEffort(
           normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high'
         );
+        setCodexModels(cachedCodexModels);
         if (turns !== null) {
           const parsed = parseInt(turns, 10);
           if ([0, 5, 10, 25, 50].includes(parsed)) {
@@ -254,14 +260,29 @@ export default function SettingsScreen() {
   }, []);
 
   const handleCodexModelChange = useCallback(async (text: string) => {
+    const normalized = text.trim();
     setCodexModel(text);
-    await setSetting('codexModel', text.trim());
-  }, []);
+    await setSetting('codexModel', normalized);
+    const option = codexModels.find((candidate) => candidate.model === normalized);
+    if (
+      option?.supportedReasoningEfforts.length &&
+      !option.supportedReasoningEfforts.includes(codexEffort)
+    ) {
+      const nextEffort =
+        option.defaultReasoningEffort ?? option.supportedReasoningEfforts[0];
+      setCodexEffort(nextEffort);
+      await setSetting('codexEffort', nextEffort);
+    }
+  }, [codexEffort, codexModels]);
 
   const handleCodexEffortChange = useCallback(async (nextEffort: AgentEffort) => {
     setCodexEffort(nextEffort);
     await setSetting('codexEffort', nextEffort);
   }, []);
+  const selectedCodexModel = codexModels.find((option) => option.model === codexModel);
+  const codexEffortOptions = selectedCodexModel?.supportedReasoningEfforts.length
+    ? selectedCodexModel.supportedReasoningEfforts
+    : CODEX_EFFORT_OPTIONS;
 
   const handleTranscriptionProviderChange = useCallback(
     async (nextProvider: TranscriptionProvider) => {
@@ -833,24 +854,23 @@ export default function SettingsScreen() {
 
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>CODEX CONFIGURATION</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
-        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.inputLabel, { color: colors.text }]}>Model</Text>
-          <TextInput
-            style={[styles.textInput, { color: colors.text }]}
+        <View style={[styles.pickerRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Model</Text>
+          <CodexModelPicker
+            models={codexModels}
             value={codexModel}
-            onChangeText={handleCodexModelChange}
-            placeholder="Codex default"
-            placeholderTextColor={colors.textSecondary}
-            autoCapitalize="none"
-            autoCorrect={false}
+            onChange={handleCodexModelChange}
           />
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            The catalog refreshes when you open session settings on a Sprite.
+          </Text>
         </View>
         <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
           <Text style={[styles.rowLabel, { color: colors.text }]}>Effort</Text>
         </View>
         <View style={styles.pickerRow}>
           <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
-            {CODEX_EFFORT_OPTIONS.map((option) => (
+            {codexEffortOptions.map((option) => (
               <Pressable
                 key={option}
                 style={[

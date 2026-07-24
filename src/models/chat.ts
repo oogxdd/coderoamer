@@ -77,6 +77,8 @@ export interface ToolUseCard {
   toolName: string;
   input: JSONValue;
   startedAt: number;
+  /** Bounded in-progress output, replaced by the authoritative final result. */
+  liveOutput?: string;
   result?: ToolResultCard;
 }
 
@@ -104,6 +106,28 @@ export function toolUseSummary(card: ToolUseCard): string {
       return jsonString(jsonGet(input, 'pattern')) ?? 'grep search';
     case 'WebSearch':
       return jsonString(jsonGet(input, 'query')) ?? 'web search';
+    case 'WebOpen':
+      return jsonString(jsonGet(input, 'url')) ?? 'open web page';
+    case 'WebFind':
+      return jsonString(jsonGet(input, 'pattern')) ?? 'find on page';
+    case 'ImageView':
+      return jsonString(jsonGet(input, 'path')) ?? 'view image';
+    case 'Wait': {
+      const duration = jsonGet(input, 'durationMs');
+      return typeof duration === 'number' ? `wait ${duration}ms` : 'wait';
+    }
+    case 'Diff':
+      return 'turn diff';
+    case 'Compaction':
+      return 'compact context';
+    case 'Review':
+      return 'review';
+    case 'Model': {
+      const to = jsonString(jsonGet(input, 'to'));
+      return to ? `rerouted to ${to}` : 'model reroute';
+    }
+    case 'Warning':
+      return 'Codex warning';
     case 'TodoWrite': {
       const todos = jsonGet(input, 'todos');
       if (Array.isArray(todos)) {
@@ -129,6 +153,15 @@ export function toolUseIcon(toolName: string): string {
     case 'Glob': return '🔍';
     case 'Grep': return '🔎';
     case 'WebSearch': return '🌐';
+    case 'WebOpen': return '↗';
+    case 'WebFind': return '⌕';
+    case 'ImageView': return '🖼️';
+    case 'Wait': return '⏱';
+    case 'Diff': return '±';
+    case 'Compaction': return '◫';
+    case 'Review': return '✓';
+    case 'Model': return '↪';
+    case 'Warning': return '⚠️';
     case 'TodoWrite': return '📋';
     default: return '🔧';
   }
@@ -172,6 +205,20 @@ export function toolUseActivityLabel(card: ToolUseCard, cwd?: string): string {
       const query = jsonString(jsonGet(input, 'query')) ?? 'web';
       return `Searching the web for ${query.slice(0, 40)}...`;
     }
+    case 'WebOpen':
+      return 'Opening a web page...';
+    case 'WebFind':
+      return 'Finding text on a web page...';
+    case 'ImageView':
+      return 'Inspecting an image...';
+    case 'Wait':
+      return 'Waiting...';
+    case 'Diff':
+      return 'Updating turn diff...';
+    case 'Compaction':
+      return 'Compacting context...';
+    case 'Review':
+      return 'Reviewing changes...';
     case 'TodoWrite':
       return 'Updating plan...';
     default:

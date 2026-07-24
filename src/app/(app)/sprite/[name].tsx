@@ -1018,6 +1018,7 @@ export default function SpriteDetailScreen() {
       {/* New Session / Edit Directory Sheet */}
       {sessionSheetMode && (
         <NewSessionSheet
+          spriteName={spriteName}
           title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
           confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
           defaultDirectory={

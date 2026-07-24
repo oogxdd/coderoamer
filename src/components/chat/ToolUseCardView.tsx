@@ -66,9 +66,8 @@ export function ToolUseCardView({ card, workingDirectory }: ToolUseCardViewProps
           )}
         </View>
 
-        {/* Show preview of result if available and short */}
-        {card.result && card.result.content && (
-          <ResultPreview content={card.result.content} colors={colors} />
+        {(card.result?.content || card.liveOutput) && (
+          <ResultPreview content={card.result?.content ?? card.liveOutput} colors={colors} />
         )}
       </Pressable>
 
@@ -96,9 +95,9 @@ function ResultPreview({ content, colors }: { content: any; colors: any }) {
     return null;
   }
 
-  if (!text || text.length > 200) return null;
+  if (!text) return null;
 
-  const lines = text.split('\n').slice(0, 2);
+  const lines = text.slice(-600).split('\n').slice(-2);
   const preview = lines.join('\n');
 
   return (
