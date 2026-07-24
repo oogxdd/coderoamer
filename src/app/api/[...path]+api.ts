@@ -7,10 +7,15 @@ async function proxyRequest(request: Request): Promise<Response> {
 
   const headers = new Headers();
   for (const [key, value] of request.headers.entries()) {
-    if (key.toLowerCase() !== 'host') {
+    const lowerKey = key.toLowerCase();
+    if (lowerKey !== 'host' && lowerKey !== 'accept-encoding') {
       headers.set(key, value);
     }
   }
+  // Browsers may advertise zstd, which Node's fetch does not decompress.
+  // Request an uncompressed upstream body so the proxy always returns bytes
+  // matching its response headers.
+  headers.set('accept-encoding', 'identity');
 
   const init: RequestInit = {
     method: request.method,
