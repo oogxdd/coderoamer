@@ -21,7 +21,7 @@ import {
   AgentEffort,
   AgentProvider,
   effortDisplayName,
-  normalizeAgentEffort,
+  normalizeAgentEffortForProvider,
 } from '@/models/chat';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
@@ -51,7 +51,7 @@ const MAX_TURNS_OPTIONS: { label: string; value: MaxTurns }[] = [
 ];
 
 const CLAUDE_EFFORT_OPTIONS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const CODEX_EFFORT_OPTIONS: AgentEffort[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+const CODEX_EFFORT_OPTIONS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
 const TRANSCRIPTION_PROVIDER_OPTIONS: { label: string; value: TranscriptionProvider }[] = [
   { label: 'AssemblyAI', value: 'assemblyai' },
   { label: 'OpenAI', value: 'openai' },
@@ -204,9 +204,13 @@ export default function SettingsScreen() {
         if (model && ['sonnet', 'opus', 'haiku'].includes(model)) {
           setClaudeModel(model as ClaudeModel);
         }
-        setClaudeEffort(normalizeAgentEffort(savedClaudeEffort) ?? 'high');
+        setClaudeEffort(
+          normalizeAgentEffortForProvider('claude', savedClaudeEffort) ?? 'high'
+        );
         if (savedCodexModel !== null) setCodexModel(savedCodexModel);
-        setCodexEffort(normalizeAgentEffort(savedCodexEffort) ?? 'high');
+        setCodexEffort(
+          normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high'
+        );
         if (turns !== null) {
           const parsed = parseInt(turns, 10);
           if ([0, 5, 10, 25, 50].includes(parsed)) {

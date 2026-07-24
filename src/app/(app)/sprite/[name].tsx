@@ -21,7 +21,7 @@ import {
   ChatMessage,
   effortDisplayName,
   isCodexProvider,
-  normalizeAgentEffort,
+  normalizeAgentEffortForProvider,
   providerDisplayName,
   toolUseActivityLabel,
 } from '@/models/chat';
@@ -284,9 +284,11 @@ export default function SpriteDetailScreen() {
       const defaults: AgentDefaults = {
         provider: normalizeProvider(savedDefaultProvider),
         claudeModel: savedClaudeModel?.trim() || 'sonnet',
-        claudeEffort: normalizeAgentEffort(savedClaudeEffort) ?? 'high',
+        claudeEffort:
+          normalizeAgentEffortForProvider('claude', savedClaudeEffort) ?? 'high',
         codexModel: savedCodexModel?.trim() || '',
-        codexEffort: normalizeAgentEffort(savedCodexEffort) ?? 'high',
+        codexEffort:
+          normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high',
       };
       setAgentDefaults(defaults);
 

@@ -17,6 +17,7 @@ import {
   AgentProvider,
   effortDisplayName,
   isCodexProvider,
+  normalizeAgentEffortForProvider,
   providerDisplayName,
 } from '@/models/chat';
 import { normalizeWorkingDirectory } from '@/constants/session';
@@ -50,7 +51,7 @@ interface NewSessionSheetProps {
 const PROVIDERS: AgentProvider[] = ['claude', 'codexAppServer', 'codex'];
 const CLAUDE_MODELS = ['sonnet', 'opus', 'haiku'] as const;
 const CLAUDE_EFFORTS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const CODEX_EFFORTS: AgentEffort[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+const CODEX_EFFORTS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
 
 export function NewSessionSheet({
   title = 'New Session',
@@ -72,7 +73,9 @@ export function NewSessionSheet({
   const [directory, setDirectory] = useState(defaultDirectory);
   const [provider, setProvider] = useState<AgentProvider>(defaultProvider);
   const [model, setModel] = useState(defaultModel);
-  const [effort, setEffort] = useState<AgentEffort>(defaultEffort);
+  const [effort, setEffort] = useState<AgentEffort>(
+    normalizeAgentEffortForProvider(defaultProvider, defaultEffort) ?? 'high'
+  );
   const [rememberDirectory, setRememberDirectory] = useState(false);
 
   const handleCreate = async () => {
@@ -91,10 +94,10 @@ export function NewSessionSheet({
     setProvider(nextProvider);
     if (isCodexProvider(nextProvider)) {
       setModel(defaultCodexModel);
-      setEffort(defaultCodexEffort);
+      setEffort(normalizeAgentEffortForProvider(nextProvider, defaultCodexEffort) ?? 'high');
     } else {
       setModel(defaultClaudeModel);
-      setEffort(defaultClaudeEffort);
+      setEffort(normalizeAgentEffortForProvider(nextProvider, defaultClaudeEffort) ?? 'high');
     }
   };
 

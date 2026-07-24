@@ -63,10 +63,11 @@ describe('streamExec stdin readiness', () => {
   });
 
   it('waits for session_info before allowing the first stdin write', async () => {
+    const events: { type: string; data?: string }[] = [];
     const stream = streamExec(
       'sprite',
       ['codex', 'app-server', '--stdio'],
-      () => {},
+      (event) => events.push(event),
       undefined,
       {
         stdin: true,
@@ -80,11 +81,28 @@ describe('streamExec stdin readiness', () => {
     socket.open();
     expect(socket.sent).toEqual([]);
 
+    // Sprites emits these lifecycle objects as newline-less text frames before
+    // session_info. They are control-plane messages, not process stdout.
+    await socket.message(JSON.stringify({ msg: 'session_created cmd=/bin/bash', pid: 123 }));
+    await socket.message(JSON.stringify({ msg: 'session_started', pid: 123 }));
+    await socket.message(
+      JSON.stringify({ type: 'port_opened', port: 3000, address: '0.0.0.0', pid: 123 })
+    );
+    expect(events.filter((event) => event.type === 'stdout')).toEqual([]);
+
     await socket.message(JSON.stringify({ type: 'session_info', session_id: 'exec-1' }));
     expect(socket.sent).toHaveLength(1);
     const frame = new Uint8Array(socket.sent[0] as ArrayBuffer);
     expect(frame[0]).toBe(0);
     expect(new TextDecoder().decode(frame.slice(1))).toBe('{"method":"initialize"}\n');
+
+    const stdoutText = '{"id":1,"result":{"userAgent":"test"}}\n';
+    const stdoutPayload = new TextEncoder().encode(stdoutText);
+    const stdoutFrame = new Uint8Array(stdoutPayload.length + 1);
+    stdoutFrame[0] = 1;
+    stdoutFrame.set(stdoutPayload, 1);
+    await socket.message(stdoutFrame.buffer);
+    expect(events).toContainEqual({ type: 'stdout', data: stdoutText });
 
     // Replayed session metadata must not initialize the protocol twice.
     await socket.message(JSON.stringify({ type: 'session_info', session_id: 'exec-1' }));

@@ -2,7 +2,7 @@ import { JSONValue, jsonGet, jsonString, jsonPretty } from './claude-events';
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type AgentProvider = 'claude' | 'codex' | 'codexAppServer';
-export type AgentEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type AgentEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
 
@@ -226,6 +226,7 @@ export function isCodexProvider(provider: AgentProvider): boolean {
 
 export function normalizeAgentEffort(value: unknown): AgentEffort | undefined {
   switch (value) {
+    case 'none':
     case 'minimal':
     case 'low':
     case 'medium':
@@ -236,6 +237,26 @@ export function normalizeAgentEffort(value: unknown): AgentEffort | undefined {
     default:
       return undefined;
   }
+}
+
+export function normalizeAgentEffortForProvider(
+  provider: AgentProvider,
+  value: unknown
+): AgentEffort | undefined {
+  const effort = normalizeAgentEffort(value);
+  if (!effort) return undefined;
+
+  if (isCodexProvider(provider)) {
+    // Older builds exposed "minimal", while current Codex models call the
+    // no-reasoning level "none". Also keep cross-provider "max" values valid.
+    if (effort === 'minimal') return 'none';
+    if (effort === 'max') return 'xhigh';
+    return effort;
+  }
+
+  // Claude's picker supports low through max, but not Codex's none/minimal.
+  if (effort === 'none' || effort === 'minimal') return undefined;
+  return effort;
 }
 
 export function effortDisplayName(effort: AgentEffort): string {

@@ -10,7 +10,7 @@ import {
   TurnOutcome,
   isCodexProvider,
   makeId,
-  normalizeAgentEffort,
+  normalizeAgentEffortForProvider,
   providerDisplayName,
 } from '@/models/chat';
 import {
@@ -1444,7 +1444,8 @@ export function useChat(options: UseChatOptions) {
         ]);
 
         const modelId = model?.trim() || globalModel || 'sonnet';
-        const selectedEffort = effort ?? normalizeAgentEffort(globalEffort) ?? 'high';
+        const selectedEffort =
+          normalizeAgentEffortForProvider(provider, effort ?? globalEffort) ?? 'high';
 
         claudeCmd += ` --model ${shellQuote(modelId)}`;
         claudeCmd += ` --effort ${shellQuote(selectedEffort)}`;
@@ -1470,7 +1471,8 @@ export function useChat(options: UseChatOptions) {
           getSetting('codexEffort'),
         ]);
         const codexModel = model?.trim() || codexModelSetting?.trim();
-        const selectedEffort = effort ?? normalizeAgentEffort(codexEffortSetting) ?? 'high';
+        const selectedEffort =
+          normalizeAgentEffortForProvider(provider, effort ?? codexEffortSetting) ?? 'high';
         setModelName(codexModel || CODEX_DEFAULT_MODEL_LABEL);
         const codexPrompt = codexSessionIdRef.current
           ? prompt
