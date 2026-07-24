@@ -82,6 +82,44 @@ describe('CodexStreamParser — app-server notifications', () => {
   it('ignores JSON-RPC responses (handled by the app-server driver)', () => {
     expect(parseOne({ id: 1, result: { threadId: 't' } })).toEqual([]);
   });
+
+  it('describes unsupported notifications without exposing parameter values', () => {
+    expect(
+      parseOne({
+        method: 'item/started',
+        params: {
+          threadId: 'secret-thread',
+          turnId: 'secret-turn',
+          item: {
+            id: 'secret-item',
+            type: 'imageView',
+            path: '/private/screenshot.png',
+          },
+        },
+      })
+    ).toEqual([
+      {
+        type: 'unknown',
+        rpcMethod: 'item/started',
+        itemType: 'imageView',
+        keys: ['threadId', 'turnId', 'item'],
+      },
+    ]);
+
+    expect(
+      parseOne({
+        method: 'thread/tokenUsage/updated',
+        params: { threadId: 'secret-thread', tokenUsage: { total: 123 } },
+      })
+    ).toEqual([
+      {
+        type: 'unknown',
+        rpcMethod: 'thread/tokenUsage/updated',
+        itemType: undefined,
+        keys: ['threadId', 'tokenUsage'],
+      },
+    ]);
+  });
 });
 
 describe('CodexStreamParser — buffering', () => {

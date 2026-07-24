@@ -300,6 +300,7 @@ export function codexEventDebugLabel(event: CodexStreamEvent): string {
     case 'unknown':
       return [
         'unknown',
+        event.rpcMethod ? `rpc=${event.rpcMethod}` : undefined,
         event.rawType ? `raw=${event.rawType}` : undefined,
         event.itemType ? `item=${event.itemType}` : undefined,
         event.keys?.length ? `keys=${event.keys.join('|')}` : undefined,

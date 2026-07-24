@@ -23,7 +23,13 @@ export type CodexStreamEvent =
   | { type: 'todoList'; listId: string; items: TodoEntry[] }
   | { type: 'turnCompleted' }
   | { type: 'error'; message: string }
-  | { type: 'unknown'; rawType?: string; itemType?: string; keys?: string[] };
+  | {
+      type: 'unknown';
+      rawType?: string;
+      rpcMethod?: string;
+      itemType?: string;
+      keys?: string[];
+    };
 
 function readItemId(value: unknown): string | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -326,7 +332,31 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
   if (typeof json.method === 'string') {
     const events = parseCodexAppServerNotification(json.method, json.params);
     if (events.length > 0) return events;
-    return [];
+    if (
+      json.method === 'error' &&
+      json.params &&
+      typeof json.params === 'object' &&
+      !Array.isArray(json.params) &&
+      jsonGet(json.params, 'willRetry') === true
+    ) {
+      return [];
+    }
+    const params =
+      json.params && typeof json.params === 'object' && !Array.isArray(json.params)
+        ? json.params
+        : undefined;
+    const item = params ? jsonGet(params, 'item') : undefined;
+    return [{
+      type: 'unknown',
+      rpcMethod: json.method,
+      itemType:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? readItemType(item)
+          : undefined,
+      // Field names are enough to evolve the parser without logging prompts,
+      // tool arguments, command output, or other potentially sensitive values.
+      keys: params ? Object.keys(params).slice(0, 12) : [],
+    }];
   }
   if ('id' in json && ('result' in json || 'error' in json)) {
     return [];
