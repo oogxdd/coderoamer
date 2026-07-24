@@ -437,135 +437,304 @@
       <section class="section shell stack-section" id="stack">
         <div class="section-heading split-heading">
           <div>
-            <span class="kicker">ONE INTERFACE, THREE CHOICES</span>
-            <h2>Bring the stack you actually want.</h2>
+            <span class="kicker">ONE SURFACE, MANY COMPLETE STACKS</span>
+            <h2>One path from your screen to the model.</h2>
           </div>
           <p>
-            Pick where the work runs, which coding CLI drives it, and which model powers that CLI.
-            CodeRoamer is the interaction layer across all three.
+            CodeRoamer connects to the sandbox. The sandbox runs the coding agent. The agent
+            selects and calls the model. Each layer has one clear job.
           </p>
         </div>
 
-        <figure class="stack-map">
-          <div class="stack-layers">
-            <article class="stack-layer environment-layer">
-              <header>
-                <span class="layer-number">01</span>
-                <div>
-                  <small>WHERE IT RUNS</small>
-                  <h3>Environment</h3>
-                </div>
-              </header>
-              <div class="layer-options">
-                <div class="layer-option active">
-                  <span class="option-mark sprite-mark">◇</span>
-                  <b>Sprites</b>
-                  <em>LIVE</em>
-                </div>
-                <div class="layer-option next">
-                  <span class="option-mark">⌂</span>
-                  <b>Custom VM / home server</b>
-                  <em>NEXT</em>
-                </div>
-                <div class="layer-option research">
-                  <span class="option-mark">E</span>
-                  <b>E2B</b>
-                  <em>EVALUATING</em>
-                </div>
-                <div class="layer-option research">
-                  <span class="option-mark cloud-mark">☁</span>
-                  <b>Cloudflare Sandbox</b>
-                  <em>EVALUATING</em>
-                </div>
-              </div>
-              <p>Filesystem, processes, tools, and the repository live here.</p>
-            </article>
+        <svg class="ecosystem-symbols" aria-hidden="true">
+          <symbol id="mark-sprites" viewBox="0 0 24 24">
+            <path d="M12 1.8 22.2 12 12 22.2 1.8 12 12 1.8Zm0 4.1L5.9 12l6.1 6.1 6.1-6.1L12 5.9Z" />
+          </symbol>
+          <symbol id="mark-server" viewBox="0 0 24 24">
+            <rect x="3" y="3" width="18" height="7" rx="2" />
+            <rect x="3" y="14" width="18" height="7" rx="2" />
+            <circle cx="7" cy="6.5" r="1" />
+            <circle cx="7" cy="17.5" r="1" />
+            <path d="M11 6.5h6M11 17.5h6" />
+          </symbol>
+          <symbol id="mark-daytona" viewBox="0 0 24 24">
+            <path d="M4 3h7.2C17.4 3 21 6.3 21 12s-3.6 9-9.8 9H4V3Zm5 5v8h2.1c3 0 4.7-1.4 4.7-4s-1.7-4-4.7-4H9Z" />
+          </symbol>
+          <symbol id="mark-e2b" viewBox="0 0 24 24">
+            <path d="m12 1.5 2.1 7.2 7.4-1.8-5.3 5.5 5.3 5.5-7.4-1.8-2.1 7.2-2.1-7.2-7.4 1.8 5.3-5.5-5.3-5.5 7.4 1.8L12 1.5Z" />
+          </symbol>
+          <symbol id="mark-runloop" viewBox="0 0 24 24">
+            <path d="M7.1 16.9a6.9 6.9 0 0 1 0-9.8 6.9 6.9 0 0 1 9.8 0l1.5 1.5-3 3-1.5-1.5a2.7 2.7 0 1 0 0 3.8l1.5-1.5 3 3-1.5 1.5a6.9 6.9 0 0 1-9.8 0Zm-1.5-5.3 3-3 3.8 3.8-3 3-3.8-3.8Z" />
+          </symbol>
+          <symbol id="mark-blaxel" viewBox="0 0 24 24">
+            <path d="m12 1.5 9.1 5.3v10.4L12 22.5l-9.1-5.3V6.8L12 1.5Zm-3 5.8v9.4h4.4c2.7 0 4.5-1.2 4.5-3.4 0-1.3-.7-2.2-1.9-2.7.8-.5 1.3-1.3 1.3-2.3 0-1.9-1.5-3-4-3H9Zm3.2 1.3h1c.8 0 1.2.3 1.2.9s-.4.9-1.2.9h-1V8.6Zm0 4.4h1.2c1 0 1.5.4 1.5 1.1 0 .8-.5 1.1-1.5 1.1h-1.2V13Z" />
+          </symbol>
+          <symbol id="mark-codesandbox" viewBox="0 0 24 24">
+            <path d="M0 24h24V0H0v2.455h21.545v19.09H2.455V0H0Z" />
+          </symbol>
+          <symbol id="mark-vercel" viewBox="0 0 24 24">
+            <path d="m12 1.608 12 20.784H0Z" />
+          </symbol>
+          <symbol id="mark-cloudflare" viewBox="0 0 24 24">
+            <path d="M16.5 16.8c.2-.5.1-1-.1-1.3-.2-.3-.6-.5-1.1-.5l-8.7-.1c-.1 0-.2-.1-.1-.2 0-.1.1-.2.2-.2l8.7-.1c1-.1 2.2-.9 2.6-1.9l.5-1.3v-.2a5.7 5.7 0 0 0-11-.5 2.6 2.6 0 0 0-4 2.6A3.7 3.7 0 0 0 0 16.8l.1.5c0 .1.1.1.2.1h15.9c.1 0 .2-.1.2-.2l.1-.4Zm2.8-5.5H19c-.1 0-.1 0-.1.1l-.3 1.2c-.2.5-.1 1 .1 1.3.2.3.6.5 1.1.5l1.8.1c.1 0 .2.1.2.2s-.1.2-.2.2l-1.9.1c-1.1 0-2.2.9-2.6 1.9l-.1.4c0 .1 0 .1.1.1h6.6c.1 0 .1 0 .2-.1.1-.4.2-.9.2-1.3-.1-2.6-2.2-4.7-4.8-4.7Z" />
+          </symbol>
+          <symbol id="mark-claude" viewBox="0 0 24 24">
+            <path d="M21 10.5h3v3h-3v3h-1.5v3H18v-3h-1.5v3H15v-3H9v3H7.5v-3H6v3H4.5v-3H3v-3H0v-3h3v-6h18Zm-15 0h1.5v-3H6Zm10.5 0H18v-3h-1.5Z" />
+          </symbol>
+          <symbol id="mark-codex" viewBox="0 0 24 24">
+            <path d="M12 2.2a4.9 4.9 0 0 1 4.7 3.5 4.9 4.9 0 0 1 3.4 8.2 4.9 4.9 0 0 1-6.3 6.4 4.9 4.9 0 0 1-8.3-3.4 4.9 4.9 0 0 1-1.6-9.5A4.9 4.9 0 0 1 12 2.2Zm0 4.1-5 2.9v5.7l5 2.9 5-2.9V9.2l-5-2.9Z" />
+          </symbol>
+          <symbol id="mark-opencode" viewBox="0 0 24 24">
+            <path d="M22 24H2V0h20ZM17 4.8H7v14.4h10Z" />
+          </symbol>
+          <symbol id="mark-crush" viewBox="0 0 24 24">
+            <path d="M12 21S3 15.8 3 8.8C3 5.5 5.2 3 8.2 3c1.7 0 3.1.8 3.8 2.1C12.7 3.8 14.1 3 15.8 3 18.8 3 21 5.5 21 8.8 21 15.8 12 21 12 21Z" />
+          </symbol>
+          <symbol id="mark-pi" viewBox="0 0 24 24">
+            <path d="M0 0v24h6v-6h6v-6H6V6h6v6h6V0Zm18 12v12h6V12Z" />
+          </symbol>
+          <symbol id="mark-anthropic" viewBox="0 0 24 24">
+            <path d="M17.3 3.5h-3.7l6.7 17H24Zm-10.6 0L0 20.5h3.7l1.4-3.6h7l1.4 3.6h3.7L10.5 3.5Zm-.4 10.3 2.3-6 2.3 6Z" />
+          </symbol>
+          <symbol id="mark-gemini" viewBox="0 0 24 24">
+            <path d="M11 19.3c.7 1.5 1 3.1 1 4.7 0-1.7.3-3.2.9-4.7.7-1.4 1.5-2.7 2.6-3.8s2.4-1.9 3.8-2.5c1.5-.7 3.1-1 4.7-1-1.7 0-3.2-.3-4.7-.9-1.4-.7-2.7-1.5-3.8-2.6s-1.9-2.4-2.6-3.8C12.3 3.2 12 1.7 12 0c0 1.7-.3 3.2-1 4.7-.6 1.4-1.5 2.7-2.5 3.8C7.4 9.6 6.1 10.4 4.7 11 3.2 11.7 1.7 12 0 12c1.7 0 3.2.3 4.7 1 1.4.6 2.7 1.5 3.8 2.5s1.9 2.4 2.5 3.8Z" />
+          </symbol>
+          <symbol id="mark-kimi" viewBox="0 0 24 24">
+            <path d="M21.8.4a2.2 2.2 0 1 1 0 4.4h-2V2.6c0-1.2.9-2.2 2-2.2ZM9.4 13.4l8.5-8.4c.2-.2.1-.5-.2-.5h-4.5l-.2.1-9.1 9c-.1.2-.3 0-.3-.2V4.8c0-.2-.1-.3-.2-.3H.2c-.1 0-.2.1-.2.3v18.6c0 .1.1.2.2.2h3.2c.1 0 .2-.1.2-.2v-3.8l.1-.2 2.8-2.8c.1-.1.2-.1.2 0l7.6 5.5a8.9 8.9 0 0 0 4 1.5c.1 0 .2-.1.2-.3v-3.5c0-.2-.1-.3-.2-.3a5.8 5.8 0 0 1-2.3-.9l-6.6-4.8c-.1 0-.1-.3 0-.4Z" />
+          </symbol>
+          <symbol id="mark-mistral" viewBox="0 0 24 24">
+            <path d="M17.1 3.4v3.5h-3.4v3.4h-3.4V6.9H6.9V3.4H3.4v13.7H0v3.5h10.3v-3.5H6.9v-3.4h3.4v3.4h3.4v-3.4h3.4v3.4h-3.4v3.5H24v-3.5h-3.4V3.4Z" />
+          </symbol>
+          <symbol id="mark-local" viewBox="0 0 24 24">
+            <path d="M8 2h8v3h3v3h3v8h-3v3h-3v3H8v-3H5v-3H2V8h3V5h3V2Zm0 6v8h8V8H8Z" />
+          </symbol>
+        </svg>
 
-            <article class="stack-layer cli-layer">
-              <header>
-                <span class="layer-number">02</span>
-                <div>
-                  <small>HOW IT CODES</small>
-                  <h3>Coding CLI</h3>
-                </div>
-              </header>
-              <div class="layer-options">
-                <div class="layer-option active">
-                  <span class="option-mark claude-logo">A</span>
-                  <b>Claude Code</b>
-                  <em>LIVE</em>
-                </div>
-                <div class="layer-option active">
-                  <span class="option-mark codex-logo">C</span>
-                  <b>Codex</b>
-                  <em>LIVE</em>
-                </div>
-                <div class="cli-cloud" aria-label="Planned coding CLIs">
-                  <span>OpenCode</span>
-                  <span>Crush</span>
-                  <span>Pi</span>
-                </div>
-              </div>
-              <p>The CLI owns its tools, context, sessions, and agent loop.</p>
-            </article>
-
-            <article class="stack-layer model-layer">
-              <header>
-                <span class="layer-number">03</span>
-                <div>
-                  <small>WHAT POWERS IT</small>
-                  <h3>Model provider</h3>
-                </div>
-              </header>
-              <div class="provider-cloud" aria-label="Model providers">
-                <span>Anthropic</span>
-                <span>OpenAI</span>
-                <span>Gemini</span>
-                <span>GLM</span>
-                <span>Kimi</span>
-                <span>Mistral</span>
-                <span class="local-provider">⌂ Local inference</span>
-                <span>and more</span>
-              </div>
-              <p>Use a subscription, an API, or your own inference when the CLI supports it.</p>
-            </article>
-          </div>
-
-          <div class="stack-wiring" aria-hidden="true">
-            <span></span><span></span><span></span>
-          </div>
-
-          <div class="roamer-hub">
-            <div class="hub-brand">
-              <span class="brand-mark hub-mark" aria-hidden="true">
-                <span></span><span></span>
-              </span>
+        <figure class="stack-flow">
+          <article class="stack-stage stage-control">
+            <header class="stage-title">
+              <span class="stage-number">01</span>
               <div>
-                <small>INTERACTION LAYER</small>
-                <b>CodeRoamer</b>
+                <small>CONTROL SURFACE</small>
+                <h3>CodeRoamer</h3>
               </div>
+            </header>
+            <div class="stage-role">
+              <strong>You start, steer, reattach, and review.</strong>
+              <p>Phone and computer are windows into the same remote session.</p>
             </div>
-            <div class="hub-actions" aria-label="CodeRoamer responsibilities">
-              <span>start</span>
-              <i>→</i>
-              <span>steer</span>
-              <i>→</i>
-              <span>reconnect</span>
-              <i>→</i>
-              <span>review</span>
-            </div>
-            <div class="hub-surfaces">
+            <div class="surface-list" aria-label="CodeRoamer clients">
               <span><i class="surface-phone" aria-hidden="true"></i> Phone</span>
               <span><i class="surface-desktop" aria-hidden="true"></i> Computer</span>
-              <em>same remote session</em>
+              <em>Neither device has to stay awake.</em>
             </div>
+          </article>
+
+          <div class="flow-connector connector-blue" aria-label="CodeRoamer connects to the sandbox">
+            <span>connects · streams · reattaches</span>
+            <i aria-hidden="true">↓</i>
           </div>
 
+          <article class="stack-stage stage-runtime">
+            <header class="stage-title">
+              <span class="stage-number">02</span>
+              <div>
+                <small>WHERE STATE LIVES</small>
+                <h3>Sandbox</h3>
+              </div>
+            </header>
+            <div class="stage-role">
+              <strong>The remote machine owns the workspace.</strong>
+              <p>Repository, tools, processes, CLI auth, and transcripts stay here.</p>
+            </div>
+            <div class="ecosystem-grid runtime-grid" aria-label="Sandbox runtimes">
+              <div class="ecosystem-item live">
+                <span class="ecosystem-logo logo-sprites"><svg><use href="#mark-sprites"></use></svg></span>
+                <span><b>Sprites</b><small>LIVE</small></span>
+              </div>
+              <div class="ecosystem-item next">
+                <span class="ecosystem-logo logo-server"><svg><use href="#mark-server"></use></svg></span>
+                <span><b>Custom VM</b><small>NEXT</small></span>
+              </div>
+              <div class="ecosystem-item next">
+                <span class="ecosystem-logo logo-server"><svg><use href="#mark-server"></use></svg></span>
+                <span><b>Home server</b><small>NEXT</small></span>
+              </div>
+              <div class="ecosystem-item research">
+                <span class="ecosystem-logo logo-daytona"><svg><use href="#mark-daytona"></use></svg></span>
+                <span><b>Daytona</b><small>RESEARCH</small></span>
+              </div>
+              <div class="ecosystem-item research">
+                <span class="ecosystem-logo logo-e2b"><svg><use href="#mark-e2b"></use></svg></span>
+                <span><b>E2B</b><small>RESEARCH</small></span>
+              </div>
+              <div class="ecosystem-item research">
+                <span class="ecosystem-logo logo-runloop"><svg><use href="#mark-runloop"></use></svg></span>
+                <span><b>Runloop</b><small>RESEARCH</small></span>
+              </div>
+              <div class="ecosystem-item explore">
+                <span class="ecosystem-logo logo-blaxel"><svg><use href="#mark-blaxel"></use></svg></span>
+                <span><b>Blaxel</b><small>EXPLORE</small></span>
+              </div>
+              <div class="ecosystem-item explore">
+                <span class="ecosystem-logo logo-codesandbox"><svg><use href="#mark-codesandbox"></use></svg></span>
+                <span><b>CodeSandbox</b><small>EXPLORE</small></span>
+              </div>
+              <div class="ecosystem-item explore">
+                <span class="ecosystem-logo logo-vercel"><svg><use href="#mark-vercel"></use></svg></span>
+                <span><b>Vercel Sandbox</b><small>EXPLORE</small></span>
+              </div>
+              <div class="ecosystem-item explore">
+                <span class="ecosystem-logo logo-cloudflare"><svg><use href="#mark-cloudflare"></use></svg></span>
+                <span><b>Cloudflare</b><small>EXPLORE</small></span>
+              </div>
+            </div>
+          </article>
+
+          <div class="flow-connector connector-green" aria-label="The sandbox runs the coding agent">
+            <span>launches and keeps running inside the sandbox</span>
+            <i aria-hidden="true">↓</i>
+          </div>
+
+          <article class="stack-stage stage-agent">
+            <header class="stage-title">
+              <span class="stage-number">03</span>
+              <div>
+                <small>WHAT DOES THE WORK</small>
+                <h3>Coding agent</h3>
+              </div>
+            </header>
+            <div class="stage-role">
+              <strong>The CLI owns the agent loop.</strong>
+              <p>It manages tools, context, sessions, permissions, and model configuration.</p>
+            </div>
+            <div class="ecosystem-grid agent-grid" aria-label="Coding agents">
+              <div class="ecosystem-item live">
+                <span class="ecosystem-logo logo-claude"><svg><use href="#mark-claude"></use></svg></span>
+                <span><b>Claude Code</b><small>LIVE</small></span>
+              </div>
+              <div class="ecosystem-item live">
+                <span class="ecosystem-logo logo-codex"><svg><use href="#mark-codex"></use></svg></span>
+                <span><b>Codex</b><small>LIVE</small></span>
+              </div>
+              <div class="ecosystem-item planned">
+                <span class="ecosystem-logo logo-opencode"><svg><use href="#mark-opencode"></use></svg></span>
+                <span><b>OpenCode</b><small>PLANNED</small></span>
+              </div>
+              <div class="ecosystem-item planned">
+                <span class="ecosystem-logo logo-crush"><svg><use href="#mark-crush"></use></svg></span>
+                <span><b>Crush</b><small>PLANNED</small></span>
+              </div>
+              <div class="ecosystem-item planned">
+                <span class="ecosystem-logo logo-pi"><svg><use href="#mark-pi"></use></svg></span>
+                <span><b>Pi</b><small>PLANNED</small></span>
+              </div>
+            </div>
+          </article>
+
+          <div class="flow-connector connector-orange" aria-label="The coding agent selects the model">
+            <span>selects · authenticates · calls</span>
+            <i aria-hidden="true">↓</i>
+          </div>
+
+          <article class="stack-stage stage-model">
+            <header class="stage-title">
+              <span class="stage-number">04</span>
+              <div>
+                <small>WHAT POWERS THE AGENT</small>
+                <h3>Model</h3>
+              </div>
+            </header>
+            <div class="stage-role">
+              <strong>The coding agent talks to the provider.</strong>
+              <p>Use a subscription, API key, gateway, or local inference when the CLI supports it.</p>
+            </div>
+            <div class="ecosystem-grid model-grid" aria-label="Model providers">
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-anthropic"><svg><use href="#mark-anthropic"></use></svg></span>
+                <span><b>Anthropic</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-openai"><svg><use href="#mark-codex"></use></svg></span>
+                <span><b>OpenAI</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-gemini"><svg><use href="#mark-gemini"></use></svg></span>
+                <span><b>Gemini</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-glm">GLM</span>
+                <span><b>GLM</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-kimi"><svg><use href="#mark-kimi"></use></svg></span>
+                <span><b>Kimi</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-mistral"><svg><use href="#mark-mistral"></use></svg></span>
+                <span><b>Mistral</b><small>VIA CLI</small></span>
+              </div>
+              <div class="ecosystem-item compatible">
+                <span class="ecosystem-logo logo-local"><svg><use href="#mark-local"></use></svg></span>
+                <span><b>Local inference</b><small>VIA CLI</small></span>
+              </div>
+            </div>
+          </article>
+
           <figcaption>
-            These layers are independent choices, not a promise that every CLI supports every
-            model provider. CodeRoamer exposes the combinations each adapter can actually run.
+            CodeRoamer does not proxy model calls. It controls the remote environment and speaks
+            each coding agent’s session protocol; provider support comes from that agent.
           </figcaption>
         </figure>
+
+        <div class="complete-stacks">
+          <div class="complete-stacks-heading">
+            <span class="kicker">COMPLETE STACKS</span>
+            <h3>Mix layers deliberately, not randomly.</h3>
+            <p>Every row is one end-to-end setup. The model remains downstream of the agent.</p>
+          </div>
+          <div class="stack-recipes">
+            <article class="stack-recipe current">
+              <span class="recipe-status">WORKS TODAY</span>
+              <div class="recipe-chain">
+                <span class="recipe-node roamer-node"><span class="brand-mark"><span></span><span></span></span><b>CodeRoamer</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-sprites"></use></svg><b>Sprites</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-claude"></use></svg><b>Claude Code</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-anthropic"></use></svg><b>Anthropic</b></span>
+              </div>
+              <p>Claude subscription or Anthropic API authentication lives inside the Sprite.</p>
+            </article>
+            <article class="stack-recipe current">
+              <span class="recipe-status">WORKS TODAY</span>
+              <div class="recipe-chain">
+                <span class="recipe-node roamer-node"><span class="brand-mark"><span></span><span></span></span><b>CodeRoamer</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-sprites"></use></svg><b>Sprites</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-codex"></use></svg><b>Codex</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-codex"></use></svg><b>OpenAI</b></span>
+              </div>
+              <p>ChatGPT subscription login or OpenAI API authentication stays with Codex.</p>
+            </article>
+            <article class="stack-recipe direction">
+              <span class="recipe-status">DIRECTION</span>
+              <div class="recipe-chain">
+                <span class="recipe-node roamer-node"><span class="brand-mark"><span></span><span></span></span><b>CodeRoamer</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-server"></use></svg><b>Home server</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-opencode"></use></svg><b>OpenCode / Pi</b></span>
+                <i>→</i>
+                <span class="recipe-node"><svg><use href="#mark-local"></use></svg><b>Local model</b></span>
+              </div>
+              <p>Your own machine, your own agent, and inference that never leaves your network.</p>
+            </article>
+          </div>
+        </div>
       </section>
 
       <section class="final-cta shell">

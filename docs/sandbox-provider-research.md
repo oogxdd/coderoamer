@@ -4,21 +4,72 @@ Research date: 2026-07-24.
 
 ## Conclusion
 
-CodeRoamer should treat the stack as three independent selections:
+CodeRoamer is the control surface at the top of a dependent stack:
 
-1. **Runtime environment** — where the repository, processes, and agent state live.
-2. **Coding CLI** — the agent loop and its session format.
-3. **Model provider** — selected through the coding CLI when that CLI supports it.
+```text
+CodeRoamer
+    │ connects, streams, and reattaches
+    ▼
+sandbox / remote machine
+    │ launches and keeps running
+    ▼
+coding agent / CLI
+    │ selects, authenticates, and calls
+    ▼
+model provider or local inference
+```
 
-The runtime work should be capability-based. Trying to make every provider
-pretend to be a perfect Fly Sprite would hide meaningful lifecycle and
-checkpoint differences.
+These are not three parallel integrations:
+
+- CodeRoamer connects to the runtime environment.
+- The runtime holds the repository, tools, processes, CLI authentication, and
+  on-disk session transcripts.
+- CodeRoamer launches and speaks the session protocol of a coding CLI inside
+  that runtime.
+- The coding CLI, not CodeRoamer, owns model selection, provider
+  authentication, and model API calls.
+
+Adding Gemini, GLM, Kimi, Mistral, or local inference therefore usually means
+supporting a coding CLI that can use that model. It does **not** mean building a
+Gemini/GLM/Kimi/Mistral transport into CodeRoamer.
+
+Runtime integration should still be capability-based. Trying to make every
+provider pretend to be a perfect Fly Sprite would hide meaningful lifecycle,
+reattach, persistence, and checkpoint differences.
 
 Recommended order:
 
 1. Finish and harden the existing custom VM / home server branch.
-2. Add E2B as the first managed provider after Sprites.
-3. Treat Cloudflare Sandbox as a later, Worker-backed provider.
+2. Spike Daytona and E2B side by side; Daytona currently looks closest to the
+   persistent-machine product model, while E2B has strong process/PTY
+   primitives.
+3. Evaluate Runloop and Blaxel as the next managed-runtime candidates.
+4. Treat CodeSandbox SDK and Vercel Sandbox as emerging options.
+5. Treat Cloudflare Sandbox as a later, Worker-backed provider.
+
+## What CodeRoamer actually adapts
+
+There are two separate adapter boundaries:
+
+1. A **runtime adapter** owns environment lifecycle, command execution,
+   streaming, reconnect, PTY, persistence, and checkpoints.
+2. A **coding-agent adapter** owns command construction, event parsing, session
+   IDs, transcript recovery, interruption, and authentication errors for
+   Claude Code, Codex, OpenCode, Crush, Pi, or another CLI.
+
+There should not be a third CodeRoamer “model provider adapter” in this
+architecture. The coding agent already has that abstraction. CodeRoamer may
+surface the agent's model setting in its UI, but it should pass that setting to
+the agent rather than routing model traffic itself.
+
+Examples of complete stacks:
+
+| Status | Complete stack | Where model auth lives |
+|---|---|---|
+| Works today | CodeRoamer → Sprites → Claude Code → Anthropic | Inside the Sprite, managed by Claude Code |
+| Works today | CodeRoamer → Sprites → Codex → OpenAI | Inside the Sprite, managed by Codex |
+| In development | CodeRoamer → custom VM → Claude Code or Codex → supported provider | On the custom machine |
+| Direction | CodeRoamer → home server → OpenCode or Pi → local inference | On the home server / inside the CLI |
 
 ## The compatibility contract
 
@@ -46,15 +97,44 @@ detachable exec sessions, and whole-filesystem checkpoints:
 
 ## Provider comparison
 
-| Capability | Sprites | Custom VM / home server | E2B | Cloudflare Sandbox |
-|---|---|---|---|---|
-| Persistent repository | Native persistent ext4 | Native machine filesystem | Pause/resume preserves filesystem and memory | Requires R2 mount or backup/restore across container sleep |
-| Agent survives phone disconnect | Native detachable exec | `remote-agent` owns the process | Commands and PTYs can be reconnected | Background process + `keepAlive` |
-| PTY, stdin, resize | Yes | Yes | Yes | Yes, through a Worker WebSocket |
-| Reattach | Yes | Yes, with scrollback replay | Command and PTY reconnect APIs | Terminal replay; process logs can be fetched or streamed |
-| Checkpoint semantics | In-place full filesystem rollback | Host-specific; absent in v1 | Snapshot creates another sandbox | Directory backup/restore through R2 |
-| Direct mobile integration | Existing | Existing compatibility protocol | Possible, but React Native transport needs validation | No: SDK is called from a Cloudflare Worker |
-| Product fit | Current baseline | Strong | Strong | Possible, but structurally different |
+| Capability | Sprites | Custom VM / home server | Daytona | E2B | Cloudflare Sandbox |
+|---|---|---|---|---|---|
+| Persistent repository | Native persistent ext4 | Native machine filesystem | Persistent by default; filesystem survives stop/start | Pause/resume preserves filesystem and memory | Requires R2 mount or backup/restore across container sleep |
+| Agent survives phone disconnect | Native detachable exec | `remote-agent` owns the process | Sessions and process execution APIs | Commands and PTYs can be reconnected | Background process + `keepAlive` |
+| PTY, stdin, resize | Yes | Yes | Yes | Yes | Yes, through a Worker WebSocket |
+| Reattach | Yes | Yes, with scrollback replay | Session/log APIs need a focused spike | Command and PTY reconnect APIs | Terminal replay; process logs can be fetched or streamed |
+| Checkpoint semantics | In-place full filesystem rollback | Host-specific; absent in v1 | Filesystem and memory/process snapshots | Snapshot creates another sandbox | Directory backup/restore through R2 |
+| Direct mobile integration | Existing | Existing compatibility protocol | SDK transport needs validation | SDK transport needs validation | No: SDK is called from a Cloudflare Worker |
+| Product fit | Current baseline | Strong | Very strong on paper | Strong | Possible, but structurally different |
+
+## Additional managed runtime landscape
+
+This is a shortlist, not a claim that every provider already works with
+CodeRoamer. “Fit” means similarity to the capabilities CodeRoamer needs, not
+general platform quality.
+
+| Provider | Relevant primitives | CodeRoamer fit | Main unknown or mismatch |
+|---|---|---|---|
+| [Daytona](https://www.daytona.io/docs/en/persistence/) | Persistent-by-default sandboxes, stop/start filesystem persistence, memory/process snapshots, sessions, log streaming, PTY | **Very strong** | Verify detach/reattach behavior and React Native transport end to end |
+| [E2B](https://e2b.dev/docs/sandbox/persistence) | Pause/resume with memory, reconnectable background commands and PTYs, snapshots | **Strong** | Snapshot creates/forks a sandbox rather than restoring the same one |
+| [Runloop](https://runloop.ai/) | Devboxes, snapshots/branching, suspend/resume, wake-on-HTTP | **Strong** | Validate interactive stdin/PTY and replay semantics against CodeRoamer's protocol |
+| [Blaxel](https://docs.blaxel.ai/Sandboxes/Overview) | Filesystem/process/memory state in standby, scale to zero, process/file/terminal APIs | **Strong** | Younger platform; validate session durability and mobile-friendly auth/transport |
+| [CodeSandbox SDK](https://codesandbox.io/sdk) | VM sandboxes, hibernate, fork, snapshot/restore, continuous context | **Promising** | SDK is in open beta; product and API stability need monitoring |
+| [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox/concepts/snapshots) | Firecracker sandboxes, filesystem snapshots, resumable and named persistent sandboxes | **Promising** | Session duration limits and the persistence beta need validation for long agent runs |
+| [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/) | Background processes, terminal replay, `keepAlive`, R2 backup/restore | **Possible** | Requires a Worker/Durable Object control layer; local container state is not Sprite-like persistence |
+| [Modal](https://modal.com/docs/guide/sandboxes) | Sandboxes, process execution, filesystem snapshots | **Lower fit** | Maximum lifetime and snapshot-into-new-sandbox model make continuous sessions less natural |
+
+Supporting references:
+
+- Daytona: [process execution and sessions](https://www.daytona.io/docs/en/process-code-execution/),
+  [log streaming](https://www.daytona.io/docs/en/log-streaming/), and
+  [web terminal](https://www.daytona.io/docs/en/web-terminal/).
+- Runloop: [TypeScript API client](https://runloopai.github.io/api-client-ts/stable/)
+  and [Python Devbox API](https://runloopai.github.io/api-client-python/sdk/async/devbox.html).
+- CodeSandbox: [CodeSandbox SDK](https://codesandbox.io/sdk).
+- Vercel: [duration and persistence](https://vercel.com/kb/guide/vercel-sandbox-duration-and-persistence)
+  and [persistent sandboxes beta](https://vercel.com/changelog/vercel-sandbox-persistent-sandboxes-beta).
+- Modal: [Sandbox snapshots](https://modal.com/docs/guide/sandbox-snapshots).
 
 ## E2B
 
@@ -221,15 +301,28 @@ interface ExecutionTransport {
   attachRun(id: string, callbacks: RunCallbacks): Promise<RunConnection>;
   killRun(id: string): Promise<void>;
 }
+
+interface CodingAgentAdapter {
+  buildStartCommand(input: AgentTurnInput): AgentCommand;
+  buildResumeCommand(input: AgentResumeInput): AgentCommand;
+  parseEvent(line: string): AgentEvent | null;
+  readTranscript(session: AgentSession): Promise<ChatMessage[]>;
+  classifyAuthIssue(stderr: string): AgentAuthIssue | null;
+  supportedModelConfiguration: 'fixed-provider' | 'provider-and-model' | 'custom';
+}
 ```
 
 `useChat` should consume `ExecutionTransport`, not know whether the underlying
 implementation is a Sprites WebSocket, E2B process connection, Cloudflare
-process logs, or the custom VM compatibility daemon.
+process logs, or the custom VM compatibility daemon. Agent-specific behavior
+should live behind `CodingAgentAdapter`; the adapter may pass model flags or
+environment variables to the CLI, but it should not make model API calls.
 
 The UI should query capabilities rather than branch on provider names. Examples:
 
 - Sprites: “Restore checkpoint.”
+- Daytona: label filesystem snapshots and hot snapshots according to their
+  actual restore behavior after the proof of concept.
 - E2B: “Create snapshot” and “Fork environment.”
 - Cloudflare: “Back up workspace” and “Restore workspace.”
 - Custom VM: hide checkpoint controls unless the connection adds a snapshot
