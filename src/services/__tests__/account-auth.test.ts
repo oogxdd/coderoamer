@@ -24,6 +24,21 @@ describe('parseLoginPrompt', () => {
     });
   });
 
+  it('extracts the current Codex 0.144 device output', () => {
+    const output = [
+      '1. Open this link in your browser and sign in to your account',
+      '   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m',
+      '',
+      '2. Enter this one-time code \u001b[90m(expires in 15 minutes)\u001b[0m',
+      '   \u001b[94mU7CV-78WZN\u001b[0m',
+    ].join('\r\n');
+
+    expect(parseLoginPrompt('codex', output)).toEqual({
+      url: 'https://auth.openai.com/codex/device',
+      code: 'U7CV-78WZN',
+    });
+  });
+
   it('extracts the GitHub device code from ANSI output', () => {
     expect(
       parseLoginPrompt('github', '\u001b[32mFirst copy your one-time code: WXYZ-1234\u001b[0m')

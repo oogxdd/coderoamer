@@ -151,7 +151,7 @@ export interface LoginPrompt {
   code?: string;
 }
 
-const CODE_RE = /\b[A-Z0-9]{4}-[A-Z0-9]{4,7}\b/;
+const CODE_RE = /\b[A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7}\b/i;
 // Base64url + URL-safe characters, so the trailing spinner glyph Claude glues on
 // (e.g. `…state=abc\✢`) is excluded from the captured URL.
 const CLAUDE_URL_RE =
@@ -160,6 +160,15 @@ const VERCEL_URL_RE = /https:\/\/(?:www\.)?vercel\.com\/[^\s\x00-\x1f"'<>]+/g;
 
 function trimUrl(url: string | undefined): string | undefined {
   return url?.replace(/[),.;]+$/, '');
+}
+
+function deviceCode(text: string): string | undefined {
+  const labelled =
+    /(?:one-time|device)\s+code(?:\s+\([^)]*\))?\s*:?\s*([A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7})/i.exec(
+      text
+    )?.[1];
+  const raw = labelled ?? CODE_RE.exec(text)?.[0];
+  return raw?.replace(/\s/g, '').toUpperCase();
 }
 
 /**
@@ -180,8 +189,9 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
 
   if (id === 'github') {
     const code =
-      /one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4,7})/i.exec(text)?.[1] ??
-      CODE_RE.exec(text)?.[0];
+      /one-time code:\s*([A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7})/i.exec(text)?.[1]
+        ?.replace(/\s/g, '')
+        .toUpperCase() ?? deviceCode(text);
     return { url: 'https://github.com/login/device', code };
   }
 
@@ -189,12 +199,19 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
     const urls = text.match(VERCEL_URL_RE) ?? [];
     return {
       url: trimUrl(urls.at(-1)) ?? 'https://vercel.com/login/device',
-      code: CODE_RE.exec(text)?.[0],
+      code: deviceCode(text),
     };
   }
 
-  // Codex — URL is static; the code is the only variable part.
-  return { url: 'https://auth.openai.com/codex/device', code: CODE_RE.exec(text)?.[0] };
+  // Wait for the code before enabling the browser button. Codex prints the URL
+  // first, and opening it early strands the user on a page asking for a code
+  // that the app has not surfaced yet.
+  const code = deviceCode(text);
+  const printedUrl = /https:\/\/auth\.openai\.com\/\S*codex\/device\S*/i.exec(text)?.[0];
+  return {
+    url: code ? trimUrl(printedUrl) ?? 'https://auth.openai.com/codex/device' : undefined,
+    code,
+  };
 }
 
 // ── Login command construction ────────────────────────────────────────────────

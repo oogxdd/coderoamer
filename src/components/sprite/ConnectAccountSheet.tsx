@@ -45,6 +45,17 @@ function loginErrorMessage(provider: ProviderId, raw: string, exitCode: number):
   return detail || `${label} sign-in exited with code ${exitCode}.`;
 }
 
+function codexOutputPreview(raw: string): string {
+  return stripAnsi(raw)
+    .replace(/\r(?!\n)/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-8)
+    .join('\n');
+}
+
 export function ConnectAccountSheet({
   spriteName,
   provider,
@@ -59,6 +70,7 @@ export function ConnectAccountSheet({
   const [codeInput, setCodeInput] = useState('');
   const [error, setError] = useState<string>();
   const [copied, setCopied] = useState(false);
+  const [outputPreview, setOutputPreview] = useState('');
 
   const streamRef = useRef<LoginStream | null>(null);
   const bufferRef = useRef('');
@@ -113,6 +125,9 @@ export function ConnectAccountSheet({
         const stream = await startLogin(spriteName, provider, {
           onData: (chunk) => {
             bufferRef.current += chunk;
+            if (provider === 'codex') {
+              setOutputPreview(codexOutputPreview(bufferRef.current));
+            }
             const next = parseLoginPrompt(provider, bufferRef.current);
             setPrompt((prev) => ({
               url: next.url ?? prev.url,
@@ -242,6 +257,21 @@ export function ConnectAccountSheet({
               <Text style={[styles.muted, { color: colors.textSecondary }]}>
                 Starting sign-in on {spriteName}…
               </Text>
+              {provider === 'codex' && outputPreview && (
+                <View
+                  style={[
+                    styles.outputBox,
+                    { backgroundColor: colors.backgroundElement, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.outputLabel, { color: colors.textSecondary }]}>
+                    CODEX CLI OUTPUT
+                  </Text>
+                  <Text style={[styles.outputText, { color: colors.text }]} selectable>
+                    {outputPreview}
+                  </Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -288,6 +318,22 @@ export function ConnectAccountSheet({
                       {copied ? 'Copied' : 'Tap to copy'}
                     </Text>
                   </Pressable>
+                </View>
+              )}
+
+              {provider === 'codex' && !prompt.code && outputPreview && (
+                <View
+                  style={[
+                    styles.outputBox,
+                    { backgroundColor: colors.backgroundElement, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.outputLabel, { color: colors.textSecondary }]}>
+                    CODEX CLI OUTPUT
+                  </Text>
+                  <Text style={[styles.outputText, { color: colors.text }]} selectable>
+                    {outputPreview}
+                  </Text>
                 </View>
               )}
 
@@ -429,4 +475,17 @@ const styles = StyleSheet.create({
   successCheck: { color: '#fff', fontSize: 30, fontWeight: '700' },
   successText: { fontSize: FontSize.lg, fontWeight: '600' },
   errorText: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 22 },
+  outputBox: {
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.md,
+    gap: Spacing.xs,
+  },
+  outputLabel: { fontSize: FontSize.xs, fontWeight: '700', letterSpacing: 0.5 },
+  outputText: {
+    fontSize: FontSize.sm,
+    lineHeight: 19,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
 });
