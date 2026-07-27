@@ -22,9 +22,23 @@ import {
   LoginStream,
   LoginPrompt,
   stripAnsi,
+  GithubAccessSummary,
+  inspectGithubPat,
+  connectGithubWithPat,
 } from '@/services/account-auth';
 
 type Phase = 'starting' | 'awaiting' | 'submitting' | 'success' | 'error';
+type Mode = 'method' | 'interactive' | 'pat';
+
+const GITHUB_TOKEN_URL =
+  'https://github.com/settings/personal-access-tokens/new?' +
+  new URLSearchParams({
+    name: 'CodeRoamer Sprite',
+    description: 'Repository access for one CodeRoamer Sprite',
+    expires_in: '30',
+    contents: 'write',
+    pull_requests: 'write',
+  }).toString();
 
 interface ConnectAccountSheetProps {
   spriteName: string;
@@ -65,12 +79,17 @@ export function ConnectAccountSheet({
   const colors = useTheme();
   const meta = providerMeta(provider);
 
+  const [mode, setMode] = useState<Mode>(provider === 'github' ? 'method' : 'interactive');
   const [phase, setPhase] = useState<Phase>('starting');
   const [prompt, setPrompt] = useState<LoginPrompt>({});
   const [codeInput, setCodeInput] = useState('');
   const [error, setError] = useState<string>();
   const [copied, setCopied] = useState(false);
   const [outputPreview, setOutputPreview] = useState('');
+  const [patToken, setPatToken] = useState('');
+  const [patSummary, setPatSummary] = useState<GithubAccessSummary>();
+  const [patBusy, setPatBusy] = useState<'inspect' | 'connect'>();
+  const [patError, setPatError] = useState<string>();
 
   const streamRef = useRef<LoginStream | null>(null);
   const bufferRef = useRef('');
@@ -107,6 +126,7 @@ export function ConnectAccountSheet({
   // Drive the login: capture the baseline, open the stream, parse prompts, and
   // poll the credential signature for a fresh login.
   useEffect(() => {
+    if (mode !== 'interactive') return;
     let cancelled = false;
 
     (async () => {
@@ -189,7 +209,7 @@ export function ConnectAccountSheet({
       streamRef.current?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mode]);
 
   const openBrowser = useCallback(async () => {
     if (!prompt.url) return;
@@ -216,6 +236,52 @@ export function ConnectAccountSheet({
     // Check right after submitting so success shows promptly.
     poll().catch(() => {});
   }, [codeInput, poll]);
+
+  const openGithubTokenPage = useCallback(async () => {
+    try {
+      await WebBrowser.openBrowserAsync(GITHUB_TOKEN_URL);
+    } catch {
+      /* The instructions still identify the GitHub settings page. */
+    }
+  }, []);
+
+  const pasteGithubToken = useCallback(async () => {
+    const value = (await Clipboard.getStringAsync()).trim();
+    if (!value) return;
+    setPatToken(value);
+    setPatSummary(undefined);
+    setPatError(undefined);
+  }, []);
+
+  const inspectPat = useCallback(async () => {
+    const token = patToken.trim();
+    if (!token) return;
+    setPatBusy('inspect');
+    setPatError(undefined);
+    setPatSummary(undefined);
+    try {
+      setPatSummary(await inspectGithubPat(spriteName, token));
+    } catch (err: any) {
+      setPatError(err?.message ?? 'Could not validate this token.');
+    } finally {
+      setPatBusy(undefined);
+    }
+  }, [patToken, spriteName]);
+
+  const connectPat = useCallback(async () => {
+    const token = patToken.trim();
+    if (!token || !patSummary) return;
+    setPatBusy('connect');
+    setPatError(undefined);
+    try {
+      await connectGithubWithPat(spriteName, token);
+      finishSuccess();
+    } catch (err: any) {
+      setPatError(err?.message ?? 'Could not install this token on the sprite.');
+    } finally {
+      setPatBusy(undefined);
+    }
+  }, [finishSuccess, patSummary, patToken, spriteName]);
 
   const handleClose = useCallback(() => {
     if (!settledRef.current) {
@@ -251,7 +317,7 @@ export function ConnectAccountSheet({
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
         >
-          {phase === 'starting' && (
+          {mode === 'interactive' && phase === 'starting' && (
             <View style={styles.centerBlock}>
               <ActivityIndicator color={colors.tint} />
               <Text style={[styles.muted, { color: colors.textSecondary }]}>
@@ -284,7 +350,201 @@ export function ConnectAccountSheet({
             </View>
           )}
 
-          {phase === 'error' && (
+          {phase !== 'success' && mode === 'method' && (
+            <>
+              <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                Choose how much GitHub access this sprite should receive.
+              </Text>
+              <Pressable
+                style={[styles.methodCard, { borderColor: colors.border }]}
+                onPress={() => setMode('interactive')}
+              >
+                <View style={styles.methodTitleRow}>
+                  <Text style={[styles.methodTitle, { color: colors.text }]}>
+                    GitHub CLI login
+                  </Text>
+                  <Text style={[styles.recommended, { color: colors.tint }]}>QUICKEST</Text>
+                </View>
+                <Text style={[styles.methodBlurb, { color: colors.textSecondary }]}>
+                  Open GitHub on this phone, enter a one-time code, and grant the standard gh
+                  scopes. Convenient, but broad: private repositories are account-wide.
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.methodCard, { borderColor: colors.border }]}
+                onPress={() => setMode('pat')}
+              >
+                <View style={styles.methodTitleRow}>
+                  <Text style={[styles.methodTitle, { color: colors.text }]}>
+                    Fine-grained token
+                  </Text>
+                  <Text style={[styles.recommended, { color: colors.success }]}>LEAST ACCESS</Text>
+                </View>
+                <Text style={[styles.methodBlurb, { color: colors.textSecondary }]}>
+                  Create a token on github.com, choose one or a few repositories, then paste it
+                  here. CodeRoamer shows exactly which repositories the token can see before
+                  installing it.
+                </Text>
+              </Pressable>
+            </>
+          )}
+
+          {phase !== 'success' && mode === 'pat' && (
+            <>
+              <Pressable onPress={() => setMode('method')} hitSlop={8}>
+                <Text style={[styles.backLink, { color: colors.tint }]}>‹ Other methods</Text>
+              </Pressable>
+
+              <View style={styles.section}>
+                <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                  1 · Create on the GitHub website
+                </Text>
+                <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                  Token creation is available on github.com, not in the GitHub mobile app. The
+                  button pre-fills a 30-day token and the required permissions.
+                </Text>
+                <View
+                  style={[
+                    styles.permissionBox,
+                    { backgroundColor: colors.backgroundElement, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.permissionLine, { color: colors.text }]}>
+                    Repository access · Only select repositories
+                  </Text>
+                  <Text style={[styles.permissionLine, { color: colors.text }]}>
+                    Contents · Read and write
+                  </Text>
+                  <Text style={[styles.permissionLine, { color: colors.text }]}>
+                    Pull requests · Read and write
+                  </Text>
+                  <Text style={[styles.permissionHint, { color: colors.textSecondary }]}>
+                    Metadata read access is added automatically. Add Workflows only if agents
+                    must edit files under .github/workflows.
+                  </Text>
+                </View>
+                <Pressable
+                  style={[styles.primaryButton, { backgroundColor: colors.tint }]}
+                  onPress={openGithubTokenPage}
+                >
+                  <Text style={styles.primaryButtonText}>Open GitHub token page ↗</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.section}>
+                <View style={styles.patLabelRow}>
+                  <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                    2 · Paste and review
+                  </Text>
+                  <Pressable onPress={pasteGithubToken} hitSlop={8}>
+                    <Text style={[styles.pasteLink, { color: colors.tint }]}>Paste</Text>
+                  </Pressable>
+                </View>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      color: colors.text,
+                      backgroundColor: colors.inputBackground,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                  value={patToken}
+                  onChangeText={(value) => {
+                    setPatToken(value);
+                    setPatSummary(undefined);
+                    setPatError(undefined);
+                  }}
+                  placeholder="github_pat_…"
+                  placeholderTextColor={colors.textSecondary}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                  editable={!patBusy}
+                  onSubmitEditing={inspectPat}
+                />
+                <Pressable
+                  style={[
+                    styles.primaryButton,
+                    {
+                      backgroundColor: patToken.trim()
+                        ? colors.tint
+                        : colors.backgroundElement,
+                    },
+                  ]}
+                  disabled={!patToken.trim() || !!patBusy}
+                  onPress={inspectPat}
+                >
+                  {patBusy === 'inspect' ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Review token access</Text>
+                  )}
+                </Pressable>
+              </View>
+
+              {patSummary && (
+                <View
+                  style={[
+                    styles.accessReview,
+                    { backgroundColor: colors.backgroundElement, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.methodTitle, { color: colors.text }]}>
+                    @{patSummary.login ?? 'unknown'} · {patSummary.tokenType}
+                  </Text>
+                  {patSummary.allRepos ? (
+                    <Text style={[styles.warningText, { color: colors.warning }]}>
+                      This is a broad token. It is not limited to selected repositories; create
+                      a fine-grained token for least access.
+                    </Text>
+                  ) : (
+                    <>
+                      <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                        Repositories visible to this token ({patSummary.repoCount}):
+                      </Text>
+                      {patSummary.repos.slice(0, 20).map((repo) => (
+                        <Text key={repo} style={[styles.repoLine, { color: colors.text }]}>
+                          {repo}
+                        </Text>
+                      ))}
+                      {patSummary.repoCount > 20 && (
+                        <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                          …and {patSummary.repoCount - 20} more
+                        </Text>
+                      )}
+                      {patSummary.repoCount === 0 && (
+                        <Text style={[styles.warningText, { color: colors.warning }]}>
+                          GitHub returned no repositories. Edit the token and select at least one
+                          repository before connecting.
+                        </Text>
+                      )}
+                    </>
+                  )}
+                  <Pressable
+                    style={[
+                      styles.primaryButton,
+                      { backgroundColor: colors.tint, marginTop: Spacing.sm },
+                    ]}
+                    disabled={!!patBusy || patSummary.repoCount === 0}
+                    onPress={connectPat}
+                  >
+                    {patBusy === 'connect' ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Connect to {spriteName}</Text>
+                    )}
+                  </Pressable>
+                </View>
+              )}
+
+              {patError && (
+                <Text style={[styles.errorText, { color: colors.destructive }]}>{patError}</Text>
+              )}
+            </>
+          )}
+
+          {mode === 'interactive' && phase === 'error' && (
             <View style={styles.centerBlock}>
               <Text style={[styles.errorText, { color: colors.destructive }]}>
                 {error ?? 'Something went wrong.'}
@@ -298,7 +558,7 @@ export function ConnectAccountSheet({
             </View>
           )}
 
-          {(phase === 'awaiting' || phase === 'submitting') && (
+          {mode === 'interactive' && (phase === 'awaiting' || phase === 'submitting') && (
             <>
               {/* Step 1: code (codex / github) */}
               {prompt.code && (
@@ -486,6 +746,48 @@ const styles = StyleSheet.create({
   outputText: {
     fontSize: FontSize.sm,
     lineHeight: 19,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  methodCard: {
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.lg,
+    gap: Spacing.sm,
+  },
+  methodTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  methodTitle: { fontSize: FontSize.md, fontWeight: '700' },
+  methodBlurb: { fontSize: FontSize.sm, lineHeight: 20 },
+  recommended: { fontSize: FontSize.xs, fontWeight: '800', letterSpacing: 0.5 },
+  backLink: { fontSize: FontSize.sm, fontWeight: '600' },
+  permissionBox: {
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.md,
+    gap: Spacing.xs,
+  },
+  permissionLine: { fontSize: FontSize.sm, fontWeight: '600', lineHeight: 19 },
+  permissionHint: { fontSize: FontSize.xs, lineHeight: 17, marginTop: Spacing.xs },
+  patLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  pasteLink: { fontSize: FontSize.sm, fontWeight: '700' },
+  accessReview: {
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.md,
+    gap: Spacing.xs,
+  },
+  warningText: { fontSize: FontSize.sm, lineHeight: 20 },
+  repoLine: {
+    fontSize: FontSize.xs,
+    lineHeight: 18,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 });

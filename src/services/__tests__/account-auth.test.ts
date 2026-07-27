@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   PROVIDERS,
+  githubTokenType,
+  isGithubToken,
+  parseGithubAccessSummary,
   parseLoginPrompt,
   stripAnsi,
 } from '@/services/account-auth';
@@ -72,5 +75,43 @@ describe('parseLoginPrompt', () => {
 describe('stripAnsi', () => {
   it('removes terminal colors', () => {
     expect(stripAnsi('\u001b[1;32mConnected\u001b[0m')).toBe('Connected');
+  });
+});
+
+describe('GitHub token helpers', () => {
+  it('classifies supported token prefixes', () => {
+    expect(githubTokenType('github_pat_abc')).toBe('fine-grained');
+    expect(githubTokenType('ghp_abc')).toBe('classic');
+    expect(githubTokenType('gho_abc')).toBe('oauth');
+    expect(githubTokenType('something_else')).toBe('unknown');
+  });
+
+  it('rejects shell metacharacters before a token reaches exec stdin', () => {
+    expect(isGithubToken('github_pat_safe_123')).toBe(true);
+    expect(isGithubToken("github_pat_bad'quote")).toBe(false);
+    expect(isGithubToken('github_pat_bad space')).toBe(false);
+  });
+
+  it('parses the sentinel access summary without exposing a token', () => {
+    expect(
+      parseGithubAccessSummary(
+        [
+          'shell noise',
+          '@@WISP_GITHUB@@',
+          'login=octocat',
+          'mode=fine-grained',
+          'repo_count=2',
+          'repo=octocat/hello-world',
+          'repo=octocat/private-repo',
+          '@@WISP_GITHUB_END@@',
+        ].join('\n')
+      )
+    ).toEqual({
+      login: 'octocat',
+      tokenType: 'fine-grained',
+      repos: ['octocat/hello-world', 'octocat/private-repo'],
+      repoCount: 2,
+      allRepos: false,
+    });
   });
 });

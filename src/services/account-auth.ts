@@ -198,7 +198,7 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
   if (id === 'vercel') {
     const urls = text.match(VERCEL_URL_RE) ?? [];
     return {
-      url: trimUrl(urls.at(-1)) ?? 'https://vercel.com/login/device',
+      url: trimUrl(urls.at(-1)),
       code: deviceCode(text),
     };
   }
@@ -240,7 +240,8 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
         command:
           `command -v gh >/dev/null || { echo 'GitHub CLI is not installed on this sprite.' >&2; exit 127; }; ` +
           'BROWSER=true gh auth login --hostname github.com --git-protocol https --web ' +
-          '--scopes "repo,read:org,gist" --insecure-storage && gh auth setup-git',
+          '--scopes "repo,read:org,gist" --insecure-storage && gh auth setup-git && ' +
+          'mkdir -p "$HOME/.config/coderoamer" && printf "cli\\n" > "$HOME/.config/coderoamer/github-auth-mode"',
         tty: true,
         cols: 120,
       };
@@ -272,12 +273,204 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
     case 'vercel':
       return {
         command:
-          `command -v vercel >/dev/null || { echo 'Vercel CLI is not installed on this sprite. Install it with: npm install -g vercel' >&2; exit 127; }; ` +
+          `command -v vercel >/dev/null || { command -v npm >/dev/null || { echo 'Vercel CLI is missing and npm is unavailable.' >&2; exit 127; }; ` +
+          `echo 'Installing Vercel CLI on this sprite…'; npm install -g vercel@latest || exit 1; }; ` +
           'BROWSER=true vercel login --no-color',
         tty: false,
         cols: 120,
       };
   }
+}
+
+// ── GitHub personal access token path ────────────────────────────────────────
+
+export type GithubTokenType = 'fine-grained' | 'classic' | 'oauth' | 'unknown';
+
+export interface GithubAccessSummary {
+  login?: string;
+  tokenType: GithubTokenType | 'cli';
+  repos: string[];
+  repoCount: number;
+  allRepos: boolean;
+}
+
+export function githubTokenType(token: string): GithubTokenType {
+  if (token.startsWith('github_pat_')) return 'fine-grained';
+  if (token.startsWith('ghp_')) return 'classic';
+  if (token.startsWith('gho_') || token.startsWith('ghu_')) return 'oauth';
+  return 'unknown';
+}
+
+export function isGithubToken(token: string): boolean {
+  return /^(?:github_pat_|ghp_|gho_|ghu_)[A-Za-z0-9_]+$/.test(token);
+}
+
+function githubPatCommand(install: boolean): string {
+  return [
+    `command -v gh >/dev/null || { echo '@@WISP_GITHUB_ERROR@@GitHub CLI is not installed on this sprite.'; exit 127; }`,
+    `IFS= read -r token`,
+    `[ -n "$token" ] || { echo '@@WISP_GITHUB_ERROR@@No token received.'; exit 2; }`,
+    `case "$token" in *[!A-Za-z0-9_]* ) echo '@@WISP_GITHUB_ERROR@@Invalid token format.'; exit 2 ;; esac`,
+    `case "$token" in github_pat_* ) mode=fine-grained ;; ghp_* ) mode=classic ;; gho_*|ghu_* ) mode=oauth ;; * ) echo '@@WISP_GITHUB_ERROR@@Unsupported GitHub token.'; exit 2 ;; esac`,
+    `login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)" || { echo '@@WISP_GITHUB_ERROR@@GitHub rejected this token. Check its expiry and permissions.'; exit 3; }`,
+    `repo_file="$(mktemp)"`,
+    `next_env="$(mktemp)"`,
+    `next_creds="$(mktemp)"`,
+    `trap 'rm -f "$repo_file" "$next_env" "$next_creds"' EXIT`,
+    `GH_TOKEN="$token" gh api --paginate 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member' --jq '.[].full_name' 2>/dev/null | sort -u > "$repo_file" || true`,
+    ...(install
+      ? [
+          `env_file="$HOME/.sprite_env"`,
+          `{ grep -v '^export GH_TOKEN=' "$env_file" 2>/dev/null || true; printf "export GH_TOKEN='%s'\\n" "$token"; } > "$next_env"`,
+          `chmod 600 "$next_env"`,
+          `mv "$next_env" "$env_file"`,
+          `grep -qs '^[.] ~/.sprite_env$' "$HOME/.bashrc" 2>/dev/null || printf '\\n. ~/.sprite_env\\n' >> "$HOME/.bashrc"`,
+          `creds_file="$HOME/.git-credentials"`,
+          `{ grep -vE '^https://[^@]*@github\\.com/?$' "$creds_file" 2>/dev/null || true; printf 'https://x-access-token:%s@github.com\\n' "$token"; } > "$next_creds"`,
+          `chmod 600 "$next_creds"`,
+          `mv "$next_creds" "$creds_file"`,
+          `git config --global credential.helper store`,
+          `mkdir -p "$HOME/.config/coderoamer"`,
+          `printf '%s\\n' "$mode" > "$HOME/.config/coderoamer/github-auth-mode"`,
+        ]
+      : []),
+    `printf '@@WISP_GITHUB@@\\nlogin=%s\\nmode=%s\\n' "$login" "$mode"`,
+    `printf 'repo_count=%s\\n' "$(wc -l < "$repo_file" | tr -d ' ')"`,
+    `sed 's/^/repo=/' "$repo_file"`,
+    `printf '@@WISP_GITHUB_END@@\\n'`,
+  ].join('; ');
+}
+
+export function parseGithubAccessSummary(output: string): GithubAccessSummary | undefined {
+  const block = /@@WISP_GITHUB@@\s*([\s\S]*?)@@WISP_GITHUB_END@@/.exec(output)?.[1];
+  if (!block) return undefined;
+  const value = (key: string) =>
+    new RegExp(`^${key}=(.*)$`, 'm').exec(block)?.[1]?.trim();
+  const mode = value('mode');
+  const tokenType: GithubAccessSummary['tokenType'] =
+    mode === 'fine-grained' || mode === 'classic' || mode === 'oauth' || mode === 'cli'
+      ? mode
+      : 'unknown';
+  const repos = Array.from(block.matchAll(/^repo=(.+)$/gm), (match) => match[1].trim()).filter(
+    (repo) => /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)
+  );
+  const parsedCount = Number(value('repo_count'));
+  const repoCount = Number.isFinite(parsedCount) ? parsedCount : repos.length;
+  return {
+    login: value('login'),
+    tokenType,
+    repos,
+    repoCount,
+    allRepos: tokenType === 'cli' || tokenType === 'classic' || tokenType === 'oauth',
+  };
+}
+
+function githubCommandError(output: string): string {
+  const explicit = /@@WISP_GITHUB_ERROR@@([^\r\n]+)/.exec(output)?.[1]?.trim();
+  if (explicit) return explicit;
+  const tail = stripAnsi(output)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-4)
+    .join('\n');
+  return tail || 'Could not connect GitHub on this sprite.';
+}
+
+/**
+ * Validate and install a pasted token entirely on the sprite. The secret is
+ * written to exec stdin after the WebSocket opens; it never appears in an exec
+ * URL, shell command, app log, or Sprites task metadata.
+ */
+async function runGithubTokenCommand(
+  spriteName: string,
+  token: string,
+  install: boolean
+): Promise<GithubAccessSummary> {
+  const trimmed = token.trim();
+  if (!isGithubToken(trimmed)) {
+    throw new Error('Paste a GitHub fine-grained or classic personal access token.');
+  }
+
+  return new Promise<GithubAccessSummary>(async (resolve, reject) => {
+    let output = '';
+    let settled = false;
+    let stream: LoginStream | undefined;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream?.close();
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error('GitHub token validation timed out.')));
+    }, 90_000);
+
+    try {
+      stream = await startCommandStream(
+        spriteName,
+        { command: githubPatCommand(install), tty: false, cols: 120 },
+        {
+          onData: (chunk) => {
+            output += chunk;
+          },
+          onExit: (code) => {
+            const summary = parseGithubAccessSummary(output);
+            if (code === 0 && summary) finish(() => resolve(summary));
+            else finish(() => reject(new Error(githubCommandError(output))));
+          },
+          onError: (message) => {
+            if (!output) output = message;
+          },
+          onClose: () => {
+            setTimeout(() => {
+              if (!settled) finish(() => reject(new Error(githubCommandError(output))));
+            }, 250);
+          },
+        }
+      );
+      stream.send(`${trimmed}\n`);
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
+}
+
+export async function inspectGithubPat(
+  spriteName: string,
+  token: string
+): Promise<GithubAccessSummary> {
+  return runGithubTokenCommand(spriteName, token, false);
+}
+
+export async function connectGithubWithPat(
+  spriteName: string,
+  token: string
+): Promise<GithubAccessSummary> {
+  return runGithubTokenCommand(spriteName, token, true);
+}
+
+/** Inspect the GitHub credential already installed on a sprite. */
+export async function getGithubAccessSummary(
+  spriteName: string
+): Promise<GithubAccessSummary | undefined> {
+  const command = [
+    `. "$HOME/.sprite_env" 2>/dev/null || true`,
+    `command -v gh >/dev/null || exit 0`,
+    `login="$(gh api user --jq .login 2>/dev/null)" || exit 0`,
+    `mode="$(cat "$HOME/.config/coderoamer/github-auth-mode" 2>/dev/null || true)"`,
+    `if [ -z "$mode" ]; then token="$(gh auth token 2>/dev/null || true)"; case "$token" in github_pat_* ) mode=fine-grained ;; ghp_* ) mode=classic ;; gho_*|ghu_* ) mode=oauth ;; * ) mode=cli ;; esac; unset token; fi`,
+    `repo_file="$(mktemp)"`,
+    `trap 'rm -f "$repo_file"' EXIT`,
+    `if [ "$mode" = fine-grained ]; then gh api --paginate 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member' --jq '.[].full_name' 2>/dev/null | sort -u > "$repo_file" || true; fi`,
+    `printf '@@WISP_GITHUB@@\\nlogin=%s\\nmode=%s\\n' "$login" "$mode"`,
+    `printf 'repo_count=%s\\n' "$(wc -l < "$repo_file" | tr -d ' ')"`,
+    `sed 's/^/repo=/' "$repo_file"`,
+    `printf '@@WISP_GITHUB_END@@\\n'`,
+  ].join('; ');
+  const { output } = await runExec(spriteName, command, 45);
+  return parseGithubAccessSummary(output);
 }
 
 // ── Streaming login client ─────────────────────────────────────────────────────
@@ -322,12 +515,11 @@ async function messageToBytes(data: unknown): Promise<Uint8Array | undefined> {
  * Start a provider login on a sprite and stream its output back. The returned
  * handle lets the caller forward a pasted code (Claude) and abort the flow.
  */
-export async function startLogin(
+async function startCommandStream(
   spriteName: string,
-  id: ProviderId,
+  spec: ProviderLoginSpec,
   handlers: LoginStreamHandlers
 ): Promise<LoginStream> {
-  const spec = loginSpec(id);
   const token = await loadToken('spritesToken');
   if (!token) throw new Error('No Sprites API token found.');
 
@@ -426,4 +618,12 @@ export async function startLogin(
       }
     },
   };
+}
+
+export async function startLogin(
+  spriteName: string,
+  id: ProviderId,
+  handlers: LoginStreamHandlers
+): Promise<LoginStream> {
+  return startCommandStream(spriteName, loginSpec(id), handlers);
 }

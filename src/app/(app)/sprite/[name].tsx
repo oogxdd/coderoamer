@@ -53,6 +53,15 @@ import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constant
 // full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
 type Tab = 'chats' | 'filesystem' | 'integrations' | 'settings';
 
+function isTab(value: unknown): value is Tab {
+  return (
+    value === 'chats' ||
+    value === 'filesystem' ||
+    value === 'integrations' ||
+    value === 'settings'
+  );
+}
+
 interface AgentDefaults {
   provider: AgentProvider;
   claudeModel: string;
@@ -107,9 +116,9 @@ function getActiveToolLabel(
 }
 
 export default function SpriteDetailScreen() {
-  const { name } = useLocalSearchParams<{ name: string }>();
+  const { name, tab: initialTab } = useLocalSearchParams<{ name: string; tab?: string }>();
   const colors = useTheme();
-  const [tab, setTab] = useState<Tab>('chats');
+  const [tab, setTab] = useState<Tab>(isTab(initialTab) ? initialTab : 'chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
   const [chatOpen, setChatOpen] = useState(false);
   const [sprite, setSprite] = useState<Sprite | null>(null);

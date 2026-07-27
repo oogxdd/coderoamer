@@ -7,6 +7,8 @@ import {
   ProviderId,
   AccountStatus,
   checkAccounts,
+  GithubAccessSummary,
+  getGithubAccessSummary,
 } from '@/services/account-auth';
 import { ConnectAccountSheet } from './ConnectAccountSheet';
 
@@ -21,6 +23,9 @@ export function SpriteIntegrationsTab({ spriteName, isActive }: SpriteIntegratio
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [connecting, setConnecting] = useState<ProviderId | null>(null);
+  const [githubAccess, setGithubAccess] = useState<GithubAccessSummary>();
+  const [githubAccessOpen, setGithubAccessOpen] = useState(false);
+  const [githubAccessLoading, setGithubAccessLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     setError(undefined);
@@ -44,10 +49,29 @@ export function SpriteIntegrationsTab({ spriteName, isActive }: SpriteIntegratio
     (provider: ProviderId) => {
       setConnecting(null);
       setStatus((prev) => (prev ? { ...prev, [provider]: true } : prev));
+      if (provider === 'github') {
+        setGithubAccess(undefined);
+        setGithubAccessOpen(false);
+      }
       refresh();
     },
     [refresh]
   );
+
+  const toggleGithubAccess = useCallback(async () => {
+    if (githubAccessOpen) {
+      setGithubAccessOpen(false);
+      return;
+    }
+    setGithubAccessOpen(true);
+    if (githubAccess) return;
+    setGithubAccessLoading(true);
+    try {
+      setGithubAccess(await getGithubAccessSummary(spriteName));
+    } finally {
+      setGithubAccessLoading(false);
+    }
+  }, [githubAccess, githubAccessOpen, spriteName]);
 
   const connectedCount = status
     ? PROVIDERS.filter((p) => status[p.id]).length
@@ -128,6 +152,59 @@ export function SpriteIntegrationsTab({ spriteName, isActive }: SpriteIntegratio
                   </Pressable>
                 </View>
                 <Text style={[styles.blurb, { color: colors.textSecondary }]}>{p.blurb}</Text>
+
+                {p.id === 'github' && connected && (
+                  <>
+                    <Pressable onPress={toggleGithubAccess} hitSlop={6}>
+                      <Text style={[styles.accessToggle, { color: colors.tint }]}>
+                        {githubAccessOpen ? 'Hide repository access ▴' : 'Repository access ▾'}
+                      </Text>
+                    </Pressable>
+                    {githubAccessOpen && (
+                      <View style={[styles.accessBox, { borderColor: colors.border }]}>
+                        {githubAccessLoading ? (
+                          <ActivityIndicator size="small" color={colors.tint} />
+                        ) : githubAccess ? (
+                          <>
+                            <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                              {githubAccess.login
+                                ? `Signed in as @${githubAccess.login}`
+                                : 'Signed in to GitHub'}
+                            </Text>
+                            {githubAccess.allRepos ? (
+                              <Text style={[styles.accessLine, { color: colors.warning }]}>
+                                Broad {githubAccess.tokenType} access. Repositories are not
+                                individually limited by this credential.
+                              </Text>
+                            ) : (
+                              <>
+                                <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                                  Visible to this token ({githubAccess.repoCount}):
+                                </Text>
+                                {githubAccess.repos.slice(0, 20).map((repo) => (
+                                  <Text key={repo} style={[styles.repoLine, { color: colors.text }]}>
+                                    {repo}
+                                  </Text>
+                                ))}
+                                {githubAccess.repoCount > 20 && (
+                                  <Text
+                                    style={[styles.accessLine, { color: colors.textSecondary }]}
+                                  >
+                                    …and {githubAccess.repoCount - 20} more
+                                  </Text>
+                                )}
+                              </>
+                            )}
+                          </>
+                        ) : (
+                          <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                            Could not read GitHub access from this sprite.
+                          </Text>
+                        )}
+                      </View>
+                    )}
+                  </>
+                )}
               </View>
             );
           })
@@ -185,4 +262,12 @@ const styles = StyleSheet.create({
   },
   connectButtonText: { fontSize: FontSize.sm, fontWeight: '600' },
   blurb: { fontSize: FontSize.xs, lineHeight: 17 },
+  accessToggle: { fontSize: FontSize.xs, fontWeight: '700' },
+  accessBox: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.sm,
+    gap: Spacing.xs,
+  },
+  accessLine: { fontSize: FontSize.xs, lineHeight: 17 },
+  repoLine: { fontSize: FontSize.xs, lineHeight: 17, fontFamily: 'monospace' },
 });
