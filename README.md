@@ -106,8 +106,8 @@ You need:
 - optionally, a GitHub OAuth token or fine-grained PAT for cloning and pushing repositories.
 
 On first launch, CodeRoamer asks for the Sprites token and walks through the initial Claude and
-GitHub setup. Claude, Codex, and GitHub accounts can also be connected for an individual Sprite
-from its **Accounts** screen.
+GitHub setup. Claude Code, Codex, GitHub, and Vercel CLI can also be connected for an individual
+Sprite from its **Integrations** tab.
 
 ### 2. Create or open a Sprite
 
