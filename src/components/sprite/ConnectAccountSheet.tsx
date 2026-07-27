@@ -21,6 +21,7 @@ import {
   startLogin,
   LoginStream,
   LoginPrompt,
+  stripAnsi,
 } from '@/services/account-auth';
 
 type Phase = 'starting' | 'awaiting' | 'submitting' | 'success' | 'error';
@@ -33,6 +34,16 @@ interface ConnectAccountSheetProps {
 }
 
 const POLL_INTERVAL_MS = 2500;
+
+function loginErrorMessage(provider: ProviderId, raw: string, exitCode: number): string {
+  const label = providerMeta(provider).label;
+  const cleaned = stripAnsi(raw)
+    .replace(/sk-ant-oat01-[A-Za-z0-9_-]+/g, '[redacted token]')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .trim();
+  const detail = cleaned.split('\n').map((line) => line.trim()).filter(Boolean).slice(-3).join('\n');
+  return detail || `${label} sign-in exited with code ${exitCode}.`;
+}
 
 export function ConnectAccountSheet({
   spriteName,
@@ -53,6 +64,7 @@ export function ConnectAccountSheet({
   const bufferRef = useRef('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const settledRef = useRef(false);
+  const continuedGithubRef = useRef(false);
   // Credential signature (mtime:size) captured before login begins. Success is a
   // *change* from this baseline, so pre-existing creds (Reconnect) don't count
   // and Codex — which clears its auth file at login start — can't false-succeed.
@@ -109,10 +121,35 @@ export function ConnectAccountSheet({
             if (next.url || next.code) {
               setPhase((p) => (p === 'starting' ? 'awaiting' : p));
             }
+            // Recent gh versions wait for Enter before polling the device flow.
+            // The phone opens the URL, so suppress the sprite browser and
+            // continue the CLI automatically as soon as its code is available.
+            if (provider === 'github' && next.code && !continuedGithubRef.current) {
+              continuedGithubRef.current = true;
+              streamRef.current?.send('\r');
+            }
           },
-          onExit: () => {
+          onExit: (code) => {
             // The CLI finished — confirm against the credential files.
-            if (!cancelled) poll().catch(() => {});
+            if (cancelled) return;
+            if (code !== 0) {
+              stopPolling();
+              setError(loginErrorMessage(provider, bufferRef.current, code));
+              setPhase('error');
+              return;
+            }
+            poll()
+              .catch(() => {})
+              .finally(() => {
+                setTimeout(() => {
+                  if (cancelled || settledRef.current) return;
+                  stopPolling();
+                  setError(
+                    `${meta.label} finished sign-in, but its credentials could not be detected on the sprite.`
+                  );
+                  setPhase('error');
+                }, 1500);
+              });
           },
           onError: () => {
             /* transient; the signature poll is the source of truth */

@@ -12,10 +12,10 @@ import { runExec } from './api';
  * user, forwards any pasted code back into the TTY (Claude), and watches the
  * sprite's credential files to detect completion.
  *
- * Three providers for now: Codex (ChatGPT), GitHub, and Claude.
+ * Four providers: Codex (ChatGPT), GitHub, Claude, and Vercel.
  */
 
-export type ProviderId = 'codex' | 'github' | 'claude';
+export type ProviderId = 'codex' | 'github' | 'claude' | 'vercel';
 
 export type AccountStatus = Record<ProviderId, boolean>;
 
@@ -55,12 +55,21 @@ export const PROVIDERS: ProviderMeta[] = [
   },
   {
     id: 'claude',
-    label: 'Claude',
+    label: 'Claude Code',
     blurb: 'Log in with your Claude subscription to run Claude Code in this sprite.',
     monogram: '✳',
     accent: '#D97757',
     needsCodePaste: true,
     waitingHint: 'Authorize in the browser, copy the code it shows, and paste it below.',
+  },
+  {
+    id: 'vercel',
+    label: 'Vercel CLI',
+    blurb: 'Sign in to deploy and manage Vercel projects from this sprite.',
+    monogram: '▲',
+    accent: '#171717',
+    needsCodePaste: false,
+    waitingHint: 'Approve the device on Vercel, then come back — this updates automatically.',
   },
 ];
 
@@ -74,7 +83,7 @@ export function providerMeta(id: ProviderId): ProviderMeta {
 
 export type AccountSignatures = Record<ProviderId, string>;
 
-const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '' };
+const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '', vercel: '' };
 
 /**
  * Return a per-provider "signature" of the on-sprite credentials — the mtime and
@@ -83,15 +92,24 @@ const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '' };
  * and a *fresh* login is detected when the signature changes. Never throws.
  *
  * Codex writes ~/.codex/auth.json; gh writes ~/.config/gh/hosts.yml; Claude
- * writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env).
+ * writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env);
+ * Vercel writes auth.json under its XDG data directory.
  */
 export async function getAccountSignatures(spriteName: string): Promise<AccountSignatures> {
   const command = [
-    `sig() { stat -c '%Y:%s' "$1" 2>/dev/null || true; }`,
+    `sig() { stat -c '%Y:%s:%i' "$1" 2>/dev/null || true; }`,
     `co="$(sig "$HOME/.codex/auth.json")"`,
-    `gh="$(sig "$HOME/.config/gh/hosts.yml")"; [ -n "$gh" ] || gh="$(sig "$HOME/.git-credentials")"`,
-    `cl="$(sig "$HOME/.claude/.credentials.json")"; [ -n "$cl" ] || { grep -qs CLAUDE_CODE_OAUTH_TOKEN "$HOME/.sprite_env" && cl=env; }`,
-    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"`,
+    `gh_cfg="$(sig "$HOME/.config/gh/hosts.yml")"`,
+    `gh_store="$(sig "$HOME/.git-credentials")"`,
+    `gh_env=""; grep -qs '^export GH_TOKEN=' "$HOME/.sprite_env" 2>/dev/null && gh_env="$(sig "$HOME/.sprite_env")"`,
+    `gh=""; [ -n "$gh_cfg" ] && gh="config:$gh_cfg"; [ -n "$gh_store" ] && gh="\${gh:+$gh|}git:$gh_store"; [ -n "$gh_env" ] && gh="\${gh:+$gh|}env:$gh_env"`,
+    `cl_creds="$(sig "$HOME/.claude/.credentials.json")"`,
+    `cl_env=""; grep -qs '^export CLAUDE_CODE_OAUTH_TOKEN=' "$HOME/.sprite_env" 2>/dev/null && cl_env="$(sig "$HOME/.sprite_env")"`,
+    `cl=""; [ -n "$cl_creds" ] && cl="creds:$cl_creds"; [ -n "$cl_env" ] && cl="\${cl:+$cl|}env:$cl_env"`,
+    `vc="$(sig "\${XDG_DATA_HOME:-$HOME/.local/share}/com.vercel.cli/auth.json")"`,
+    `[ -n "$vc" ] || vc="$(sig "$HOME/.config/com.vercel.cli/auth.json")"`,
+    `[ -n "$vc" ] || vc="$(sig "$HOME/.vercel/auth.json")"`,
+    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"; echo "vercel=$vc"`,
   ].join('; ');
 
   const { output, success } = await runExec(spriteName, command, 20);
@@ -99,13 +117,23 @@ export async function getAccountSignatures(spriteName: string): Promise<AccountS
 
   const read = (key: ProviderId) =>
     new RegExp(`^${key}=(.*)$`, 'm').exec(output)?.[1]?.trim() ?? '';
-  return { codex: read('codex'), github: read('github'), claude: read('claude') };
+  return {
+    codex: read('codex'),
+    github: read('github'),
+    claude: read('claude'),
+    vercel: read('vercel'),
+  };
 }
 
 /** Whether each provider is authenticated on the sprite (signature non-empty). */
 export async function checkAccounts(spriteName: string): Promise<AccountStatus> {
   const sigs = await getAccountSignatures(spriteName);
-  return { codex: !!sigs.codex, github: !!sigs.github, claude: !!sigs.claude };
+  return {
+    codex: !!sigs.codex,
+    github: !!sigs.github,
+    claude: !!sigs.claude,
+    vercel: !!sigs.vercel,
+  };
 }
 
 // ── Output parsing ────────────────────────────────────────────────────────────
@@ -128,6 +156,11 @@ const CODE_RE = /\b[A-Z0-9]{4}-[A-Z0-9]{4,7}\b/;
 // (e.g. `…state=abc\✢`) is excluded from the captured URL.
 const CLAUDE_URL_RE =
   /https:\/\/claude\.com\/cai\/oauth\/authorize\?[A-Za-z0-9%._~:/?#[\]@!$&'()*+,;=-]+/g;
+const VERCEL_URL_RE = /https:\/\/(?:www\.)?vercel\.com\/[^\s\x00-\x1f"'<>]+/g;
+
+function trimUrl(url: string | undefined): string | undefined {
+  return url?.replace(/[),.;]+$/, '');
+}
 
 /**
  * Parse the accumulated (raw, ANSI-included) login output for the current
@@ -152,7 +185,15 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
     return { url: 'https://github.com/login/device', code };
   }
 
-  // codex — URL is static; the code is the only variable part.
+  if (id === 'vercel') {
+    const urls = text.match(VERCEL_URL_RE) ?? [];
+    return {
+      url: trimUrl(urls.at(-1)) ?? 'https://vercel.com/login/device',
+      code: CODE_RE.exec(text)?.[0],
+    };
+  }
+
+  // Codex — URL is static; the code is the only variable part.
   return { url: 'https://auth.openai.com/codex/device', code: CODE_RE.exec(text)?.[0] };
 }
 
@@ -170,20 +211,55 @@ interface ProviderLoginSpec {
 function loginSpec(id: ProviderId): ProviderLoginSpec {
   switch (id) {
     case 'codex':
-      return { command: 'codex login --device-auth', tty: true, cols: 120 };
-    case 'github':
-      // Non-tty gives clean, parseable output and auto-polls without an Enter
-      // keypress. `setup-git` wires the credential helper so `git push` works.
       return {
         command:
-          'gh auth login --hostname github.com --git-protocol https --web ' +
+          `command -v codex >/dev/null || { echo 'Codex CLI is not installed on this sprite.' >&2; exit 127; }; ` +
+          'codex login --device-auth',
+        tty: true,
+        cols: 120,
+      };
+    case 'github':
+      return {
+        command:
+          `command -v gh >/dev/null || { echo 'GitHub CLI is not installed on this sprite.' >&2; exit 127; }; ` +
+          'BROWSER=true gh auth login --hostname github.com --git-protocol https --web ' +
           '--scopes "repo,read:org,gist" --insecure-storage && gh auth setup-git',
-        tty: false,
+        tty: true,
         cols: 120,
       };
     case 'claude':
-      // Wide terminal keeps the authorize URL on a single line so we can parse it.
-      return { command: 'claude setup-token', tty: true, cols: 400 };
+      // `setup-token` prints (but does not save) the long-lived token. Tee its
+      // output so the UI can parse the authorize URL, then persist only the
+      // resulting token in the sprite's private environment file.
+      return {
+        command: [
+          `command -v claude >/dev/null || { echo 'Claude Code CLI is not installed on this sprite.' >&2; exit 127; }`,
+          `tmp="$(mktemp)"`,
+          `trap 'rm -f "$tmp"' EXIT`,
+          'set -o pipefail',
+          'claude setup-token 2>&1 | tee "$tmp"',
+          'status="${PIPESTATUS[0]}"',
+          '[ "$status" -eq 0 ] || exit "$status"',
+          `token="$(grep -Eo 'sk-ant-oat01-[A-Za-z0-9_-]+' "$tmp" | tail -n 1)"`,
+          `[ -n "$token" ] || { echo 'Claude finished without returning an OAuth token.' >&2; exit 1; }`,
+          'env_file="$HOME/.sprite_env"',
+          'next_env="$(mktemp)"',
+          `{ grep -v '^export CLAUDE_CODE_OAUTH_TOKEN=' "$env_file" 2>/dev/null || true; printf "export CLAUDE_CODE_OAUTH_TOKEN='%s'\\n" "$token"; } > "$next_env"`,
+          'chmod 600 "$next_env"',
+          'mv "$next_env" "$env_file"',
+          `grep -qs '^[.] ~/.sprite_env$' "$HOME/.bashrc" 2>/dev/null || printf '\\n. ~/.sprite_env\\n' >> "$HOME/.bashrc"`,
+        ].join('; '),
+        tty: true,
+        cols: 400,
+      };
+    case 'vercel':
+      return {
+        command:
+          `command -v vercel >/dev/null || { echo 'Vercel CLI is not installed on this sprite. Install it with: npm install -g vercel' >&2; exit 127; }; ` +
+          'BROWSER=true vercel login --no-color',
+        tty: false,
+        cols: 120,
+      };
   }
 }
 
@@ -252,6 +328,7 @@ export async function startLogin(
   if (Platform.OS === 'web') params.set('token', token);
 
   const url = `${WS_BASE}/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
+  const pendingWrites: ArrayBuffer[] = [];
 
   let socket: WebSocket;
   if (Platform.OS === 'web') {
@@ -269,6 +346,7 @@ export async function startLogin(
     if (spec.tty && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
+    for (const payload of pendingWrites.splice(0)) socket.send(payload);
   };
 
   const stdoutDecoder = new TextDecoder();
@@ -315,7 +393,9 @@ export async function startLogin(
 
   return {
     send: (text: string) => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(toArrayBuffer(text));
+      const payload = toArrayBuffer(text);
+      if (socket.readyState === WebSocket.OPEN) socket.send(payload);
+      else if (socket.readyState === WebSocket.CONNECTING) pendingWrites.push(payload);
     },
     cancel: () => {
       if (socket.readyState === WebSocket.OPEN) socket.send(toArrayBuffer('\u0003'));

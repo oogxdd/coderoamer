@@ -10,12 +10,12 @@ import {
 } from '@/services/account-auth';
 import { ConnectAccountSheet } from './ConnectAccountSheet';
 
-interface SpriteAccountsTabProps {
+interface SpriteIntegrationsTabProps {
   spriteName: string;
   isActive: boolean;
 }
 
-export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabProps) {
+export function SpriteIntegrationsTab({ spriteName, isActive }: SpriteIntegrationsTabProps) {
   const colors = useTheme();
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,7 +58,7 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.headerRow}>
           <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>
-            ACCOUNTS
+            INTEGRATIONS
           </Text>
           <Pressable onPress={refresh} hitSlop={8} disabled={loading}>
             <Text style={[styles.refresh, { color: colors.tint }]}>
@@ -68,8 +68,8 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
         </View>
 
         <Text style={[styles.intro, { color: colors.textSecondary }]}>
-          Connect these accounts on <Text style={{ fontWeight: '600' }}>{spriteName}</Text> so
-          the agents and git can work here.{' '}
+          Connect tools directly on <Text style={{ fontWeight: '600' }}>{spriteName}</Text> so
+          agents can use your subscriptions, repositories, and deployments.{' '}
           {status && `${connectedCount}/${PROVIDERS.length} connected.`}
         </Text>
 
