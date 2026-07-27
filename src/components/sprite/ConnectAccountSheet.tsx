@@ -17,13 +17,24 @@ import {
   ProviderId,
   providerMeta,
   parseLoginPrompt,
+  stripAnsi,
   getAccountSignatures,
   startLogin,
   LoginStream,
   LoginPrompt,
+  GithubPatInfo,
+  validateGithubPat,
+  connectGithubWithPat,
 } from '@/services/account-auth';
 
 type Phase = 'starting' | 'awaiting' | 'submitting' | 'success' | 'error';
+
+// GitHub offers two paths: the interactive CLI web login (full account access)
+// or pasting a fine-grained PAT (scoped to chosen repos). Other providers go
+// straight to the interactive flow.
+type Mode = 'method' | 'interactive' | 'pat';
+
+const GITHUB_NEW_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
 
 interface ConnectAccountSheetProps {
   spriteName: string;
@@ -43,11 +54,19 @@ export function ConnectAccountSheet({
   const colors = useTheme();
   const meta = providerMeta(provider);
 
+  const [mode, setMode] = useState<Mode>(provider === 'github' ? 'method' : 'interactive');
   const [phase, setPhase] = useState<Phase>('starting');
   const [prompt, setPrompt] = useState<LoginPrompt>({});
   const [codeInput, setCodeInput] = useState('');
   const [error, setError] = useState<string>();
   const [copied, setCopied] = useState(false);
+
+  // PAT path state
+  const [patToken, setPatToken] = useState('');
+  const [patInfo, setPatInfo] = useState<GithubPatInfo | null>(null);
+  const [patBusy, setPatBusy] = useState<'validate' | 'connect' | null>(null);
+  const [patError, setPatError] = useState<string>();
+  const [patNote, setPatNote] = useState<string>();
 
   const streamRef = useRef<LoginStream | null>(null);
   const bufferRef = useRef('');
@@ -80,9 +99,11 @@ export function ConnectAccountSheet({
     if (sig && sig !== baselineRef.current) finishSuccess();
   }, [spriteName, provider, finishSuccess]);
 
-  // Drive the login: capture the baseline, open the stream, parse prompts, and
-  // poll the credential signature for a fresh login.
+  // Drive the interactive login: capture the baseline, open the stream, parse
+  // prompts, and poll the credential signature for a fresh login. Waits until
+  // the user has picked the interactive method (GitHub shows a chooser first).
   useEffect(() => {
+    if (mode !== 'interactive') return;
     let cancelled = false;
 
     (async () => {
@@ -111,8 +132,26 @@ export function ConnectAccountSheet({
             }
           },
           onExit: () => {
+            if (cancelled) return;
             // The CLI finished — confirm against the credential files.
-            if (!cancelled) poll().catch(() => {});
+            poll().catch(() => {});
+            // If it died without ever producing a sign-in prompt, show its
+            // output instead of waiting forever. Delay a beat so a success
+            // poll (login completed → CLI exits) can settle first.
+            setTimeout(() => {
+              if (settledRef.current || cancelled) return;
+              const parsed = parseLoginPrompt(provider, bufferRef.current);
+              if (!parsed.url && !parsed.code) {
+                const tail = stripAnsi(bufferRef.current)
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter(Boolean)
+                  .slice(-6)
+                  .join('\n');
+                setError(tail || 'The sign-in command exited unexpectedly.');
+                setPhase('error');
+              }
+            }, 3500);
           },
           onError: () => {
             /* transient; the signature poll is the source of truth */
@@ -137,7 +176,7 @@ export function ConnectAccountSheet({
       streamRef.current?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mode]);
 
   const openBrowser = useCallback(async () => {
     if (!prompt.url) return;
@@ -164,6 +203,49 @@ export function ConnectAccountSheet({
     // Check right after submitting so success shows promptly.
     poll().catch(() => {});
   }, [codeInput, poll]);
+
+  // ── PAT path ────────────────────────────────────────────────────────────────
+
+  const openTokenPage = useCallback(async () => {
+    try {
+      await WebBrowser.openBrowserAsync(GITHUB_NEW_TOKEN_URL);
+    } catch {
+      /* ignore — the URL is spelled out in the instructions */
+    }
+  }, []);
+
+  const validatePat = useCallback(async () => {
+    const token = patToken.trim();
+    if (!token) return;
+    setPatBusy('validate');
+    setPatError(undefined);
+    try {
+      setPatInfo(await validateGithubPat(token));
+    } catch (err: any) {
+      setPatInfo(null);
+      setPatError(err?.message ?? 'Token validation failed');
+    }
+    setPatBusy(null);
+  }, [patToken]);
+
+  const connectPat = useCallback(async () => {
+    const token = patToken.trim();
+    if (!token) return;
+    setPatBusy('connect');
+    setPatError(undefined);
+    try {
+      const result = await connectGithubWithPat(spriteName, token);
+      if (result === 'git-only') {
+        setPatNote(
+          'Stored for git push/pull. The gh CLI did not accept this token, so `gh pr create` may not work — agents can still push and open PRs via the API.'
+        );
+      }
+      finishSuccess();
+    } catch (err: any) {
+      setPatError(err?.message ?? 'Failed to store the token on the sprite');
+    }
+    setPatBusy(null);
+  }, [patToken, spriteName, finishSuccess]);
 
   const handleClose = useCallback(() => {
     if (!settledRef.current) {
@@ -199,7 +281,7 @@ export function ConnectAccountSheet({
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
         >
-          {phase === 'starting' && (
+          {mode === 'interactive' && phase === 'starting' && (
             <View style={styles.centerBlock}>
               <ActivityIndicator color={colors.tint} />
               <Text style={[styles.muted, { color: colors.textSecondary }]}>
@@ -214,7 +296,181 @@ export function ConnectAccountSheet({
                 <Text style={styles.successCheck}>✓</Text>
               </View>
               <Text style={[styles.successText, { color: colors.text }]}>Connected!</Text>
+              {patNote && (
+                <Text style={[styles.muted, { color: colors.textSecondary, textAlign: 'center' }]}>
+                  {patNote}
+                </Text>
+              )}
             </View>
+          )}
+
+          {/* GitHub: choose between the CLI web login and a pasted token */}
+          {phase !== 'success' && mode === 'method' && (
+            <>
+              <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                How do you want to connect GitHub on this sprite?
+              </Text>
+              <Pressable
+                style={[styles.methodCard, { borderColor: colors.border }]}
+                onPress={() => setMode('interactive')}
+              >
+                <Text style={[styles.methodTitle, { color: colors.text }]}>
+                  Sign in with browser
+                </Text>
+                <Text style={[styles.methodBlurb, { color: colors.textSecondary }]}>
+                  GitHub CLI web login. Fastest — but the sprite gets access to all your
+                  repositories.
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.methodCard, { borderColor: colors.border }]}
+                onPress={() => setMode('pat')}
+              >
+                <Text style={[styles.methodTitle, { color: colors.text }]}>
+                  Paste an access token
+                </Text>
+                <Text style={[styles.methodBlurb, { color: colors.textSecondary }]}>
+                  Fine-grained token you create on github.com — the sprite only reaches the
+                  repositories you pick.
+                </Text>
+              </Pressable>
+            </>
+          )}
+
+          {/* GitHub: fine-grained PAT flow */}
+          {phase !== 'success' && mode === 'pat' && (
+            <>
+              <Pressable onPress={() => setMode('method')} hitSlop={8}>
+                <Text style={[styles.backLink, { color: colors.tint }]}>‹ Other methods</Text>
+              </Pressable>
+
+              <View style={styles.section}>
+                <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                  1 · Create a fine-grained token
+                </Text>
+                <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                  Opens github.com in the browser (the GitHub mobile app can’t create tokens).
+                  Under “Repository access” choose “Only select repositories” and pick your
+                  repo(s). Under “Repository permissions” set Contents and Pull requests to
+                  “Read and write” — enough to create branches, push, and open PRs.
+                </Text>
+                <Pressable
+                  style={[styles.primaryButton, { backgroundColor: colors.tint }]}
+                  onPress={openTokenPage}
+                >
+                  <Text style={styles.primaryButtonText}>Open GitHub token page ↗</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.section}>
+                <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                  2 · Paste the token
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      color: colors.text,
+                      backgroundColor: colors.inputBackground,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                  value={patToken}
+                  onChangeText={(t) => {
+                    setPatToken(t);
+                    setPatInfo(null);
+                    setPatError(undefined);
+                  }}
+                  placeholder="github_pat_…"
+                  placeholderTextColor={colors.textSecondary}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onSubmitEditing={validatePat}
+                />
+                {!patInfo && (
+                  <Pressable
+                    style={[
+                      styles.primaryButton,
+                      {
+                        backgroundColor: patToken.trim() ? colors.tint : colors.backgroundElement,
+                        marginTop: Spacing.sm,
+                      },
+                    ]}
+                    disabled={!patToken.trim() || patBusy !== null}
+                    onPress={validatePat}
+                  >
+                    {patBusy === 'validate' ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Check token</Text>
+                    )}
+                  </Pressable>
+                )}
+              </View>
+
+              {patInfo && (
+                <View
+                  style={[
+                    styles.patReview,
+                    { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                  ]}
+                >
+                  <Text style={[styles.methodTitle, { color: colors.text }]}>
+                    @{patInfo.login} · {patInfo.tokenType} token
+                  </Text>
+                  {patInfo.allRepos ? (
+                    <Text style={[styles.warnText, { color: colors.warning }]}>
+                      This token type grants access to every repository on the account. For a
+                      tighter scope, create a fine-grained token instead.
+                    </Text>
+                  ) : (
+                    <>
+                      <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                        The sprite will only reach{' '}
+                        {patInfo.repos.length === 1
+                          ? 'this repository'
+                          : `these ${patInfo.repos.length} repositories`}
+                        :
+                      </Text>
+                      {patInfo.repos.slice(0, 20).map((r) => (
+                        <Text key={r} style={[styles.repoLine, { color: colors.text }]}>
+                          {r}
+                        </Text>
+                      ))}
+                      {patInfo.repos.length > 20 && (
+                        <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                          …and {patInfo.repos.length - 20} more
+                        </Text>
+                      )}
+                      {patInfo.repos.length === 0 && (
+                        <Text style={[styles.warnText, { color: colors.warning }]}>
+                          No repositories are selected for this token — pick at least one on
+                          the GitHub token page.
+                        </Text>
+                      )}
+                    </>
+                  )}
+                  <Pressable
+                    style={[
+                      styles.primaryButton,
+                      { backgroundColor: colors.tint, marginTop: Spacing.sm },
+                    ]}
+                    disabled={patBusy !== null}
+                    onPress={connectPat}
+                  >
+                    {patBusy === 'connect' ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Connect to {spriteName}</Text>
+                    )}
+                  </Pressable>
+                </View>
+              )}
+
+              {patError && (
+                <Text style={[styles.errorText, { color: colors.destructive }]}>{patError}</Text>
+              )}
+            </>
           )}
 
           {phase === 'error' && (
@@ -385,6 +641,16 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.md,
   },
   inlineRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  methodCard: { borderRadius: 12, borderWidth: 1, padding: Spacing.lg, gap: Spacing.xs },
+  methodTitle: { fontSize: FontSize.md, fontWeight: '600' },
+  methodBlurb: { fontSize: FontSize.sm, lineHeight: 19 },
+  backLink: { fontSize: FontSize.sm, fontWeight: '600' },
+  patReview: { borderRadius: 12, borderWidth: 1, padding: Spacing.lg, gap: Spacing.sm },
+  repoLine: {
+    fontSize: FontSize.sm,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  warnText: { fontSize: FontSize.sm, lineHeight: 19 },
   waitingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, paddingTop: Spacing.xs },
   muted: { fontSize: FontSize.sm, flexShrink: 1 },
   centerBlock: { alignItems: 'center', gap: Spacing.md, paddingVertical: Spacing.xxl },

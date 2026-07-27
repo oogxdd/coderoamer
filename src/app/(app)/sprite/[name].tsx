@@ -51,7 +51,10 @@ import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constant
 // The sprite screen is a hub with three tabs. "chats" (center) is the default
 // and shows the conversation list; opening a conversation switches to a
 // full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
-type Tab = 'chats' | 'filesystem' | 'settings';
+type Tab = 'chats' | 'filesystem' | 'integrations' | 'settings';
+
+const isTab = (v: unknown): v is Tab =>
+  v === 'chats' || v === 'filesystem' || v === 'integrations' || v === 'settings';
 
 interface AgentDefaults {
   provider: AgentProvider;
@@ -107,9 +110,11 @@ function getActiveToolLabel(
 }
 
 export default function SpriteDetailScreen() {
-  const { name } = useLocalSearchParams<{ name: string }>();
+  const { name, tab: initialTab } = useLocalSearchParams<{ name: string; tab?: string }>();
   const colors = useTheme();
-  const [tab, setTab] = useState<Tab>('chats');
+  // `?tab=` lets callers deep-link a tab — the dashboard opens freshly created
+  // sprites on Integrations so accounts get connected first.
+  const [tab, setTab] = useState<Tab>(isTab(initialTab) ? initialTab : 'chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
   const [chatOpen, setChatOpen] = useState(false);
   const [sprite, setSprite] = useState<Sprite | null>(null);
@@ -737,6 +742,7 @@ export default function SpriteDetailScreen() {
   const tabItems: { key: Tab; label: string }[] = [
     { key: 'chats', label: 'Chats' },
     { key: 'filesystem', label: 'Files' },
+    { key: 'integrations', label: 'Integrations' },
     { key: 'settings', label: 'Settings' },
   ];
 
@@ -983,6 +989,10 @@ export default function SpriteDetailScreen() {
             <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
           )}
 
+          {tab === 'integrations' && (
+            <SpriteAccountsTab spriteName={spriteName} isActive={tab === 'integrations'} />
+          )}
+
           {tab === 'settings' && (
             <SettingsTab
               sprite={sprite}
@@ -1098,11 +1108,11 @@ function ConnectRow({
   );
 }
 
-type SettingsView = 'menu' | 'checkpoints' | 'accounts';
+type SettingsView = 'menu' | 'checkpoints';
 
-// Settings Tab — checkpoints, accounts, sprite info, and delete. A lightweight
-// sub-view switch keeps each nested scroller (CheckpointsList / SpriteAccountsTab)
-// isolated and leaves room for more settings later.
+// Settings Tab — checkpoints, sprite info, and delete. Accounts moved to the
+// top-level Integrations tab. A lightweight sub-view switch keeps each nested
+// scroller (CheckpointsList) isolated and leaves room for more settings later.
 function SettingsTab({
   sprite,
   isLoading,
@@ -1170,14 +1180,6 @@ function SettingsTab({
     );
   }
 
-  if (view === 'accounts') {
-    return (
-      <SettingsSubView title="Accounts" onBack={() => setView('menu')}>
-        <SpriteAccountsTab spriteName={spriteName} isActive={isActive} />
-      </SettingsSubView>
-    );
-  }
-
   if (isLoading) {
     return (
       <View style={styles.centerView}>
@@ -1241,11 +1243,6 @@ function SettingsTab({
         title="Checkpoints"
         subtitle="Create and restore filesystem checkpoints for this sprite."
         onPress={() => setView('checkpoints')}
-      />
-      <ConnectRow
-        title="Accounts"
-        subtitle="Connect Claude, Codex, and GitHub accounts for this sprite."
-        onPress={() => setView('accounts')}
       />
 
       {!sprite ? (

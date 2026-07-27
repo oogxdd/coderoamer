@@ -7,6 +7,8 @@ import {
   ProviderId,
   AccountStatus,
   checkAccounts,
+  GithubAccessSummary,
+  getGithubAccessSummary,
 } from '@/services/account-auth';
 import { ConnectAccountSheet } from './ConnectAccountSheet';
 
@@ -21,6 +23,10 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [connecting, setConnecting] = useState<ProviderId | null>(null);
+  // Lazily-loaded "what can this sprite reach" summary for a connected GitHub.
+  const [ghAccess, setGhAccess] = useState<GithubAccessSummary | null>(null);
+  const [ghAccessLoading, setGhAccessLoading] = useState(false);
+  const [ghAccessOpen, setGhAccessOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setError(undefined);
@@ -44,10 +50,32 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
     (provider: ProviderId) => {
       setConnecting(null);
       setStatus((prev) => (prev ? { ...prev, [provider]: true } : prev));
+      if (provider === 'github') {
+        // The credential changed — any cached access summary is stale.
+        setGhAccess(null);
+        setGhAccessOpen(false);
+      }
       refresh();
     },
     [refresh]
   );
+
+  const toggleGhAccess = useCallback(async () => {
+    if (ghAccessOpen) {
+      setGhAccessOpen(false);
+      return;
+    }
+    setGhAccessOpen(true);
+    if (!ghAccess) {
+      setGhAccessLoading(true);
+      try {
+        setGhAccess(await getGithubAccessSummary(spriteName));
+      } catch {
+        // Leave null — the box shows a fallback message.
+      }
+      setGhAccessLoading(false);
+    }
+  }, [ghAccessOpen, ghAccess, spriteName]);
 
   const connectedCount = status
     ? PROVIDERS.filter((p) => status[p.id]).length
@@ -58,7 +86,7 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.headerRow}>
           <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>
-            ACCOUNTS
+            INTEGRATIONS
           </Text>
           <Pressable onPress={refresh} hitSlop={8} disabled={loading}>
             <Text style={[styles.refresh, { color: colors.tint }]}>
@@ -128,6 +156,67 @@ export function SpriteAccountsTab({ spriteName, isActive }: SpriteAccountsTabPro
                   </Pressable>
                 </View>
                 <Text style={[styles.blurb, { color: colors.textSecondary }]}>{p.blurb}</Text>
+
+                {p.id === 'github' && connected && (
+                  <>
+                    <Pressable onPress={toggleGhAccess} hitSlop={6}>
+                      <Text style={[styles.accessToggle, { color: colors.tint }]}>
+                        {ghAccessOpen ? 'Hide access ▴' : 'What can this sprite access? ▾'}
+                      </Text>
+                    </Pressable>
+                    {ghAccessOpen && (
+                      <View style={[styles.accessBox, { borderColor: colors.border }]}>
+                        {ghAccessLoading ? (
+                          <ActivityIndicator size="small" color={colors.tint} />
+                        ) : ghAccess ? (
+                          <>
+                            {ghAccess.login && (
+                              <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                                Signed in as @{ghAccess.login}
+                              </Text>
+                            )}
+                            {ghAccess.allRepos ? (
+                              <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                                Full account access — every repository is reachable
+                                {ghAccess.scopes ? ` (scopes: ${ghAccess.scopes})` : ''}.
+                              </Text>
+                            ) : ghAccess.repos.length > 0 ? (
+                              <>
+                                <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                                  Limited to{' '}
+                                  {ghAccess.repos.length === 1
+                                    ? '1 repository'
+                                    : `${ghAccess.repos.length} repositories`}
+                                  :
+                                </Text>
+                                {ghAccess.repos.slice(0, 20).map((r) => (
+                                  <Text key={r} style={[styles.repoLine, { color: colors.text }]}>
+                                    {r}
+                                  </Text>
+                                ))}
+                                {ghAccess.repos.length > 20 && (
+                                  <Text
+                                    style={[styles.accessLine, { color: colors.textSecondary }]}
+                                  >
+                                    …and {ghAccess.repos.length - 20} more
+                                  </Text>
+                                )}
+                              </>
+                            ) : (
+                              <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                                Could not determine repository access.
+                              </Text>
+                            )}
+                          </>
+                        ) : (
+                          <Text style={[styles.accessLine, { color: colors.textSecondary }]}>
+                            Could not read access info from the sprite.
+                          </Text>
+                        )}
+                      </View>
+                    )}
+                  </>
+                )}
               </View>
             );
           })
@@ -185,4 +274,12 @@ const styles = StyleSheet.create({
   },
   connectButtonText: { fontSize: FontSize.sm, fontWeight: '600' },
   blurb: { fontSize: FontSize.xs, lineHeight: 17 },
+  accessToggle: { fontSize: FontSize.xs, fontWeight: '600' },
+  accessBox: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.sm,
+    gap: 3,
+  },
+  accessLine: { fontSize: FontSize.xs, lineHeight: 17 },
+  repoLine: { fontSize: FontSize.xs, fontFamily: 'monospace' },
 });

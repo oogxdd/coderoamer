@@ -66,6 +66,8 @@ export default function DashboardScreen() {
     // Best-effort: write credentials onto the new sprite once. If it isn't ready
     // yet, the first chat turn re-attempts via ensureProvisionedOnce.
     ensureProvisionedOnce(name).catch(() => {});
+    // Land on the new sprite's Integrations tab so accounts get connected first.
+    router.push({ pathname: '/(app)/sprite/[name]', params: { name, tab: 'integrations' } });
   };
 
   const handleDelete = (sprite: Sprite) => {

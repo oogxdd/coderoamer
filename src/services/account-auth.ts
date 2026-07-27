@@ -12,10 +12,12 @@ import { runExec } from './api';
  * user, forwards any pasted code back into the TTY (Claude), and watches the
  * sprite's credential files to detect completion.
  *
- * Three providers for now: Codex (ChatGPT), GitHub, and Claude.
+ * Four providers: Codex (ChatGPT), GitHub, Claude, and Vercel. GitHub also has
+ * a non-interactive path — pasting a (fine-grained) personal access token —
+ * implemented by `validateGithubPat` + `connectGithubWithPat`.
  */
 
-export type ProviderId = 'codex' | 'github' | 'claude';
+export type ProviderId = 'codex' | 'github' | 'claude' | 'vercel';
 
 export type AccountStatus = Record<ProviderId, boolean>;
 
@@ -62,6 +64,15 @@ export const PROVIDERS: ProviderMeta[] = [
     needsCodePaste: true,
     waitingHint: 'Authorize in the browser, copy the code it shows, and paste it below.',
   },
+  {
+    id: 'vercel',
+    label: 'Vercel',
+    blurb: 'Sign in to Vercel so this sprite can deploy and manage your projects.',
+    monogram: '▲',
+    accent: '#171717',
+    needsCodePaste: false,
+    waitingHint: 'Confirm the code on the Vercel page, then come back — this updates automatically.',
+  },
 ];
 
 export function providerMeta(id: ProviderId): ProviderMeta {
@@ -74,7 +85,7 @@ export function providerMeta(id: ProviderId): ProviderMeta {
 
 export type AccountSignatures = Record<ProviderId, string>;
 
-const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '' };
+const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '', vercel: '' };
 
 /**
  * Return a per-provider "signature" of the on-sprite credentials — the mtime and
@@ -83,7 +94,8 @@ const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '' };
  * and a *fresh* login is detected when the signature changes. Never throws.
  *
  * Codex writes ~/.codex/auth.json; gh writes ~/.config/gh/hosts.yml; Claude
- * writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env).
+ * writes ~/.claude/.credentials.json (or we store a token in ~/.sprite_env);
+ * Vercel CLI (v57+) writes auth.json under the XDG data dir.
  */
 export async function getAccountSignatures(spriteName: string): Promise<AccountSignatures> {
   const command = [
@@ -91,7 +103,10 @@ export async function getAccountSignatures(spriteName: string): Promise<AccountS
     `co="$(sig "$HOME/.codex/auth.json")"`,
     `gh="$(sig "$HOME/.config/gh/hosts.yml")"; [ -n "$gh" ] || gh="$(sig "$HOME/.git-credentials")"`,
     `cl="$(sig "$HOME/.claude/.credentials.json")"; [ -n "$cl" ] || { grep -qs CLAUDE_CODE_OAUTH_TOKEN "$HOME/.sprite_env" && cl=env; }`,
-    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"`,
+    `vc="$(sig "\${XDG_DATA_HOME:-$HOME/.local/share}/com.vercel.cli/auth.json")"`,
+    `[ -n "$vc" ] || vc="$(sig "$HOME/.config/com.vercel.cli/auth.json")"`,
+    `[ -n "$vc" ] || vc="$(sig "$HOME/.vercel/auth.json")"`,
+    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"; echo "vercel=$vc"`,
   ].join('; ');
 
   const { output, success } = await runExec(spriteName, command, 20);
@@ -99,13 +114,23 @@ export async function getAccountSignatures(spriteName: string): Promise<AccountS
 
   const read = (key: ProviderId) =>
     new RegExp(`^${key}=(.*)$`, 'm').exec(output)?.[1]?.trim() ?? '';
-  return { codex: read('codex'), github: read('github'), claude: read('claude') };
+  return {
+    codex: read('codex'),
+    github: read('github'),
+    claude: read('claude'),
+    vercel: read('vercel'),
+  };
 }
 
 /** Whether each provider is authenticated on the sprite (signature non-empty). */
 export async function checkAccounts(spriteName: string): Promise<AccountStatus> {
   const sigs = await getAccountSignatures(spriteName);
-  return { codex: !!sigs.codex, github: !!sigs.github, claude: !!sigs.claude };
+  return {
+    codex: !!sigs.codex,
+    github: !!sigs.github,
+    claude: !!sigs.claude,
+    vercel: !!sigs.vercel,
+  };
 }
 
 // ── Output parsing ────────────────────────────────────────────────────────────
@@ -124,6 +149,9 @@ export interface LoginPrompt {
 }
 
 const CODE_RE = /\b[A-Z0-9]{4}-[A-Z0-9]{4,7}\b/;
+// Vercel CLI 57+ prints a device-flow URL with the one-time code embedded:
+// `Visit https://vercel.com/oauth/device?user_code=XXXX-XXXX`.
+const VERCEL_URL_RE = /https:\/\/vercel\.com\/oauth\/device\?user_code=([A-Z0-9-]+)/;
 // Base64url + URL-safe characters, so the trailing spinner glyph Claude glues on
 // (e.g. `…state=abc\✢`) is excluded from the captured URL.
 const CLAUDE_URL_RE =
@@ -152,8 +180,21 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
     return { url: 'https://github.com/login/device', code };
   }
 
-  // codex — URL is static; the code is the only variable part.
-  return { url: 'https://auth.openai.com/codex/device', code: CODE_RE.exec(text)?.[0] };
+  if (id === 'vercel') {
+    const match = VERCEL_URL_RE.exec(text);
+    // The code is embedded in the URL, so the page pre-fills it — the user only
+    // has to confirm. Still surface it so they can double-check what's shown.
+    return match ? { url: match[0], code: match[1] } : {};
+  }
+
+  // codex — parse the device URL from the output instead of assuming it, so a
+  // CLI that failed to start (missing binary, old version without
+  // --device-auth) doesn't masquerade as a working sign-in. v0.144 prints:
+  // `1. Open this link… https://auth.openai.com/codex/device` then
+  // `2. Enter this one-time code… U79V-EZHWN`.
+  const url = /https:\/\/auth\.openai\.com\/\S*device\S*/.exec(text)?.[0];
+  const code = CODE_RE.exec(text)?.[0];
+  return { url: url ?? (code ? 'https://auth.openai.com/codex/device' : undefined), code };
 }
 
 // ── Login command construction ────────────────────────────────────────────────
@@ -170,7 +211,18 @@ interface ProviderLoginSpec {
 function loginSpec(id: ProviderId): ProviderLoginSpec {
   switch (id) {
     case 'codex':
-      return { command: 'codex login --device-auth', tty: true, cols: 120 };
+      // Install codex if the sprite doesn't have it, stream the login while
+      // logging it, and — when the CLI is too old to know --device-auth —
+      // upgrade and retry once. (tee keeps output streaming; $(…) would not.)
+      return {
+        command:
+          'command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@latest >/dev/null 2>&1; ' +
+          'codex login --device-auth 2>&1 | tee /tmp/wisp-codex-login.log; rc=${PIPESTATUS[0]}; ' +
+          'if [ "$rc" != "0" ] && grep -qiE "unexpected|unrecognized|invalid" /tmp/wisp-codex-login.log; then ' +
+          'echo "Updating Codex CLI…"; npm install -g @openai/codex@latest >/dev/null 2>&1 && codex login --device-auth; fi',
+        tty: true,
+        cols: 120,
+      };
     case 'github':
       // Non-tty gives clean, parseable output and auto-polls without an Enter
       // keypress. `setup-git` wires the credential helper so `git push` works.
@@ -184,7 +236,157 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
     case 'claude':
       // Wide terminal keeps the authorize URL on a single line so we can parse it.
       return { command: 'claude setup-token', tty: true, cols: 400 };
+    case 'vercel':
+      // Sprites don't ship the Vercel CLI — install it on first use (slowish but
+      // one-time; the sheet shows a spinner). v57+ uses the OAuth device flow.
+      return {
+        command:
+          'command -v vercel >/dev/null 2>&1 || npm install -g vercel@latest >/dev/null 2>&1; vercel login',
+        tty: true,
+        cols: 120,
+      };
   }
+}
+
+// ── GitHub personal access token path ────────────────────────────────────────
+
+export type GithubTokenType = 'fine-grained' | 'classic' | 'oauth' | 'unknown';
+
+export interface GithubPatInfo {
+  /** GitHub login the token belongs to. */
+  login: string;
+  tokenType: GithubTokenType;
+  /**
+   * Repositories the token can access. For fine-grained tokens `/user/repos`
+   * returns exactly the granted repositories; for classic/oauth tokens it
+   * returns everything the account can see, so `allRepos` is set instead of
+   * trusting the (truncated) list.
+   */
+  repos: string[];
+  /** True when the token grants broad access (classic PAT / oauth token). */
+  allRepos: boolean;
+}
+
+export function githubTokenType(token: string): GithubTokenType {
+  if (token.startsWith('github_pat_')) return 'fine-grained';
+  if (token.startsWith('ghp_')) return 'classic';
+  if (token.startsWith('gho_') || token.startsWith('ghu_')) return 'oauth';
+  return 'unknown';
+}
+
+/**
+ * Validate a pasted GitHub token directly against api.github.com (CORS-enabled,
+ * so this works on web too) and report who it is and which repos it can reach.
+ * Throws with a user-facing message when the token is rejected.
+ */
+export async function validateGithubPat(token: string): Promise<GithubPatInfo> {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+  };
+
+  const userRes = await fetch('https://api.github.com/user', { headers });
+  if (userRes.status === 401) throw new Error('GitHub rejected this token. Check it and try again.');
+  if (!userRes.ok) throw new Error(`GitHub error (${userRes.status}). Try again.`);
+  const user = await userRes.json();
+
+  const tokenType = githubTokenType(token);
+  const allRepos = tokenType !== 'fine-grained';
+
+  let repos: string[] = [];
+  try {
+    const repoRes = await fetch(
+      'https://api.github.com/user/repos?per_page=100&sort=updated',
+      { headers }
+    );
+    if (repoRes.ok) {
+      const list: Array<{ full_name: string }> = await repoRes.json();
+      repos = list.map((r) => r.full_name);
+    }
+  } catch {
+    // Repo listing is informational — a valid token without it is still usable.
+  }
+
+  return { login: user.login ?? 'unknown', tokenType, repos, allRepos };
+}
+
+/** Escape a value for safe embedding inside a single-quoted shell string. */
+const sq = (v: string) => v.replace(/'/g, "'\\''");
+
+/**
+ * Command that installs a pasted token on the sprite. Primary path is
+ * `gh auth login --with-token` (writes hosts.yml, wires the git credential
+ * helper, and makes `gh pr create` etc. work). If gh refuses the token (e.g.
+ * an old gh insisting on classic scopes), fall back to a plain git credential
+ * store so clone/push still work.
+ */
+export function buildGithubPatCommand(token: string): string {
+  const t = sq(token);
+  return (
+    `printf '%s\\n' '${t}' | gh auth login --hostname github.com --git-protocol https ` +
+    `--with-token --insecure-storage 2>&1 && gh auth setup-git 2>&1 && echo WISP_PAT_GH ` +
+    `|| { git config --global credential.helper store && ` +
+    `printf 'https://x-access-token:%s@github.com\\n' '${t}' > ~/.git-credentials && ` +
+    `chmod 600 ~/.git-credentials && echo WISP_PAT_GIT_ONLY; }`
+  );
+}
+
+export type PatInstallResult = 'gh' | 'git-only';
+
+/**
+ * Store a validated token on the sprite. Returns which layer took it: 'gh'
+ * (full gh CLI + git) or 'git-only' (git push/pull works, gh CLI does not).
+ */
+export async function connectGithubWithPat(
+  spriteName: string,
+  token: string
+): Promise<PatInstallResult> {
+  const { output, success } = await runExec(spriteName, buildGithubPatCommand(token), 60);
+  if (output.includes('WISP_PAT_GH')) return 'gh';
+  if (output.includes('WISP_PAT_GIT_ONLY')) return 'git-only';
+  throw new Error(
+    success ? 'Could not store the token on the sprite.' : output.trim() || 'Sprite command failed.'
+  );
+}
+
+export interface GithubAccessSummary {
+  /** GitHub login gh is authenticated as, when parseable. */
+  login?: string;
+  /** Classic/oauth scopes line from `gh auth status`, when present. */
+  scopes?: string;
+  /** Accessible repositories (only meaningful for fine-grained tokens). */
+  repos: string[];
+  /** True when the credential grants broad access to all repos. */
+  allRepos: boolean;
+}
+
+/**
+ * Inspect what the GitHub credential on a sprite can actually reach — so the
+ * user can tell whether the sprite has full-account access (web login / classic
+ * PAT) or a fine-grained token limited to specific repos.
+ */
+export async function getGithubAccessSummary(spriteName: string): Promise<GithubAccessSummary> {
+  const status = await runExec(spriteName, 'gh auth status -h github.com 2>&1 || true', 30);
+  const text = stripAnsi(status.output);
+  const login = /account\s+(\S+)/i.exec(text)?.[1];
+  const scopes = /Token scopes:\s*(.+)/i.exec(text)?.[1]?.trim();
+  // Classic/oauth tokens report scopes; `repo` scope means everything.
+  const allRepos = !!scopes && scopes !== 'none' && scopes !== "''";
+
+  let repos: string[] = [];
+  if (!allRepos) {
+    const list = await runExec(
+      spriteName,
+      `gh api "user/repos?per_page=100" --jq '.[].full_name' 2>/dev/null || true`,
+      30
+    );
+    repos = list.output
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^[\w.-]+\/[\w.-]+$/.test(l));
+  }
+
+  return { login, scopes, repos, allRepos };
 }
 
 // ── Streaming login client ─────────────────────────────────────────────────────

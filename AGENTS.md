@@ -93,8 +93,9 @@ api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
   settings.tsx     Defaults: provider, claude model, max turns, instructions,
                    working directory, git name/email, transcription keys,
                    auto-checkpoint
-  sprite/[name].tsx  The main screen: tabs Overview / Chat / Checkpoints,
-                     plus session browser + terminals entry points
+  sprite/[name].tsx  The main screen: tabs Chats / Files / Integrations /
+                     Settings (Integrations = per-sprite Codex/GitHub/Claude/
+                     Vercel logins via SpriteAccountsTab; accepts ?tab= deep link)
   exec-poc.tsx     Stream terminal (WebSocket exec → Skia terminal)
   ttyd-terminal.tsx  Legacy web terminal (ttyd in a WebView)
 ```
