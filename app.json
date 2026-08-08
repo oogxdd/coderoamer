@@ -1,15 +1,15 @@
 {
   "expo": {
-    "name": "sprites-manager",
+    "name": "CodeRoamer",
     "slug": "sprites-manager",
-    "version": "1.0.0",
+    "version": "1.4.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "spritesmanager",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon",
-      "bundleIdentifier": "com.digital.spritespack",
+      "bundleIdentifier": "com.digital.coderoamer",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -22,7 +22,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.digital.spritespack"
+      "package": "com.digital.coderoamer"
     },
     "web": {
       "output": "server",
