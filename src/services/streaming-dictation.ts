@@ -161,8 +161,10 @@ type SpeechRecognitionModule = {
 
 function loadSpeechRecognitionModule(): SpeechRecognitionModule | null {
   // Same optional-native-module dance as useChatDictation: absent in a dev app
-  // built before the package was added.
-  const { requireOptionalNativeModule } = require('expo');
+  // built before the package was added. Loaded lazily via `require` (rather
+  // than a top-level import of `expo`) so importing this module doesn't pull
+  // in Expo's runtime setup in environments like the Vitest suite.
+  const { requireOptionalNativeModule } = require('expo') as typeof import('expo');
   return (
     requireOptionalNativeModule<SpeechRecognitionModule>('ExpoSpeechRecognition') ?? null
   );

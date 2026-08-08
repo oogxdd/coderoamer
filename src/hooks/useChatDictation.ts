@@ -192,6 +192,9 @@ export function useChatDictation({
     setError(undefined);
     setMode('streaming-connecting');
     clientBaseTextRef.current = inputText;
+    // A failure reported while connecting already moves us back to idle;
+    // this flag stops us from painting over it with "listening".
+    let cancelled = false;
     try {
       const apiKey = (await loadToken('assemblyAiToken'))?.trim();
       if (!apiKey) {
@@ -205,16 +208,15 @@ export function useChatDictation({
         onError: (streamError) => {
           setError(streamError.message);
           streamingRef.current = null;
+          cancelled = true;
           setMode('idle');
         },
       });
       streamingRef.current = handle;
-      // A failure reported while connecting already moved us back to idle;
-      // don't paint over it with "listening".
-      if (modeRef.current === 'streaming-connecting') {
-        setMode('streaming-listening');
-      } else {
+      if (cancelled) {
         handle.abort();
+      } else {
+        setMode('streaming-listening');
       }
     } catch (err) {
       setError((err as Error).message);

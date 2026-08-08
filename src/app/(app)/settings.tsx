@@ -54,8 +54,13 @@ const MAX_TURNS_OPTIONS: { label: string; value: MaxTurns }[] = [
 
 const CLAUDE_EFFORT_OPTIONS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CODEX_EFFORT_OPTIONS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
+// "AssemblyAI Live" changes the Mic button rather than the Rec/File buttons:
+// it streams to AssemblyAI while you speak instead of using the OS recognizer.
+// Rec and File still upload to AssemblyAI's batch API under it, so one key
+// covers both.
 const TRANSCRIPTION_PROVIDER_OPTIONS: { label: string; value: TranscriptionProvider }[] = [
   { label: 'AssemblyAI', value: 'assemblyai' },
+  { label: 'AssemblyAI Live', value: 'assemblyai-streaming' },
   { label: 'OpenAI', value: 'openai' },
   { label: 'Sprite', value: 'sprite' },
 ];
@@ -235,7 +240,8 @@ export default function SettingsScreen() {
         if (
           savedTranscriptionProvider === 'sprite' ||
           savedTranscriptionProvider === 'openai' ||
-          savedTranscriptionProvider === 'assemblyai'
+          savedTranscriptionProvider === 'assemblyai' ||
+          savedTranscriptionProvider === 'assemblyai-streaming'
         ) {
           setTranscriptionProvider(savedTranscriptionProvider);
         } else {
