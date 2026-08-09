@@ -20,7 +20,15 @@ describe('streamCodexAppServerTurn', () => {
           writeBytes() {},
         });
 
-        onEvent({ type: 'stdout', data: '{"id":1,"result":{"userAgent":"test"}}\n' });
+        const initializeResponse =
+          '{"id":1,"result":{"userAgent":"probe/0.143.0","codexHome":"/home/sprite/.codex","platformFamily":"unix","platformOs":"linux"}}\n';
+        onEvent({ type: 'stdout', data: initializeResponse.slice(0, 47) });
+        onEvent({
+          type: 'stdout',
+          data:
+            initializeResponse.slice(47) +
+            '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}\n',
+        });
         onEvent({
           type: 'stdout',
           data: '{"id":2,"result":{"thread":{"id":"thread-1"}}}\n',
@@ -91,6 +99,76 @@ describe('streamCodexAppServerTurn', () => {
     expect(observedEvents).toContainEqual({
       type: 'stdout',
       data: '{"method":"item/agentMessage/delta","params":{"delta":"Hi"}}\n',
+    });
+  });
+
+  it('resumes an existing thread without experimental parameters', async () => {
+    const writes: Record<string, any>[] = [];
+
+    const streamSpy = vi.spyOn(api, 'streamExec').mockImplementation(
+      async (_spriteName, _command, onEvent, _signal, options = {}) => {
+        options.onStdinReady?.({
+          write(text) {
+            writes.push(JSON.parse(text));
+          },
+          writeBytes() {},
+        });
+
+        onEvent({
+          type: 'stdout',
+          data: '{"id":1,"result":{"userAgent":"probe/0.143.0"}}\n',
+        });
+        onEvent({
+          type: 'stdout',
+          data: '{"id":2,"result":{"thread":{"id":"thread-existing"}}}\n',
+        });
+        onEvent({
+          type: 'stdout',
+          data: '{"id":3,"result":{"turn":{"id":"turn-2","status":"inProgress"}}}\n',
+        });
+        onEvent({ type: 'stdout', data: '{"method":"turn/completed","params":{}}\n' });
+      }
+    );
+
+    try {
+      await streamCodexAppServerTurn({
+        spriteName: 'sprite',
+        command: ['codex', 'app-server', '--stdio'],
+        workingDirectory: '/work',
+        prompt: 'Continue',
+        threadId: 'thread-existing',
+        model: 'gpt-test',
+        effort: 'high',
+        onEvent: () => {},
+      });
+    } finally {
+      streamSpy.mockRestore();
+    }
+
+    expect(writes[2]).toEqual({
+      id: 2,
+      method: 'thread/resume',
+      params: {
+        threadId: 'thread-existing',
+        cwd: '/work',
+        model: 'gpt-test',
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
+      },
+    });
+    expect(writes[2].params).not.toHaveProperty('excludeTurns');
+    expect(writes[3]).toEqual({
+      id: 3,
+      method: 'turn/start',
+      params: {
+        threadId: 'thread-existing',
+        input: [{ type: 'text', text: 'Continue', text_elements: [] }],
+        cwd: '/work',
+        model: 'gpt-test',
+        effort: 'high',
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'dangerFullAccess' },
+      },
     });
   });
 });

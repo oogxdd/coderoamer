@@ -22,6 +22,7 @@ export function ToolDetailSheet({ card, onClose }: ToolDetailSheetProps) {
 
   const inputText = jsonPretty(card.input);
   const resultText = card.result ? toolResultDisplayContent(card.result) : null;
+  const outputText = resultText ?? card.liveOutput ?? null;
 
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -47,10 +48,10 @@ export function ToolDetailSheet({ card, onClose }: ToolDetailSheetProps) {
             </Text>
           </View>
 
-          {resultText && (
+          {outputText && (
             <>
               <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>
-                RESULT
+                {resultText ? 'RESULT' : 'LIVE OUTPUT'}
               </Text>
               <View style={[styles.codeBlock, { backgroundColor: colors.backgroundElement }]}>
                 <Text
@@ -60,7 +61,7 @@ export function ToolDetailSheet({ card, onClose }: ToolDetailSheetProps) {
                   ]}
                   selectable
                 >
-                  {resultText}
+                  {outputText}
                 </Text>
               </View>
             </>

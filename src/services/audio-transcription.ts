@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as api from '@/services/api';
+import { base64ToBytes } from '@/services/base64';
 
 const MAX_AUDIO_UPLOAD_BYTES = 50 * 1024 * 1024;
 
@@ -26,27 +27,6 @@ function safeFileName(value: string | null | undefined): string {
   const fallback = `dictation-${Date.now().toString(36)}.m4a`;
   const name = (value || fallback).split('/').pop() || fallback;
   return name.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120) || fallback;
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const bytes: number[] = [];
-  let buffer = 0;
-  let bits = 0;
-
-  for (const char of base64.replace(/\s/g, '')) {
-    if (char === '=') break;
-    const value = chars.indexOf(char);
-    if (value === -1) continue;
-    buffer = (buffer << 6) | value;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((buffer >> bits) & 0xff);
-    }
-  }
-
-  return new Uint8Array(bytes);
 }
 
 async function readLocalAudioBytes(audio: LocalAudioFile): Promise<Uint8Array> {

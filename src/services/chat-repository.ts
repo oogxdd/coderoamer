@@ -3,7 +3,7 @@ import {
   AgentEffort,
   AgentProvider,
   ChatMessage,
-  normalizeAgentEffort,
+  normalizeAgentEffortForProvider,
 } from '@/models/chat';
 import { Database, getDatabase } from './database';
 
@@ -62,14 +62,15 @@ function normalizeProvider(value: unknown): AgentProvider {
 
 export function normalizePersistedChat(value: unknown): PersistedChat {
   const raw = (value ?? {}) as Partial<PersistedChat> & Record<string, unknown>;
+  const provider = normalizeProvider(raw.provider);
   return {
     id: String(raw.id ?? ''),
     spriteName: String(raw.spriteName ?? ''),
     chatNumber: Number(raw.chatNumber ?? 1),
     customName: typeof raw.customName === 'string' ? raw.customName : undefined,
-    provider: normalizeProvider(raw.provider),
+    provider,
     model: typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : undefined,
-    effort: normalizeAgentEffort(raw.effort),
+    effort: normalizeAgentEffortForProvider(provider, raw.effort),
     claudeSessionId: typeof raw.claudeSessionId === 'string' ? raw.claudeSessionId : undefined,
     codexSessionId: typeof raw.codexSessionId === 'string' ? raw.codexSessionId : undefined,
     currentServiceName:
@@ -159,13 +160,14 @@ function rowToActiveRun(row: ActiveRunRow): ActiveChatRun {
 }
 
 function rowToChat(row: ChatRow, activeRun?: ActiveChatRun): PersistedChat {
+  const provider = normalizeProvider(row.provider);
   return {
     id: row.id,
     spriteName: row.sprite_name,
     chatNumber: row.chat_number,
-    provider: normalizeProvider(row.provider),
+    provider,
     model: row.model ?? undefined,
-    effort: normalizeAgentEffort(row.effort),
+    effort: normalizeAgentEffortForProvider(provider, row.effort),
     customName: row.custom_name ?? undefined,
     claudeSessionId: row.claude_session_id ?? undefined,
     codexSessionId: row.codex_session_id ?? undefined,

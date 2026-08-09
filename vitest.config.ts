@@ -15,6 +15,10 @@ export default defineConfig({
       '@': path.resolve(__dirname, 'src'),
       'react-native': path.resolve(__dirname, 'src/test/stubs/react-native.ts'),
       'expo-secure-store': path.resolve(__dirname, 'src/test/stubs/expo-secure-store.ts'),
+      'expo-file-system/legacy': path.resolve(
+        __dirname,
+        'src/test/stubs/expo-file-system-legacy.ts'
+      ),
     },
   },
 });

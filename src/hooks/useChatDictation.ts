@@ -8,15 +8,25 @@ import {
   useAudioRecorder,
 } from 'expo-audio';
 import { requireOptionalNativeModule } from 'expo';
+import { loadToken } from '@/services/auth';
 import { transcribeAudioOnSprite } from '@/services/audio-transcription';
 import {
+  batchProviderFor,
   TranscriptionProvider,
   transcribeAudioWithCloudProvider,
 } from '@/services/client-transcription';
+import {
+  startStreamingDictation,
+  type StreamingDictationHandle,
+} from '@/services/streaming-dictation';
 
 export type DictationMode =
   | 'idle'
+  /** On-device recognition streaming into the input box. */
   | 'client-listening'
+  /** AssemblyAI's streaming socket doing the same job over the network. */
+  | 'streaming-listening'
+  | 'streaming-connecting'
   | 'sprite-recording'
   | 'sprite-transcribing'
   | 'file-transcribing';
@@ -62,6 +72,10 @@ function statusForMode(mode: DictationMode): string | undefined {
   switch (mode) {
     case 'client-listening':
       return 'Listening...';
+    case 'streaming-connecting':
+      return 'Connecting to AssemblyAI...';
+    case 'streaming-listening':
+      return 'Listening (AssemblyAI)...';
     case 'sprite-recording':
       return 'Recording...';
     case 'sprite-transcribing':
@@ -84,10 +98,13 @@ async function transcribeAudio({
   workingDirectory: string;
   audio: Parameters<typeof transcribeAudioOnSprite>[0]['audio'];
 }): Promise<string> {
-  if (provider === 'sprite') {
+  // A finished recording always goes through an upload-based provider, even
+  // when the live provider is selected.
+  const batch = batchProviderFor(provider);
+  if (batch === 'sprite') {
     return transcribeAudioOnSprite({ spriteName, workingDirectory, audio });
   }
-  return transcribeAudioWithCloudProvider(provider, audio);
+  return transcribeAudioWithCloudProvider(batch, audio);
 }
 
 export function useChatDictation({
@@ -102,8 +119,19 @@ export function useChatDictation({
   const [error, setError] = useState<string | undefined>();
   const modeRef = useRef<DictationMode>('idle');
   const clientBaseTextRef = useRef('');
+  const streamingRef = useRef<StreamingDictationHandle | null>(null);
 
   modeRef.current = mode;
+
+  // Leaving the chat while dictating must not leave the socket open and the
+  // microphone hot.
+  useEffect(
+    () => () => {
+      streamingRef.current?.abort();
+      streamingRef.current = null;
+    },
+    []
+  );
 
   const insertTranscript = useCallback(
     (transcript: string) => {
@@ -143,7 +171,64 @@ export function useChatDictation({
     };
   }, [setInputText]);
 
+  /**
+   * The AssemblyAI streaming counterpart of on-device dictation: same button,
+   * same live-text-into-the-input behaviour, different engine. Useful where the
+   * OS recognizer is weak (Android, mixed languages) or where its quality
+   * simply isn't good enough for a prompt you're about to hand to an agent.
+   */
+  const toggleStreamingDictation = useCallback(async () => {
+    if (modeRef.current === 'streaming-listening') {
+      const handle = streamingRef.current;
+      streamingRef.current = null;
+      setMode('idle');
+      // The final text already arrived through onTranscript; awaiting the
+      // shutdown only matters for releasing the socket.
+      await handle?.stop().catch(() => {});
+      return;
+    }
+    if (modeRef.current !== 'idle') return;
+
+    setError(undefined);
+    setMode('streaming-connecting');
+    clientBaseTextRef.current = inputText;
+    // A failure reported while connecting already moves us back to idle;
+    // this flag stops us from painting over it with "listening".
+    let cancelled = false;
+    try {
+      const apiKey = (await loadToken('assemblyAiToken'))?.trim();
+      if (!apiKey) {
+        throw new Error('AssemblyAI API key is not saved. Add it in Settings.');
+      }
+      const handle = await startStreamingDictation({
+        apiKey,
+        onTranscript: (text) => {
+          setInputText(appendTranscript(clientBaseTextRef.current, text));
+        },
+        onError: (streamError) => {
+          setError(streamError.message);
+          streamingRef.current = null;
+          cancelled = true;
+          setMode('idle');
+        },
+      });
+      streamingRef.current = handle;
+      if (cancelled) {
+        handle.abort();
+      } else {
+        setMode('streaming-listening');
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      setMode('idle');
+    }
+  }, [inputText, setInputText]);
+
   const toggleClientDictation = useCallback(async () => {
+    if (transcriptionProvider === 'assemblyai-streaming') {
+      await toggleStreamingDictation();
+      return;
+    }
     const module = getSpeechRecognitionModule();
     if (!module) {
       setError('Live speech recognition requires rebuilding the iOS dev app.');
@@ -178,7 +263,7 @@ export function useChatDictation({
       setError((err as Error).message);
       setMode('idle');
     }
-  }, [inputText]);
+  }, [inputText, transcriptionProvider, toggleStreamingDictation]);
 
   const startSpriteRecording = useCallback(async () => {
     if (modeRef.current !== 'idle') return;
@@ -290,9 +375,13 @@ export function useChatDictation({
     status: statusForMode(mode),
     error,
     clearDictationError,
-    isClientDictating: mode === 'client-listening',
+    // Both live engines drive the same mic button, so the UI treats them alike.
+    isClientDictating: mode === 'client-listening' || mode === 'streaming-listening',
     isSpriteRecording: mode === 'sprite-recording',
-    isTranscribing: mode === 'sprite-transcribing' || mode === 'file-transcribing',
+    isTranscribing:
+      mode === 'sprite-transcribing' ||
+      mode === 'file-transcribing' ||
+      mode === 'streaming-connecting',
     toggleClientDictation,
     toggleSpriteRecording,
     pickAudioFile,

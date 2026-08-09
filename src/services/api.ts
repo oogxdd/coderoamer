@@ -730,6 +730,17 @@ export async function streamExec(
         return true;
       }
 
+      // Exec lifecycle/control messages are sent as standalone text frames.
+      // Process stdout uses binary stream 1, so these must never be forwarded
+      // into an NDJSON parser as stdout (they also do not include newlines).
+      if (
+        typeof obj.msg === 'string' ||
+        obj.type === 'port_opened' ||
+        obj.type === 'port_closed'
+      ) {
+        return true;
+      }
+
       return false;
     };
 

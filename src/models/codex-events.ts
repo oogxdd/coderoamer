@@ -3,27 +3,58 @@ import { JSONValue, jsonGet, jsonNumber, jsonString } from './claude-events';
 export interface FileChangeEntry {
   path: string;
   kind: string;
+  diff?: string;
 }
 
 export interface TodoEntry {
   text: string;
-  completed: boolean;
+  status: 'pending' | 'inProgress' | 'completed';
 }
 
 export type CodexStreamEvent =
   | { type: 'threadStarted'; threadId: string }
+  | { type: 'turnStarted'; turnId?: string }
   | { type: 'assistantDelta'; text: string }
   | { type: 'reasoning'; text: string }
-  | { type: 'commandBegin'; commandId: string; command: string }
-  | { type: 'commandEnd'; commandId: string; command: string; output: string | null; exitCode?: number }
+  | { type: 'reasoningBoundary' }
+  | { type: 'commandBegin'; commandId: string; command: string; cwd?: string }
+  | { type: 'commandOutput'; commandId: string; delta: string }
+  | {
+      type: 'commandEnd';
+      commandId: string;
+      command: string;
+      output: string | null;
+      exitCode?: number;
+      status?: string;
+      durationMs?: number;
+    }
+  | { type: 'fileChangeBegin'; changeId: string; files: FileChangeEntry[] }
   | { type: 'fileChange'; changeId: string; files: FileChangeEntry[]; status: string }
   | { type: 'mcpToolBegin'; callId: string; server: string; tool: string; args: JSONValue }
   | { type: 'mcpToolEnd'; callId: string; server: string; tool: string; output: string | null; isError: boolean }
-  | { type: 'webSearch'; query: string }
+  | {
+      type: 'activity';
+      activityId: string;
+      name: string;
+      input: JSONValue;
+      output?: JSONValue;
+      completed: boolean;
+      isError?: boolean;
+    }
   | { type: 'todoList'; listId: string; items: TodoEntry[] }
-  | { type: 'turnCompleted' }
+  | {
+      type: 'turnCompleted';
+      status: 'completed' | 'failed' | 'interrupted';
+      message?: string;
+    }
   | { type: 'error'; message: string }
-  | { type: 'unknown'; rawType?: string; itemType?: string; keys?: string[] };
+  | {
+      type: 'unknown';
+      rawType?: string;
+      rpcMethod?: string;
+      itemType?: string;
+      keys?: string[];
+    };
 
 function readItemId(value: unknown): string | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -115,6 +146,7 @@ function readFileChanges(item: unknown): FileChangeEntry[] {
     .map((change) => ({
       path: jsonString(jsonGet(change as any, 'path')) ?? '',
       kind: jsonString(jsonGet(change as any, 'kind')) ?? 'update',
+      diff: jsonString(jsonGet(change as any, 'diff')) ?? undefined,
     }))
     .filter((change) => change.path.length > 0);
 }
@@ -125,7 +157,13 @@ function readTodoItems(item: unknown): TodoEntry[] {
   return items
     .map((entry) => ({
       text: jsonString(jsonGet(entry as any, 'text')) ?? '',
-      completed: jsonGet(entry as any, 'completed') === true,
+      status:
+        jsonString(jsonGet(entry as any, 'status')) === 'in_progress'
+          ? 'inProgress' as const
+          : jsonString(jsonGet(entry as any, 'status')) === 'completed' ||
+              jsonGet(entry as any, 'completed') === true
+            ? 'completed' as const
+            : 'pending' as const,
     }))
     .filter((entry) => entry.text.length > 0);
 }
@@ -146,8 +184,124 @@ function readAppServerFileChanges(item: unknown): FileChangeEntry[] {
     .map((change) => ({
       path: jsonString(jsonGet(change as any, 'path')) ?? '',
       kind: jsonString(jsonGet(change as any, 'kind')) ?? 'update',
+      diff: jsonString(jsonGet(change as any, 'diff')) ?? undefined,
     }))
     .filter((change) => change.path.length > 0);
+}
+
+function readWebSearchInput(item: unknown): JSONValue {
+  const action = jsonGet(item as any, 'action');
+  const query =
+    jsonString(jsonGet(item as any, 'query')) ??
+    jsonString(jsonGet(action as any, 'query')) ??
+    undefined;
+  const queries = jsonGet(action as any, 'queries');
+  return {
+    ...(query ? { query } : {}),
+    ...(Array.isArray(queries) ? { queries } : {}),
+    ...(action && typeof action === 'object' && !Array.isArray(action) ? { action } : {}),
+  } as JSONValue;
+}
+
+function readWebSearchLabel(item: unknown): string {
+  const action = jsonGet(item as any, 'action');
+  const actionType = jsonString(jsonGet(action as any, 'type'));
+  if (actionType === 'openPage' || actionType === 'open_page') return 'WebOpen';
+  if (actionType === 'findInPage' || actionType === 'find_in_page') return 'WebFind';
+  return 'WebSearch';
+}
+
+function genericItemActivity(item: unknown, completed: boolean): CodexStreamEvent | undefined {
+  const itemId = readItemId(item) ?? `activity-${Date.now().toString(36)}`;
+  const itemType = readItemType(item);
+
+  switch (itemType) {
+    case 'webSearch':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: readWebSearchLabel(item),
+        input: readWebSearchInput(item),
+        output: completed ? (jsonGet(item as any, 'action') ?? null) : undefined,
+        completed,
+      };
+    case 'collabToolCall':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: jsonString(jsonGet(item as any, 'tool')) ?? 'Collaboration',
+        input: {
+          prompt: jsonString(jsonGet(item as any, 'prompt')) ?? null,
+          receiverThreadId: jsonString(jsonGet(item as any, 'receiverThreadId')) ?? null,
+          newThreadId: jsonString(jsonGet(item as any, 'newThreadId')) ?? null,
+        },
+        output: completed ? (jsonGet(item as any, 'agentStatus') ?? null) : undefined,
+        completed,
+        isError: jsonString(jsonGet(item as any, 'status')) === 'failed',
+      };
+    case 'dynamicToolCall':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: jsonString(jsonGet(item as any, 'tool')) ?? 'Tool',
+        input: (jsonGet(item as any, 'arguments') ?? null) as JSONValue,
+        output: completed
+          ? ((jsonGet(item as any, 'contentItems') ??
+              jsonGet(item as any, 'success') ??
+              null) as JSONValue)
+          : undefined,
+        completed,
+        isError: completed && jsonGet(item as any, 'success') === false,
+      };
+    case 'imageView':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: 'ImageView',
+        input: { path: jsonString(jsonGet(item as any, 'path')) ?? '' },
+        output: completed ? null : undefined,
+        completed,
+      };
+    case 'sleep':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: 'Wait',
+        input: { durationMs: jsonNumber(jsonGet(item as any, 'durationMs')) ?? 0 },
+        output: completed ? null : undefined,
+        completed,
+      };
+    case 'contextCompaction':
+    case 'compacted':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: 'Compaction',
+        input: {},
+        output: completed ? 'Context compacted' : undefined,
+        completed,
+      };
+    case 'enteredReviewMode':
+    case 'exitedReviewMode':
+      return {
+        type: 'activity',
+        activityId: itemId,
+        name: 'Review',
+        input: {
+          target:
+            itemType === 'enteredReviewMode'
+              ? (jsonString(jsonGet(item as any, 'review')) ?? '')
+              : '',
+        },
+        output:
+          completed && itemType === 'exitedReviewMode'
+            ? (jsonString(jsonGet(item as any, 'review')) ?? null)
+            : undefined,
+        completed,
+      };
+    default:
+      return undefined;
+  }
 }
 
 function readAppServerMcpOutput(item: unknown): { output: string | null; isError: boolean } {
@@ -179,13 +333,27 @@ function readAppServerMcpOutput(item: unknown): { output: string | null; isError
   return { output: null, isError: false };
 }
 
-function parseCodexAppServerNotification(method: string, params: unknown): CodexStreamEvent[] {
+function parseCodexAppServerNotification(
+  method: string,
+  params: unknown
+): { events: CodexStreamEvent[]; recognized: boolean } {
   const events: CodexStreamEvent[] = [];
+  let recognized = true;
 
   switch (method) {
     case 'thread/started': {
       const threadId = readAppServerThreadId(params);
       if (threadId) events.push({ type: 'threadStarted', threadId });
+      break;
+    }
+    case 'turn/started': {
+      const turn = jsonGet(params as any, 'turn');
+      events.push({
+        type: 'turnStarted',
+        turnId:
+          jsonString(jsonGet(turn as any, 'id')) ??
+          jsonString(jsonGet(params as any, 'turnId')),
+      });
       break;
     }
     case 'item/agentMessage/delta': {
@@ -199,6 +367,10 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
       if (text) events.push({ type: 'reasoning', text });
       break;
     }
+    case 'item/reasoning/summaryPartAdded': {
+      events.push({ type: 'reasoningBoundary' });
+      break;
+    }
     case 'turn/plan/updated': {
       const plan = jsonGet(params as any, 'plan');
       if (Array.isArray(plan)) {
@@ -206,10 +378,18 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
           type: 'todoList',
           listId: jsonString(jsonGet(params as any, 'turnId')) ?? 'plan',
           items: plan
-            .map((step) => ({
-              text: jsonString(jsonGet(step as any, 'step')) ?? '',
-              completed: jsonString(jsonGet(step as any, 'status')) === 'completed',
-            }))
+            .map((step): TodoEntry => {
+              const rawStatus = jsonString(jsonGet(step as any, 'status'));
+              return {
+                text: jsonString(jsonGet(step as any, 'step')) ?? '',
+                status:
+                  rawStatus === 'completed'
+                    ? 'completed'
+                    : rawStatus === 'inProgress'
+                      ? 'inProgress'
+                      : 'pending',
+              };
+            })
             .filter((step) => step.text.length > 0),
         });
       }
@@ -225,8 +405,17 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
               type: 'commandBegin',
               commandId: readItemId(item) ?? `cmd-${Date.now().toString(36)}`,
               command,
+              cwd: jsonString(jsonGet(item as any, 'cwd')) ?? undefined,
             });
           }
+          break;
+        }
+        case 'fileChange': {
+          events.push({
+            type: 'fileChangeBegin',
+            changeId: readItemId(item) ?? `patch-${Date.now().toString(36)}`,
+            files: readAppServerFileChanges(item),
+          });
           break;
         }
         case 'mcpToolCall': {
@@ -239,12 +428,18 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
           });
           break;
         }
-        case 'webSearch': {
-          const query = jsonString(jsonGet(item as any, 'query'));
-          if (query) events.push({ type: 'webSearch', query });
-          break;
+        default: {
+          const activity = genericItemActivity(item, false);
+          if (activity) events.push(activity);
+          else recognized = false;
         }
       }
+      break;
+    }
+    case 'item/commandExecution/outputDelta': {
+      const commandId = jsonString(jsonGet(params as any, 'itemId'));
+      const delta = jsonString(jsonGet(params as any, 'delta'));
+      if (commandId && delta) events.push({ type: 'commandOutput', commandId, delta });
       break;
     }
     case 'item/completed': {
@@ -257,6 +452,8 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
             command: jsonString(jsonGet(item as any, 'command')) ?? 'command',
             output: jsonString(jsonGet(item as any, 'aggregatedOutput')) ?? null,
             exitCode: jsonNumber(jsonGet(item as any, 'exitCode')),
+            status: jsonString(jsonGet(item as any, 'status')) ?? undefined,
+            durationMs: jsonNumber(jsonGet(item as any, 'durationMs')),
           });
           break;
         }
@@ -281,11 +478,75 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
           });
           break;
         }
+        default: {
+          const activity = genericItemActivity(item, true);
+          if (activity) events.push(activity);
+          else recognized = false;
+        }
       }
       break;
     }
+    case 'turn/diff/updated': {
+      const turnId = jsonString(jsonGet(params as any, 'turnId')) ?? 'turn';
+      const diff = jsonString(jsonGet(params as any, 'diff'));
+      if (diff) {
+        events.push({
+          type: 'activity',
+          activityId: `turn-diff-${turnId}`,
+          name: 'Diff',
+          input: { turnId },
+          output: diff,
+          completed: true,
+        });
+      }
+      break;
+    }
+    case 'model/rerouted': {
+      events.push({
+        type: 'activity',
+        activityId: `model-reroute-${jsonString(jsonGet(params as any, 'turnId')) ?? 'turn'}`,
+        name: 'Model',
+        input: {
+          from: jsonString(jsonGet(params as any, 'fromModel')) ?? '',
+          to: jsonString(jsonGet(params as any, 'toModel')) ?? '',
+        },
+        output: jsonString(jsonGet(params as any, 'reason')) ?? null,
+        completed: true,
+      });
+      break;
+    }
+    case 'warning':
+    case 'configWarning': {
+      const message =
+        jsonString(jsonGet(params as any, 'message')) ??
+        jsonString(jsonGet(params as any, 'summary')) ??
+        'Codex warning';
+      events.push({
+        type: 'activity',
+        activityId: `warning-${Date.now().toString(36)}`,
+        name: 'Warning',
+        input: {},
+        output: message,
+        completed: true,
+        isError: true,
+      });
+      break;
+    }
     case 'turn/completed': {
-      events.push({ type: 'turnCompleted' });
+      const turn = jsonGet(params as any, 'turn');
+      const rawStatus = jsonString(jsonGet(turn as any, 'status'));
+      const status =
+        rawStatus === 'failed'
+          ? 'failed'
+          : rawStatus === 'interrupted'
+            ? 'interrupted'
+            : 'completed';
+      const error = jsonGet(turn as any, 'error');
+      events.push({
+        type: 'turnCompleted',
+        status,
+        message: readMessage(error),
+      });
       break;
     }
     case 'error': {
@@ -297,11 +558,18 @@ function parseCodexAppServerNotification(method: string, params: unknown): Codex
       });
       break;
     }
+    case 'thread/tokenUsage/updated':
+    case 'thread/status/changed':
+    case 'item/plan/delta':
+      // Known protocol state that is either represented by a richer event or
+      // intentionally not persisted in the chat transcript.
+      break;
     default:
+      recognized = false;
       break;
   }
 
-  return events;
+  return { events, recognized };
 }
 
 function readMcpResult(item: unknown): { output: string | null; isError: boolean } {
@@ -324,9 +592,25 @@ function readMcpResult(item: unknown): { output: string | null; isError: boolean
 export function parseCodexEvent(json: any): CodexStreamEvent[] {
   if (!json || typeof json !== 'object') return [{ type: 'unknown' }];
   if (typeof json.method === 'string') {
-    const events = parseCodexAppServerNotification(json.method, json.params);
+    const { events, recognized } = parseCodexAppServerNotification(json.method, json.params);
     if (events.length > 0) return events;
-    return [];
+    if (recognized) return [];
+    const params =
+      json.params && typeof json.params === 'object' && !Array.isArray(json.params)
+        ? json.params
+        : undefined;
+    const item = params ? jsonGet(params, 'item') : undefined;
+    return [{
+      type: 'unknown',
+      rpcMethod: json.method,
+      itemType:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? readItemType(item)
+          : undefined,
+      // Field names are enough to evolve the parser without logging prompts,
+      // tool arguments, command output, or other potentially sensitive values.
+      keys: params ? Object.keys(params).slice(0, 12) : [],
+    }];
   }
   if ('id' in json && ('result' in json || 'error' in json)) {
     return [];
@@ -351,6 +635,7 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
               type: 'commandBegin',
               commandId: readItemId(item) ?? `cmd-${Date.now().toString(36)}`,
               command,
+              cwd: jsonString(jsonGet(item, 'cwd')) ?? undefined,
             });
           }
           break;
@@ -400,6 +685,8 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
             command: readCommand(item) ?? 'command',
             output: readOutput(item),
             exitCode: jsonNumber(jsonGet(item, 'exit_code')),
+            status: jsonString(jsonGet(item, 'status')) ?? undefined,
+            durationMs: jsonNumber(jsonGet(item, 'duration_ms')),
           });
           break;
         }
@@ -426,7 +713,14 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
         }
         case 'web_search': {
           const query = jsonString(jsonGet(item, 'query'));
-          if (query) events.push({ type: 'webSearch', query });
+          events.push({
+            type: 'activity',
+            activityId: readItemId(item) ?? `web-${Date.now().toString(36)}`,
+            name: 'WebSearch',
+            input: query ? { query } : {},
+            output: jsonGet(item, 'action') ?? null,
+            completed: true,
+          });
           break;
         }
         case 'todo_list': {
@@ -445,7 +739,7 @@ export function parseCodexEvent(json: any): CodexStreamEvent[] {
       break;
     }
     case 'turn.completed': {
-      events.push({ type: 'turnCompleted' });
+      events.push({ type: 'turnCompleted', status: 'completed' });
       break;
     }
     case 'error':
