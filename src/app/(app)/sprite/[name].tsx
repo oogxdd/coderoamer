@@ -449,6 +449,16 @@ export default function SpriteDetailScreen() {
     chat.sendMessage('Continue where you left off.');
   }, [chat.sendMessage]);
 
+  // Long-press a queued follow-up to pull it back into the composer and edit it
+  // before the current turn finishes.
+  const handleEditQueued = useCallback(
+    (id: string, text: string) => {
+      chat.removeQueuedPrompt(id);
+      chat.setInputText((prev: string) => (prev.trim() ? `${prev.trim()}\n\n${text}` : text));
+    },
+    [chat.removeQueuedPrompt, chat.setInputText]
+  );
+
   const createChat = useCallback(async (config: NewSessionConfig) => {
     // One useChat instance is shared across sessions. Detach the local stream
     // before switching so the remote exec can keep running and be reattached later.
@@ -904,7 +914,11 @@ export default function SpriteDetailScreen() {
           )}
           {chat.queuedPrompts.length > 0 && (
             <View style={styles.queuedBar}>
-              {chat.queuedPrompts.map((q) => (
+              <Text style={[styles.queuedHeader, { color: colors.textSecondary }]}>
+                {chat.queuedPrompts.length} queued ·{' '}
+                {chat.isStreaming ? 'sends when this turn ends' : 'tap to send now'}
+              </Text>
+              {chat.queuedPrompts.map((q, index) => (
                 <View
                   key={q.id}
                   style={[
@@ -912,19 +926,32 @@ export default function SpriteDetailScreen() {
                     { borderColor: colors.border, backgroundColor: colors.backgroundElement },
                   ]}
                 >
+                  <Text style={[styles.queuedIndex, { color: colors.tint }]}>{index + 1}</Text>
                   <Pressable
                     style={styles.queuedChipBody}
-                    onPress={() => chat.sendQueuedNow(q.id)}
-                    disabled={chat.isStreaming}
+                    // Not `disabled` while streaming: that would also swallow the
+                    // long-press, which is the one action that matters mid-turn.
+                    onPress={() => {
+                      if (!chat.isStreaming) chat.sendQueuedNow(q.id);
+                    }}
+                    onLongPress={() => handleEditQueued(q.id, q.text)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Queued message: ${q.text}`}
+                    accessibilityHint="Tap to send now, long-press to move back into the composer"
                   >
                     <Text
                       style={[styles.queuedChipText, { color: colors.textSecondary }]}
                       numberOfLines={1}
                     >
-                      ⏳ {q.text}
+                      {q.text}
                     </Text>
                   </Pressable>
-                  <Pressable hitSlop={8} onPress={() => chat.removeQueuedPrompt(q.id)}>
+                  <Pressable
+                    hitSlop={8}
+                    onPress={() => chat.removeQueuedPrompt(q.id)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove queued message"
+                  >
                     <Text style={[styles.queuedChipRemove, { color: colors.textSecondary }]}>✕</Text>
                   </Pressable>
                 </View>
@@ -1459,6 +1486,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.lg,
     gap: Spacing.xs,
     marginBottom: Spacing.xs,
+  },
+  queuedHeader: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  queuedIndex: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+    minWidth: 10,
   },
   queuedChip: {
     flexDirection: 'row',

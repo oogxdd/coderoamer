@@ -45,24 +45,30 @@ export function ChatInputBar({
 }: ChatInputBarProps) {
   const colors = useTheme();
   const hasText = value.trim().length > 0;
-  const canSend = hasText && !disabled && !isStreaming;
-  const canDictate = Boolean(onToggleDictation && !disabled && !isStreaming && !isTranscribing);
+  // Sending during a turn is allowed: useChat queues the prompt and fires it
+  // when the turn completes, so a follow-up never interrupts the agent. Stopping
+  // is a separate button so the two can't be confused for each other.
+  const canSend = hasText && !disabled;
+  const willQueue = isStreaming && canSend;
+  const canDictate = Boolean(onToggleDictation && !disabled && !isTranscribing);
+  const showStop = isStreaming && !!onInterrupt;
 
   const handleAction = () => {
-    if (isStreaming) {
-      onInterrupt?.();
-    } else if (isDictating) {
+    if (isDictating) {
       onToggleDictation?.();
     } else if (canSend) {
       onSend();
-    } else if (!hasText && canDictate) {
+    } else if (canDictate) {
       onToggleDictation?.();
     }
   };
 
-  const actionDisabled = isTranscribing || (!isStreaming && !isDictating && !canSend && !canDictate);
-  const actionActive = isStreaming || isDictating || canSend;
-  const actionDestructive = isStreaming || isDictating;
+  const actionDisabled = isTranscribing || (!isDictating && !canSend && !canDictate);
+  const actionActive = isDictating || canSend;
+
+  const hint = dictationError ?? dictationStatus ?? (willQueue
+    ? `Queued — sends when ${providerDisplayName(provider)} finishes this turn`
+    : undefined);
 
   return (
     <View
@@ -71,7 +77,7 @@ export function ChatInputBar({
         { backgroundColor: colors.background, borderTopColor: colors.border },
       ]}
     >
-      {(dictationStatus || dictationError) && (
+      {hint && (
         <Pressable
           style={styles.feedback}
           onPress={dictationError ? onClearDictationError : undefined}
@@ -84,75 +90,95 @@ export function ChatInputBar({
             ]}
             numberOfLines={1}
           >
-            {dictationError ?? dictationStatus}
+            {hint}
           </Text>
         </Pressable>
       )}
 
-      <View
-        style={[
-          styles.composer,
-          { backgroundColor: colors.inputBackground, borderColor: colors.border },
-        ]}
-      >
-        <TextInput
-          style={[styles.input, { color: colors.text }]}
-          placeholder={
-            isDictating
-              ? 'Listening…'
-              : isStreaming
-                ? `${providerDisplayName(provider)} is working…`
-                : 'Message'
-          }
-          placeholderTextColor={colors.textSecondary}
-          value={value}
-          onChangeText={onChangeText}
-          multiline
-          maxLength={10000}
-          editable={!disabled}
-          returnKeyType="default"
-          blurOnSubmit={false}
-        />
+      <View style={styles.row}>
+        {showStop && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.stopButton,
+              {
+                borderColor: colors.destructive,
+                backgroundColor: pressed ? colors.destructive + '22' : 'transparent',
+              },
+            ]}
+            onPress={onInterrupt}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Stop response"
+          >
+            <View style={[styles.stopGlyph, { backgroundColor: colors.destructive }]} />
+          </Pressable>
+        )}
 
-        <Pressable
+        <View
           style={[
-            styles.actionButton,
-            {
-              backgroundColor: actionDestructive
-                ? colors.destructive
-                : actionActive
-                  ? colors.tint
-                  : colors.backgroundElement,
-            },
+            styles.composer,
+            { backgroundColor: colors.inputBackground, borderColor: colors.border },
           ]}
-          onPress={handleAction}
-          disabled={actionDisabled}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel={
-            isStreaming
-              ? 'Stop response'
-              : isDictating
-                ? 'Stop dictation'
-                : canSend
-                  ? 'Send message'
-                  : 'Start dictation'
-          }
         >
-          {isTranscribing ? (
-            <ActivityIndicator size="small" color={colors.textSecondary} />
-          ) : (
-            <Text
-              style={[
-                styles.actionText,
-                { color: actionActive ? '#FFFFFF' : colors.textSecondary },
-                actionDisabled && styles.disabled,
-              ]}
-            >
-              {isStreaming || isDictating ? '■' : canSend ? '↑' : 'Mic'}
-            </Text>
-          )}
-        </Pressable>
+          <TextInput
+            style={[styles.input, { color: colors.text }]}
+            placeholder={
+              isDictating
+                ? 'Listening…'
+                : isStreaming
+                  ? 'Reply — sends when the turn ends'
+                  : 'Message'
+            }
+            placeholderTextColor={colors.textSecondary}
+            value={value}
+            onChangeText={onChangeText}
+            multiline
+            maxLength={10000}
+            editable={!disabled}
+            returnKeyType="default"
+            blurOnSubmit={false}
+          />
+
+          <Pressable
+            style={[
+              styles.actionButton,
+              {
+                backgroundColor: isDictating
+                  ? colors.destructive
+                  : actionActive
+                    ? colors.tint
+                    : colors.backgroundElement,
+              },
+            ]}
+            onPress={handleAction}
+            disabled={actionDisabled}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={
+              isDictating
+                ? 'Stop dictation'
+                : willQueue
+                  ? 'Queue follow-up message'
+                  : canSend
+                    ? 'Send message'
+                    : 'Start dictation'
+            }
+          >
+            {isTranscribing ? (
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+            ) : (
+              <Text
+                style={[
+                  styles.actionText,
+                  { color: actionActive ? '#FFFFFF' : colors.textSecondary },
+                  actionDisabled && styles.disabled,
+                ]}
+              >
+                {isDictating ? '■' : canSend ? '↑' : 'Mic'}
+              </Text>
+            )}
+          </Pressable>
+        </View>
       </View>
     </View>
   );
@@ -173,7 +199,27 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     textAlign: 'center',
   },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: Spacing.sm,
+  },
+  stopButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 5,
+  },
+  stopGlyph: {
+    width: 11,
+    height: 11,
+    borderRadius: 2,
+  },
   composer: {
+    flex: 1,
     minHeight: 48,
     maxHeight: 140,
     borderRadius: 24,
