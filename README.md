@@ -175,6 +175,24 @@ Phone ──authenticated Exec WebSocket──▶ Sprite
 The open-source release will include a more detailed threat model and an auditable list of network
 destinations.
 
+## Build provenance
+
+The App Store build is not something you compile yourself, so "this app is open source" is only
+worth what you can check. Every release is built by GitHub Actions from a tagged commit, carries a
+Sigstore attestation signed by the workflow's own identity rather than by a maintainer, and ships
+with the JavaScript bundle that actually runs attached to the release:
+
+```bash
+gh release download v1.5.0 --repo oogxdd/coderoamer --pattern main.jsbundle
+gh attestation verify main.jsbundle --repo oogxdd/coderoamer
+```
+
+Settings → About in the app shows the version, build number, and the commit the build reports.
+
+What that does and does not prove — including the case it deliberately does not cover, and why iOS
+makes a fully reproducible build impossible — is spelled out in
+[`docs/PROVENANCE.md`](docs/PROVENANCE.md).
+
 ## How chat transport works
 
 Each turn runs as a fresh process over the Sprites **Exec WebSocket**, not as a supervised service:

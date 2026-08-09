@@ -17,22 +17,15 @@ git tag v1.5.0  →  GitHub Actions  →  EAS Build  →  TestFlight 1.5.0 (137)
 
 ## What this proves — and what it does not
 
-Be precise about the threat model, because the difference matters:
+Summarised: the checks below catch accidental drift, and the attestation catches a release
+published by hand claiming a commit it was not built from. They do **not** cover a maintainer who
+bypasses CI and submits a local build directly to Apple, and they do not let a user verify the copy
+already installed on their phone.
 
-| Against | Covered? |
-| --- | --- |
-| Shipping the wrong branch, a dirty tree, or an unpushed commit by accident | Yes. `EAS_BUILD_GIT_COMMIT_HASH` is set by the EAS worker, and the workflow refuses to publish when it disagrees with the tag. |
-| A release published by hand, claiming a commit it was not built from | Yes, detectably. A hand-made release cannot carry a Sigstore attestation from this workflow's identity, and `gh attestation verify` will say so. |
-| A maintainer who edits `app.config.js` to hardcode a SHA, builds locally, and submits via Transporter | **No.** Such a build would never appear in a workflow run, but nothing stops it reaching TestFlight — App Store submission is not gated on this repo. |
-| A user verifying the copy of the app on their own phone | **No.** iOS gives no way to extract and hash an installed app. The verifiable object is the artifact Apple received, not the one on the device. |
-
-So the honest statement to users is: *you are trusting GitHub, Expo, and Apple — but not the
-maintainer's laptop.* That is meaningfully stronger than an unsupported claim in a README, and
-meaningfully weaker than Signal's or Debian's reproducible builds, where a third party rebuilds
-from source and compares.
-
-To narrow the third row further, keep the App Store Connect API key only in EAS, so no local
-submission path exists at all.
+The full reasoning — the threat model, who can attest to what, the ladder from "trust me" to
+reproducible builds, and what would strengthen this further — is in
+[`PROVENANCE.md`](PROVENANCE.md). Read that before changing anything here, because most of these
+steps exist to support a specific claim made in that document.
 
 ## What the workflow enforces
 

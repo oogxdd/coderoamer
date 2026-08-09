@@ -72,6 +72,11 @@ node scripts/ws-proxy.js         # WS auth proxy for web (browsers can't auth WS
   `GITHUB_SHA`, or local git). Read it through `src/constants/build-info.ts`,
   never `Constants.expoConfig.extra` directly. Nothing in that config may vary
   per evaluation — it feeds the Expo fingerprint. See `docs/RELEASING.md`.
+- **Release claims are load-bearing.** `docs/PROVENANCE.md` makes specific
+  promises to users about what a released build proves; the workflow's commit
+  check, the Sigstore attestation, and the "Reported commit" wording in Settings
+  exist to keep those promises true. Do not weaken any of them — or the claims —
+  without updating that document in the same change.
 - **EAS versioning:** `eas.json` sets `cli.appVersionSource: "remote"` and
   `production.autoIncrement: true`. EAS bumps the **build number** automatically;
   bump `expo.version` in `app.json` only for a new marketing release. Don't also
