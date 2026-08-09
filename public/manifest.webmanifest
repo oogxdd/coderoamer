@@ -1,0 +1,28 @@
+{
+  "name": "CodeRoamer",
+  "short_name": "CodeRoamer",
+  "description": "Run and manage coding sessions from anywhere.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#024EF9",
+  "theme_color": "#024EF9",
+  "icons": [
+    {
+      "src": "/web-app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/web-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/web-app-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
