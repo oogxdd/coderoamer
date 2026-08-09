@@ -7,12 +7,13 @@ import { FontSize, Spacing } from '@/constants/theme';
 interface SpriteRowProps {
   sprite: Sprite;
   onPress: () => void;
-  isWaking?: boolean;
+  /** Long-press to delete, matching the conversation list. */
+  onLongPress?: () => void;
   /** Chats on this sprite with an agent turn currently running. */
   runningCount?: number;
 }
 
-export function SpriteRow({ sprite, onPress, isWaking, runningCount }: SpriteRowProps) {
+export function SpriteRow({ sprite, onPress, onLongPress, runningCount }: SpriteRowProps) {
   const colors = useTheme();
   const dotColor = statusColor(sprite.status);
 
@@ -24,6 +25,10 @@ export function SpriteRow({ sprite, onPress, isWaking, runningCount }: SpriteRow
         { borderBottomColor: colors.border },
       ]}
       onPress={onPress}
+      onLongPress={onLongPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${sprite.name}, ${statusDisplayName(sprite.status)}`}
+      accessibilityHint={onLongPress ? 'Long press to delete' : undefined}
     >
       <View style={styles.row}>
         <View style={styles.left}>
@@ -34,7 +39,7 @@ export function SpriteRow({ sprite, onPress, isWaking, runningCount }: SpriteRow
             </Text>
           </View>
           <Text style={[styles.status, { color: colors.textSecondary }]}>
-            {isWaking ? 'Waking...' : statusDisplayName(sprite.status)}
+            {statusDisplayName(sprite.status)}
             {runningCount ? (
               <Text style={{ color: colors.success }}>
                 {` · ${runningCount} agent ${runningCount === 1 ? 'run' : 'runs'}`}

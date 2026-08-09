@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,13 +10,11 @@ import {
   Alert,
   Modal,
 } from 'react-native';
-import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { router, useFocusEffect } from 'expo-router';
 import { Sprite } from '@/models/sprite';
 import * as api from '@/services/api';
 import { chatRepository } from '@/services/chat-repository';
 import { ensureProvisionedOnce } from '@/services/provision';
-import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { SpriteRow } from '@/components/dashboard/SpriteRow';
 import { CreateSpriteSheet } from '@/components/dashboard/CreateSpriteSheet';
@@ -24,18 +22,21 @@ import { FontSize, Spacing } from '@/constants/theme';
 
 export default function DashboardScreen() {
   const colors = useTheme();
-  const auth = useAuth();
   const [sprites, setSprites] = useState<Sprite[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  // First paint only. Pull-to-refresh and focus refreshes keep the list on
+  // screen instead of blanking it, so they track their own flag.
+  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
-  const [wakingSprites, setWakingSprites] = useState<Set<string>>(new Set());
   // Persisted "chat has an agent turn running" flags per sprite. Best-effort:
   // reconciled against live exec sessions when a sprite screen opens.
   const [runningBySprite, setRunningBySprite] = useState<Record<string, number>>({});
+  // One tap opens one screen. Without this, tapping several rows before the
+  // transition settles pushes a route per tap and they unwind one by one.
+  const navigatingRef = useRef(false);
 
   const loadSprites = useCallback(async () => {
-    setIsLoading(true);
     setError(undefined);
     try {
       const result = await api.listSprites();
@@ -53,12 +54,26 @@ export default function DashboardScreen() {
     } catch {
       // Non-fatal — badges just don't show.
     }
-    setIsLoading(false);
   }, []);
 
   useEffect(() => {
-    loadSprites();
+    loadSprites().finally(() => setIsFirstLoad(false));
   }, [loadSprites]);
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    await loadSprites();
+    setIsRefreshing(false);
+  }, [loadSprites]);
+
+  // Coming back from a sprite screen: release the navigation guard and quietly
+  // re-sync status and running-turn badges, which may have changed while away.
+  useFocusEffect(
+    useCallback(() => {
+      navigatingRef.current = false;
+      loadSprites();
+    }, [loadSprites])
+  );
 
   const handleCreate = async (name: string) => {
     await api.createSprite(name);
@@ -92,63 +107,82 @@ export default function DashboardScreen() {
     );
   };
 
-  const handlePress = async (sprite: Sprite) => {
-    if (sprite.status === 'cold') {
-      // Wake the sprite first
-      setWakingSprites((prev) => new Set(prev).add(sprite.name));
-      try {
-        await api.runExec(sprite.name, 'true', 60);
-        await loadSprites();
-      } catch {}
-      setWakingSprites((prev) => {
-        const next = new Set(prev);
-        next.delete(sprite.name);
-        return next;
-      });
-    }
+  // Navigate first, always. Waking a cold sprite is the destination screen's
+  // job — blocking the push on an exec made every cold tap feel dead and let
+  // taps pile up into a queue of route changes.
+  const handlePress = useCallback((sprite: Sprite) => {
+    if (navigatingRef.current) return;
+    navigatingRef.current = true;
     router.push(`/(app)/sprite/${sprite.name}`);
-  };
+  }, []);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.backgroundSecondary }]}>
       {error && (
         <View style={[styles.errorBanner, { backgroundColor: colors.destructive + '15' }]}>
           <Text style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>
+          <Pressable onPress={handleRefresh} hitSlop={8} accessibilityRole="button">
+            <Text style={[styles.errorAction, { color: colors.destructive }]}>Retry</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setError(undefined)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss error"
+          >
+            <Text style={[styles.errorAction, { color: colors.destructive }]}>✕</Text>
+          </Pressable>
         </View>
       )}
 
-      <FlatList
-        data={sprites}
-        renderItem={({ item }) => (
-          <SpriteRow
-            sprite={item}
-            onPress={() => handlePress(item)}
-            isWaking={wakingSprites.has(item.name)}
-            runningCount={runningBySprite[item.name] ?? 0}
-          />
-        )}
-        keyExtractor={(item) => item.id}
-        refreshControl={
-          <RefreshControl refreshing={isLoading} onRefresh={loadSprites} />
-        }
-        contentContainerStyle={sprites.length === 0 ? styles.emptyContainer : undefined}
-        ListEmptyComponent={
-          !isLoading ? (
+      {isFirstLoad ? (
+        <View style={styles.emptyView}>
+          <ActivityIndicator size="large" color={colors.tint} />
+        </View>
+      ) : (
+        <FlatList
+          data={sprites}
+          renderItem={({ item }) => (
+            <SpriteRow
+              sprite={item}
+              onPress={() => handlePress(item)}
+              onLongPress={() => handleDelete(item)}
+              runningCount={runningBySprite[item.name] ?? 0}
+            />
+          )}
+          keyExtractor={(item) => item.id}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              tintColor={colors.tint}
+            />
+          }
+          contentContainerStyle={sprites.length === 0 ? styles.emptyContainer : undefined}
+          ListEmptyComponent={
             <View style={styles.emptyView}>
               <Text style={[styles.emptyTitle, { color: colors.text }]}>No Sprites</Text>
               <Text style={[styles.emptySubtitle, { color: colors.textSecondary }]}>
                 Create a sprite to get started with Claude Code.
               </Text>
+              <Pressable
+                style={[styles.emptyButton, { backgroundColor: colors.tint }]}
+                onPress={() => setShowCreate(true)}
+              >
+                <Text style={styles.emptyButtonText}>Create Sprite</Text>
+              </Pressable>
             </View>
-          ) : null
-        }
-        ItemSeparatorComponent={() => null}
-      />
+          }
+          ItemSeparatorComponent={() => null}
+        />
+      )}
 
       {/* Floating create button */}
       <Pressable
         style={[styles.fab, { backgroundColor: colors.tint }]}
         onPress={() => setShowCreate(true)}
+        accessibilityRole="button"
+        accessibilityLabel="Create sprite"
       >
         <Text style={styles.fabText}>+</Text>
       </Pressable>
@@ -184,14 +218,21 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
     padding: Spacing.md,
     marginHorizontal: Spacing.lg,
     marginTop: Spacing.sm,
     borderRadius: 8,
   },
   errorText: {
+    flex: 1,
     fontSize: FontSize.sm,
-    textAlign: 'center',
+  },
+  errorAction: {
+    fontSize: FontSize.sm,
+    fontWeight: '700',
   },
   emptyContainer: {
     flex: 1,
@@ -210,6 +251,17 @@ const styles = StyleSheet.create({
   emptySubtitle: {
     fontSize: FontSize.md,
     textAlign: 'center',
+  },
+  emptyButton: {
+    marginTop: Spacing.xl,
+    paddingHorizontal: Spacing.xxl,
+    paddingVertical: Spacing.md,
+    borderRadius: 12,
+  },
+  emptyButtonText: {
+    color: '#FFFFFF',
+    fontSize: FontSize.md,
+    fontWeight: '600',
   },
   fab: {
     position: 'absolute',

@@ -125,6 +125,8 @@ export default function SpriteDetailScreen() {
   const [chatOpen, setChatOpen] = useState(false);
   const [sprite, setSprite] = useState<Sprite | null>(null);
   const [isLoadingSprite, setIsLoadingSprite] = useState(true);
+  // A cold sprite is woken by this screen, not by the list that linked here.
+  const [isWaking, setIsWaking] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
   // Multi-chat state
@@ -356,15 +358,32 @@ export default function SpriteDetailScreen() {
     return () => { mounted = false; };
   }, [spriteName, commitChatList]);
 
-  // Load sprite info
+  // Load sprite info, then wake it if it's cold.
+  //
+  // Waking happens here rather than on the dashboard on purpose: the tap that
+  // opens a sprite should change route immediately, and this screen is where
+  // the progress belongs. Doing it on the list blocked the push behind an exec,
+  // so taps queued up and routes arrived one after another.
   useEffect(() => {
     let mounted = true;
     (async () => {
+      let current: Sprite | null = null;
       try {
-        const s = await api.getSprite(spriteName);
-        if (mounted) setSprite(s);
+        current = await api.getSprite(spriteName);
+        if (mounted) setSprite(current);
       } catch {}
       if (mounted) setIsLoadingSprite(false);
+
+      if (!mounted || current?.status !== 'cold') return;
+      setIsWaking(true);
+      try {
+        await api.runExec(spriteName, 'true', 60);
+        const woken = await api.getSprite(spriteName);
+        if (mounted) setSprite(woken);
+      } catch {
+        // Non-fatal: the first chat turn wakes the sprite anyway.
+      }
+      if (mounted) setIsWaking(false);
     })();
     return () => { mounted = false; };
   }, [spriteName]);
@@ -875,13 +894,25 @@ export default function SpriteDetailScreen() {
               <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
                 {spriteName}
               </Text>
-              {sprite && (
+              {(sprite || isLoadingSprite) && (
                 <View style={styles.statusRow}>
-                  <View
-                    style={[styles.statusDot, { backgroundColor: statusColor(sprite.status) }]}
-                  />
+                  {isWaking || isLoadingSprite ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.textSecondary}
+                      style={styles.statusSpinner}
+                    />
+                  ) : (
+                    <View
+                      style={[styles.statusDot, { backgroundColor: statusColor(sprite!.status) }]}
+                    />
+                  )}
                   <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-                    {statusDisplayName(sprite.status)}
+                    {isWaking
+                      ? 'Waking…'
+                      : isLoadingSprite
+                        ? 'Loading…'
+                        : statusDisplayName(sprite!.status)}
                   </Text>
                 </View>
               )}
@@ -1520,11 +1551,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     marginTop: 2,
+    // Pinned so swapping the dot for a spinner can't resize the header.
+    height: 16,
   },
   statusDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
+  },
+  statusSpinner: {
+    transform: [{ scale: 0.6 }],
   },
   statusText: {
     fontSize: FontSize.xs,
