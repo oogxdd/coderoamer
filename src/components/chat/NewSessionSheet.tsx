@@ -193,8 +193,9 @@ export function NewSessionSheet({
             autoFocus={!locked}
           />
           <Text style={[styles.hint, { color: colors.textSecondary }]}>
-            The agent runs `cd` here before starting. Point it at the folder where you cloned
-            your repo. It&apos;s created if it doesn&apos;t exist.
+            The agent runs `cd` here before starting. Defaults to the sprite home
+            (<Text style={styles.mono}>/home/sprite</Text>); point it at the folder where you
+            cloned your repo. It&apos;s created if it doesn&apos;t exist.
           </Text>
 
           {!locked && (
@@ -366,6 +367,9 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     lineHeight: 17,
     marginTop: Spacing.sm,
+  },
+  mono: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   rememberRow: {
     flexDirection: 'row',

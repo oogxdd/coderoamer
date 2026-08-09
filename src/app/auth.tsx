@@ -11,15 +11,21 @@ import {
   Platform,
   SafeAreaView,
   Linking,
+  Modal,
 } from 'react-native';
 import { router } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
+import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '@/contexts/AuthContext';
 import * as api from '@/services/api';
 import * as github from '@/services/github';
 import { setSetting } from '@/services/storage';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
+import {
+  SpritesTokenHelpSheet,
+  SPRITES_ACCOUNT_URL,
+} from '@/components/auth/SpritesTokenHelpSheet';
 
 type AuthStep = 'sprites' | 'claude' | 'github';
 
@@ -31,6 +37,7 @@ export default function AuthScreen() {
   const [claudeToken, setClaudeToken] = useState('');
   const [isValidating, setIsValidating] = useState(false);
   const [error, setError] = useState<string>();
+  const [showTokenHelp, setShowTokenHelp] = useState(false);
 
   // GitHub device flow state
   const [githubUserCode, setGithubUserCode] = useState('');
@@ -65,6 +72,14 @@ export default function AuthScreen() {
       }
     }
     setIsValidating(false);
+  };
+
+  const openSpritesAccount = async () => {
+    try {
+      await WebBrowser.openBrowserAsync(SPRITES_ACCOUNT_URL);
+    } catch {
+      Linking.openURL(SPRITES_ACCOUNT_URL);
+    }
   };
 
   const handleClaudeToken = async () => {
@@ -204,7 +219,8 @@ export default function AuthScreen() {
                     Sprites API Token
                   </Text>
                   <Text style={[styles.description, { color: colors.textSecondary }]}>
-                    Get your token from sprites.dev/account or the Sprites CLI.
+                    Sprites signs in with your Fly.io account, but has no OAuth flow for apps —
+                    paste an API token from sprites.dev/account or the Sprites CLI.
                   </Text>
                   <TextInput
                     style={[
@@ -238,6 +254,20 @@ export default function AuthScreen() {
                       <Text style={styles.primaryButtonText}>Continue</Text>
                     )}
                   </Pressable>
+
+                  <View style={styles.helpRow}>
+                    <Pressable onPress={openSpritesAccount} hitSlop={8}>
+                      <Text style={[styles.helpLink, { color: colors.tint }]}>
+                        Open sprites.dev/account ↗
+                      </Text>
+                    </Pressable>
+                    <Text style={[styles.helpSeparator, { color: colors.border }]}>|</Text>
+                    <Pressable onPress={() => setShowTokenHelp(true)} hitSlop={8}>
+                      <Text style={[styles.helpLink, { color: colors.tint }]}>
+                        How do I get a token?
+                      </Text>
+                    </Pressable>
+                  </View>
                 </>
               )}
 
@@ -354,6 +384,10 @@ export default function AuthScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <Modal visible={showTokenHelp} animationType="slide" transparent>
+        <SpritesTokenHelpSheet onClose={() => setShowTokenHelp(false)} />
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -438,6 +472,21 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: FontSize.lg,
     fontWeight: '600',
+  },
+  helpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+    marginTop: Spacing.lg,
+  },
+  helpLink: {
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+  },
+  helpSeparator: {
+    fontSize: FontSize.sm,
   },
   skipButton: {
     alignItems: 'center',

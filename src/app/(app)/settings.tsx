@@ -707,8 +707,9 @@ export default function SettingsScreen() {
             autoCorrect={false}
           />
           <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
-            New chats `cd` here before launching the agent. Point it at the folder where you cloned
-            your repo (e.g. /home/sprite/my-repo).
+            New chats `cd` here before launching the agent. Defaults to the sprite home
+            (/home/sprite); point it at the folder where you cloned your repo (e.g.
+            /home/sprite/my-repo).
           </Text>
         </View>
       </View>

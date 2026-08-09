@@ -34,7 +34,7 @@ The prompt would be stored as a job with a unique turn id:
   "turnId": "turn_123",
   "chatId": "mobile-test-chat-1",
   "provider": "claude",
-  "cwd": "/home/sprite/project",
+  "cwd": "/home/sprite/your-repo",
   "claudeSessionId": "2e9e7a92-8192-472e-92bc-0e9095258bd1",
   "prompt": "Implement the requested fix",
   "state": "pending"

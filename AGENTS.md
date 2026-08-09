@@ -268,7 +268,7 @@ update this doc.**
 - **Working directory is locked per chat once a conversation starts.** Claude
   keys resumable history by cwd (`~/.claude/projects/<hashed-cwd>/`), so
   `--resume <id>` only works from the same path. Helpers in
-  `src/constants/session.ts`: `DEFAULT_WORKING_DIRECTORY = '/home/sprite/project'`,
+  `src/constants/session.ts`: `DEFAULT_WORKING_DIRECTORY = '/home/sprite'`,
   `normalizeWorkingDirectory`, `shortWorkingDirectory`. `~` expands to
   `/home/sprite` on the sprite — always use absolute paths in the app.
 - **`--dangerously-skip-permissions` (Claude) / `--dangerously-bypass-approvals-and-sandbox` (Codex)

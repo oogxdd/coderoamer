@@ -7,8 +7,13 @@
  * (`~/.claude/projects/<hashed-cwd>/`). Resuming a session therefore requires
  * launching from the *same* directory it was started in — which is why the
  * working directory is stored per chat and locked once a conversation begins.
+ *
+ * The default is the home directory itself: a fresh sprite has no `project`
+ * folder, so defaulting there created an empty directory the agent could not
+ * see any code from. Home is where repos get cloned, so it is the one path
+ * that is always meaningful before the user picks a repo.
  */
-export const DEFAULT_WORKING_DIRECTORY = '/home/sprite/project';
+export const DEFAULT_WORKING_DIRECTORY = '/home/sprite';
 
 /** Normalize a user-entered path: trim, drop trailing slashes (but keep root "/"). */
 export function normalizeWorkingDirectory(input: string): string {
