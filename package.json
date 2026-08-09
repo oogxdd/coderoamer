@@ -19,6 +19,7 @@
     "@shopify/react-native-skia": "^2.5.1",
     "canvaskit-wasm": "^0.40.0",
     "expo": "~55.0.6",
+    "expo-application": "~55.0.17",
     "expo-audio": "~55.0.15",
     "expo-clipboard": "^55.0.8",
     "expo-constants": "~55.0.7",

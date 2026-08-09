@@ -29,7 +29,7 @@ How to run the app on a simulator or a real iPhone, then build and publish to Te
   eas login
   ```
 
-The iOS bundle identifier is already set in `app.json` (`com.digital.spritesmanager`). Change it if
+The iOS bundle identifier is already set in `app.json` (`com.digital.coderoamer`). Change it if
 you don't own that identifier.
 
 ---
@@ -86,6 +86,11 @@ hot-reload via Fast Refresh.
 ## 4. Build for TestFlight with EAS
 
 `eas.json` in the repo already defines `development`, `preview`, and `production` profiles.
+
+> Store releases should not be built from a laptop. Push a `v*` tag and let
+> `.github/workflows/ios-testflight.yml` build, submit, and publish the release record — that is
+> what ties a TestFlight build to a public commit. See [`docs/RELEASING.md`](docs/RELEASING.md).
+> The commands below are for local experimentation.
 
 ### 4a. First-time project setup
 

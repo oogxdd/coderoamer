@@ -12,6 +12,8 @@ import {
   Platform,
 } from 'react-native';
 import { router } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
+import * as Clipboard from 'expo-clipboard';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
@@ -27,6 +29,14 @@ import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 import { CodexModelPicker } from '@/components/chat/CodexModelPicker';
 import { CodexModelOption, getCachedCodexModels } from '@/services/codex-models';
+import {
+  GIT_COMMIT,
+  GIT_DIRTY,
+  REPOSITORY_URL,
+  commitUrl,
+  shortCommit,
+  versionLabel,
+} from '@/constants/build-info';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
 type MaxTurns = 0 | 5 | 10 | 25 | 50;
@@ -70,6 +80,7 @@ export default function SettingsScreen() {
   const auth = useAuth();
 
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
+  const [copiedCommit, setCopiedCommit] = useState(false);
 
   // Claude Configuration
   const [defaultProvider, setDefaultProvider] = useState<AgentProvider>('claude');
@@ -362,6 +373,22 @@ export default function SettingsScreen() {
       ]
     );
   }, [auth]);
+
+  const handleOpenCommit = useCallback(async () => {
+    const url = commitUrl() ?? REPOSITORY_URL;
+    try {
+      await WebBrowser.openBrowserAsync(url);
+    } catch {
+      /* ignore — the SHA is also shown for manual lookup */
+    }
+  }, []);
+
+  const handleCopyCommit = useCallback(async () => {
+    if (!GIT_COMMIT) return;
+    await Clipboard.setStringAsync(GIT_COMMIT);
+    setCopiedCommit(true);
+    setTimeout(() => setCopiedCommit(false), 1500);
+  }, []);
 
   if (isLoadingSettings) {
     return (
@@ -984,6 +1011,42 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      {/* About / build provenance */}
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>ABOUT</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Version</Text>
+          <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+            {versionLabel()}
+          </Text>
+        </View>
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            styles.rowWithBorder,
+            { borderBottomColor: colors.border, opacity: pressed ? 0.7 : 1 },
+          ]}
+          onPress={handleOpenCommit}
+          onLongPress={handleCopyCommit}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Built from commit</Text>
+          <Text style={[styles.commitText, { color: colors.tint }]}>
+            {copiedCommit ? 'Copied' : (shortCommit() ?? 'unknown')}
+            {GIT_DIRTY ? '-dirty' : ''}
+          </Text>
+        </Pressable>
+        <View style={styles.textAreaContainer}>
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            {GIT_COMMIT
+              ? 'Tap to open this exact commit on GitHub, long-press to copy the full SHA. The ' +
+                'release notes for this version list the same commit and build number, so you can ' +
+                'check that the build you installed matches the published source.'
+              : 'This build was not made from a git checkout, so it cannot be traced to a commit. ' +
+                'Store and TestFlight builds always carry one.'}
+          </Text>
+        </View>
+      </View>
+
       <View style={styles.bottomSpacer} />
     </ScrollView>
   );
@@ -1099,6 +1162,10 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     lineHeight: 17,
     marginTop: Spacing.sm,
+  },
+  commitText: {
+    fontSize: FontSize.sm,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   inputRow: {
     flexDirection: 'row',

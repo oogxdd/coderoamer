@@ -64,11 +64,14 @@ node scripts/ws-proxy.js         # WS auth proxy for web (browsers can't auth WS
   UI and hooks are untested — verify those by running the app.
   `scripts/test-ws-server.js` is a *manual* dummy server for terminal
   development, not an automated test.
-- **Bundle identifier inconsistency in the repo:** `app.json` uses
-  `com.digital.spritespack` (both `ios.bundleIdentifier` and `android.package`),
-  but `README.md`/`DEPLOYMENT.md` reference `com.digital.spritesmanager`. Treat
-  `app.json` as the source of truth. Change the id in one place if you need to
-  rekey the app.
+- **Bundle identifier** is `com.digital.coderoamer` in `app.json` (both
+  `ios.bundleIdentifier` and `android.package`) — the source of truth. Change it
+  in that one place if you need to rekey the app.
+- **App config is dynamic.** `app.config.js` wraps `app.json` and stamps build
+  provenance into `extra.build` (commit SHA from `EAS_BUILD_GIT_COMMIT_HASH`,
+  `GITHUB_SHA`, or local git). Read it through `src/constants/build-info.ts`,
+  never `Constants.expoConfig.extra` directly. Nothing in that config may vary
+  per evaluation — it feeds the Expo fingerprint. See `docs/RELEASING.md`.
 - **EAS versioning:** `eas.json` sets `cli.appVersionSource: "remote"` and
   `production.autoIncrement: true`. EAS bumps the **build number** automatically;
   bump `expo.version` in `app.json` only for a new marketing release. Don't also
