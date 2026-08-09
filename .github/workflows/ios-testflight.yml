@@ -17,6 +17,12 @@ jobs:
     permissions:
       # Needed to publish the GitHub Release that records the build provenance.
       contents: write
+      # Sigstore signing identity for the build provenance attestation. This is
+      # what makes the release record something other than a self-assertion:
+      # the signature comes from GitHub's OIDC identity for this workflow, and a
+      # release published by hand cannot carry one.
+      id-token: write
+      attestations: write
     env:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       GH_TOKEN: ${{ github.token }}
@@ -102,21 +108,60 @@ jobs:
             exit 1
           }
 
+          ARCHIVE_URL="$(jq -r '.[0].artifacts.applicationArchiveUrl // empty' eas-build.json)"
+          [ -n "$ARCHIVE_URL" ] || {
+            echo "EAS build JSON carries no application archive URL." >&2
+            exit 1
+          }
+
           {
             echo "BUILD_ID=$BUILD_ID"
             echo "BUILD_NUMBER=$BUILD_NUMBER"
+            echo "ARCHIVE_URL=$ARCHIVE_URL"
           } >> "$GITHUB_ENV"
+
+      - name: Hash the artifact that was submitted
+        run: |
+          set -euo pipefail
+          curl -fsSL "$ARCHIVE_URL" -o app.ipa
+
+          # The JS bundle is the code that actually runs. Unlike the Mach-O
+          # binary it is a plain resource, so Apple neither re-signs nor
+          # FairPlay-encrypts it — it is the one part of the shipped app that
+          # can still be compared against a bundle built from the source.
+          BUNDLE_ENTRY="$(unzip -Z1 app.ipa 'Payload/*.app/*.jsbundle' | head -n 1)"
+          [ -n "$BUNDLE_ENTRY" ] || {
+            echo "No .jsbundle inside the IPA — cannot publish a bundle hash." >&2
+            exit 1
+          }
+          unzip -p app.ipa "$BUNDLE_ENTRY" > main.jsbundle
+
+          {
+            echo "IPA_SHA256=$(sha256sum app.ipa | cut -d ' ' -f 1)"
+            echo "BUNDLE_SHA256=$(sha256sum main.jsbundle | cut -d ' ' -f 1)"
+            echo "BUNDLE_ENTRY=$BUNDLE_ENTRY"
+          } >> "$GITHUB_ENV"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            app.ipa
+            main.jsbundle
 
       - name: Publish GitHub Release
         run: |
           set -euo pipefail
           COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/$GITHUB_SHA"
 
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
           cat > release-notes.md <<EOF
           ## iOS $APP_VERSION ($BUILD_NUMBER)
 
-          The TestFlight and App Store build labelled **$APP_VERSION ($BUILD_NUMBER)** was built
-          from commit [\`${GITHUB_SHA:0:7}\`]($COMMIT_URL).
+          The build labelled **$APP_VERSION ($BUILD_NUMBER)** in TestFlight and the App Store was
+          produced by [this workflow run]($RUN_URL) from commit
+          [\`${GITHUB_SHA:0:7}\`]($COMMIT_URL).
 
           | | |
           | --- | --- |
@@ -124,23 +169,40 @@ jobs:
           | Marketing version | \`$APP_VERSION\` |
           | iOS build number | \`$BUILD_NUMBER\` |
           | EAS build id | \`$BUILD_ID\` |
+          | Submitted IPA, SHA-256 | \`$IPA_SHA256\` |
+          | JS bundle, SHA-256 | \`$BUNDLE_SHA256\` |
           | Built at | \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\` |
 
-          ### Verifying the build you installed
+          ### Verifying this release
 
-          Open the app, go to **Settings → About**. It shows the same version, build
-          number, and commit; tapping the commit opens it on GitHub. If the three
-          values match this release, the binary on your device came from this source.
+          Both artifacts carry a [Sigstore](https://www.sigstore.dev/) attestation signed by
+          GitHub's identity for this workflow — not by the maintainer. A release published by
+          hand cannot carry one:
 
-          This is build provenance, not a bit-for-bit reproducible build — Apple
-          re-signs and re-encrypts the binary during processing, so the artifact you
-          download can never be byte-identical to a locally produced one.
+          \`\`\`
+          gh attestation verify main.jsbundle --repo ${{ github.repository }}
+          \`\`\`
+
+          \`main.jsbundle\` is attached below: it is the JavaScript that actually runs in the
+          shipped app, extracted from the IPA that was submitted to Apple. Apple re-signs and
+          encrypts the native binary, but leaves resources like this one untouched, so it is the
+          part of the app that can still be read and compared against the source at
+          \`${GITHUB_SHA:0:7}\`.
+
+          ### What this does not prove
+
+          This is provenance, not a reproducible build. You are trusting GitHub, Expo, and Apple
+          — but not the maintainer's laptop. Nothing here lets you verify the copy of the app on
+          your own device: iOS gives you no way to extract and hash it. What you can check is
+          that the artifact Apple received came from this public commit through this public
+          workflow run.
           EOF
 
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
-            --verify-tag
+            --verify-tag \
+            main.jsbundle
 
       - name: Job summary
         if: always()
@@ -151,4 +213,6 @@ jobs:
             echo "- Commit: \`$GITHUB_SHA\`"
             echo "- Version: \`${APP_VERSION:-unknown}\` (\`${BUILD_NUMBER:-unknown}\`)"
             echo "- EAS build: \`${BUILD_ID:-unknown}\`"
+            echo "- IPA SHA-256: \`${IPA_SHA256:-unknown}\`"
+            echo "- JS bundle SHA-256: \`${BUNDLE_SHA256:-unknown}\`"
           } >> "$GITHUB_STEP_SUMMARY"

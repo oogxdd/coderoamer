@@ -2,17 +2,37 @@
 
 The goal is not a bit-for-bit reproducible build — Apple re-signs and re-encrypts every binary it
 distributes, so an `.ipa` downloaded from TestFlight can never be byte-identical to one built
-locally. The goal is **provenance**: anyone holding a TestFlight or App Store build can establish,
-without trusting us, that it was produced from one specific public commit.
+locally. The goal is **provenance**: what Apple received came from one specific public commit,
+through a public workflow run, and the claim is signed by someone other than the maintainer.
 
 The chain is:
 
 ```
 git tag v1.5.0  →  GitHub Actions  →  EAS Build  →  TestFlight 1.5.0 (137)
                                           │
-                                          └── commit SHA recorded in three places:
-                                              the binary, the GitHub Release, the EAS build record
+                                          └── commit SHA recorded in: the binary, the GitHub
+                                              Release, the EAS build record, and a Sigstore
+                                              attestation signed by GitHub's workflow identity
 ```
+
+## What this proves — and what it does not
+
+Be precise about the threat model, because the difference matters:
+
+| Against | Covered? |
+| --- | --- |
+| Shipping the wrong branch, a dirty tree, or an unpushed commit by accident | Yes. `EAS_BUILD_GIT_COMMIT_HASH` is set by the EAS worker, and the workflow refuses to publish when it disagrees with the tag. |
+| A release published by hand, claiming a commit it was not built from | Yes, detectably. A hand-made release cannot carry a Sigstore attestation from this workflow's identity, and `gh attestation verify` will say so. |
+| A maintainer who edits `app.config.js` to hardcode a SHA, builds locally, and submits via Transporter | **No.** Such a build would never appear in a workflow run, but nothing stops it reaching TestFlight — App Store submission is not gated on this repo. |
+| A user verifying the copy of the app on their own phone | **No.** iOS gives no way to extract and hash an installed app. The verifiable object is the artifact Apple received, not the one on the device. |
+
+So the honest statement to users is: *you are trusting GitHub, Expo, and Apple — but not the
+maintainer's laptop.* That is meaningfully stronger than an unsupported claim in a README, and
+meaningfully weaker than Signal's or Debian's reproducible builds, where a third party rebuilds
+from source and compares.
+
+To narrow the third row further, keep the App Store Connect API key only in EAS, so no local
+submission path exists at all.
 
 ## What the workflow enforces
 
@@ -24,8 +44,27 @@ git tag v1.5.0  →  GitHub Actions  →  EAS Build  →  TestFlight 1.5.0 (137)
    makes the published claim true rather than merely intended;
 4. the build finished successfully.
 
-Only then does it publish a GitHub Release stating the commit, marketing version, iOS build
-number, and EAS build id.
+Only then does it download the exact artifact that was submitted to Apple, hash it, attest it, and
+publish a GitHub Release stating the commit, marketing version, iOS build number, EAS build id,
+and the SHA-256 of both the IPA and the JavaScript bundle inside it.
+
+## The two things a stranger can check
+
+**The attestation.** `actions/attest-build-provenance` signs a SLSA provenance statement through
+Sigstore, using the OIDC identity GitHub issues to this workflow. The maintainer cannot produce
+that signature by hand, and it lands in a public transparency log:
+
+```bash
+gh attestation verify main.jsbundle --repo oogxdd/coderoamer
+```
+
+**The JavaScript bundle.** `main.jsbundle` is attached to every release. It is the code that
+actually runs: Apple re-signs and FairPlay-encrypts the Mach-O binary, but leaves resources
+untouched, so the bundle that ships is the bundle in the release. Anyone can read it, diff it
+against the tagged source, or hash it and compare with the release notes.
+
+Do not promise that a locally produced bundle will hash identically — Metro output is not
+guaranteed byte-stable across environments. The bundle is auditable, not (yet) reproducible.
 
 ## The commit is inside the app
 
@@ -37,9 +76,13 @@ the working tree had uncommitted changes.
 `src/constants/build-info.ts` reads it back, and **Settings → About** shows:
 
 ```
-Version            1.5.0 (137)
-Built from commit  eac4631          ← tap to open on GitHub, long-press to copy
+Version          1.5.0 (137)
+Reported commit  eac4631          ← tap to open on GitHub, long-press to copy
+Release record   Open             ← the release, its attestation, and the bundle hash
 ```
+
+The row is labelled *reported* on purpose: the app is asserting where it came from, and an app
+cannot vouch for itself. The release record is where that assertion becomes checkable.
 
 The version and build number come from the native binary (`expo-application`), not from the JS
 bundle, so they are exactly the values TestFlight shows.
@@ -47,10 +90,13 @@ bundle, so they are exactly the values TestFlight shows.
 ## How a user verifies a build
 
 1. Open Settings → About in the installed app; note version, build number, commit.
-2. Open the GitHub Release for that version. It lists the same three values.
-3. Tap the commit to read the source that produced the binary.
+2. Open the release for that version. The version and build number must match what TestFlight
+   shows, and the commit must match the About screen.
+3. Run `gh attestation verify main.jsbundle --repo oogxdd/coderoamer` on the attached bundle. This
+   is the step that does not rely on the maintainer's word.
+4. Read the bundle, or the source at that commit, and judge for yourself.
 
-If any of the three disagree, the build did not come from that commit.
+Steps 1–2 catch mistakes. Step 3 is what catches a fabricated release.
 
 ## One-time setup
 
@@ -61,8 +107,12 @@ If any of the three disagree, the build did not come from that commit.
 3. **iOS credentials in EAS** for bundle id `com.digital.coderoamer`: distribution certificate and
    App Store provisioning profile. EAS-managed credentials are the simplest option.
 4. **EAS Submit** — store an App Store Connect API key in EAS for the `production` submit profile.
-   `eas.json` already carries `ascAppId`.
+   `eas.json` already carries `ascAppId`. Keep that key *only* in EAS: every local copy is another
+   way for a build that no workflow ever saw to reach TestFlight.
 5. **App Store Connect record** for `com.digital.coderoamer`, with TestFlight enabled.
+
+Nothing else is needed for the attestation — it uses the workflow's own OIDC identity, so there is
+no signing key to manage or rotate.
 
 ## Cutting a release
 

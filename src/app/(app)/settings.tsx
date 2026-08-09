@@ -34,6 +34,7 @@ import {
   GIT_DIRTY,
   REPOSITORY_URL,
   commitUrl,
+  releaseUrl,
   shortCommit,
   versionLabel,
 } from '@/constants/build-info';
@@ -380,6 +381,14 @@ export default function SettingsScreen() {
       await WebBrowser.openBrowserAsync(url);
     } catch {
       /* ignore — the SHA is also shown for manual lookup */
+    }
+  }, []);
+
+  const handleOpenRelease = useCallback(async () => {
+    try {
+      await WebBrowser.openBrowserAsync(releaseUrl());
+    } catch {
+      /* ignore — the release is also reachable from the repo page */
     }
   }, []);
 
@@ -1029,18 +1038,30 @@ export default function SettingsScreen() {
           onPress={handleOpenCommit}
           onLongPress={handleCopyCommit}
         >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Built from commit</Text>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Reported commit</Text>
           <Text style={[styles.commitText, { color: colors.tint }]}>
             {copiedCommit ? 'Copied' : (shortCommit() ?? 'unknown')}
             {GIT_DIRTY ? '-dirty' : ''}
           </Text>
         </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            styles.rowWithBorder,
+            { borderBottomColor: colors.border, opacity: pressed ? 0.7 : 1 },
+          ]}
+          onPress={handleOpenRelease}
+        >
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Release record</Text>
+          <Text style={[styles.statusText, { color: colors.tint }]}>Open</Text>
+        </Pressable>
         <View style={styles.textAreaContainer}>
           <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
             {GIT_COMMIT
-              ? 'Tap to open this exact commit on GitHub, long-press to copy the full SHA. The ' +
-                'release notes for this version list the same commit and build number, so you can ' +
-                'check that the build you installed matches the published source.'
+              ? 'The commit this build says it came from — tap to open it on GitHub, long-press ' +
+                'to copy the full SHA. To check the claim rather than take it, open the release ' +
+                'for this version: it carries a Sigstore attestation signed by GitHub, plus the ' +
+                'hash of the JavaScript bundle that shipped.'
               : 'This build was not made from a git checkout, so it cannot be traced to a commit. ' +
                 'Store and TestFlight builds always carry one.'}
           </Text>
