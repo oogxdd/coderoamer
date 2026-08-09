@@ -21,7 +21,7 @@ import {
   ChatMessage,
   effortDisplayName,
   isCodexProvider,
-  normalizeAgentEffort,
+  normalizeAgentEffortForProvider,
   providerDisplayName,
   toolUseActivityLabel,
 } from '@/models/chat';
@@ -293,9 +293,11 @@ export default function SpriteDetailScreen() {
       const defaults: AgentDefaults = {
         provider: normalizeProvider(savedDefaultProvider),
         claudeModel: savedClaudeModel?.trim() || 'sonnet',
-        claudeEffort: normalizeAgentEffort(savedClaudeEffort) ?? 'high',
+        claudeEffort:
+          normalizeAgentEffortForProvider('claude', savedClaudeEffort) ?? 'high',
         codexModel: savedCodexModel?.trim() || '',
-        codexEffort: normalizeAgentEffort(savedCodexEffort) ?? 'high',
+        codexEffort:
+          normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high',
       };
       setAgentDefaults(defaults);
 
@@ -1030,6 +1032,7 @@ export default function SpriteDetailScreen() {
       {/* New Session / Edit Directory Sheet */}
       {sessionSheetMode && (
         <NewSessionSheet
+          spriteName={spriteName}
           title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
           confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
           defaultDirectory={

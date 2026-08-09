@@ -2,9 +2,32 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { loadToken } from '@/services/auth';
 import { LocalAudioFile } from '@/services/audio-transcription';
+import { base64ToBytes } from '@/services/base64';
 
+/** Providers that transcribe a finished recording by uploading it. */
 export type CloudTranscriptionProvider = 'assemblyai' | 'openai';
-export type TranscriptionProvider = 'sprite' | CloudTranscriptionProvider;
+/**
+ * `assemblyai-streaming` is not in `CloudTranscriptionProvider`: it never
+ * uploads a file, so it has no place in the record-then-transcribe paths. It is
+ * a live-dictation provider only (`streaming-dictation.ts`).
+ */
+export type TranscriptionProvider =
+  | 'sprite'
+  | CloudTranscriptionProvider
+  | 'assemblyai-streaming';
+
+/**
+ * Which upload-based provider handles a finished recording or a picked file.
+ *
+ * Streaming has no file mode, and feeding a file through the realtime socket
+ * would be slower and less accurate than the batch API, so it maps to plain
+ * AssemblyAI — the same key, the same account.
+ */
+export function batchProviderFor(
+  provider: TranscriptionProvider
+): 'sprite' | CloudTranscriptionProvider {
+  return provider === 'assemblyai-streaming' ? 'assemblyai' : provider;
+}
 
 const ASSEMBLYAI_BASE_URL = 'https://api.assemblyai.com/v2';
 const OPENAI_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
@@ -14,27 +37,6 @@ function safeFileName(value: string | null | undefined, fallbackExt = 'm4a'): st
   const fallback = `dictation-${Date.now().toString(36)}.${fallbackExt}`;
   const name = (value || fallback).split('/').pop() || fallback;
   return name.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120) || fallback;
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const bytes: number[] = [];
-  let buffer = 0;
-  let bits = 0;
-
-  for (const char of base64.replace(/\s/g, '')) {
-    if (char === '=') break;
-    const value = chars.indexOf(char);
-    if (value === -1) continue;
-    buffer = (buffer << 6) | value;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((buffer >> bits) & 0xff);
-    }
-  }
-
-  return new Uint8Array(bytes);
 }
 
 async function readLocalAudioBytes(audio: LocalAudioFile): Promise<Uint8Array> {

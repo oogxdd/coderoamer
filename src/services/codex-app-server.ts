@@ -163,7 +163,6 @@ export async function streamCodexAppServerTurn(options: CodexAppServerTurnOption
       sendRequest('thread/resume', {
         threadId: activeThreadId,
         ...makeThreadParams(options.workingDirectory, options.model),
-        excludeTurns: true,
       });
     } else {
       sendRequest('thread/start', makeThreadParams(options.workingDirectory, options.model));

@@ -57,8 +57,12 @@ export default function AuthScreen() {
       await auth.saveSpritesToken(trimmed);
       await api.validateToken();
       setStep('claude');
-    } catch {
-      setError('Invalid Sprites token. Please check and try again.');
+    } catch (err: any) {
+      if (err?.code === 'unauthorized') {
+        setError('Invalid Sprites token. Please check and try again.');
+      } else {
+        setError(`Could not validate Sprites token: ${err?.message ?? 'Unknown error'}`);
+      }
     }
     setIsValidating(false);
   };

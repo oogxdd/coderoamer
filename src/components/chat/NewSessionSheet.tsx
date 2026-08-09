@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -17,10 +17,18 @@ import {
   AgentProvider,
   effortDisplayName,
   isCodexProvider,
+  normalizeAgentEffortForProvider,
   providerDisplayName,
 } from '@/models/chat';
 import { normalizeWorkingDirectory } from '@/constants/session';
 import { setSetting } from '@/services/storage';
+import {
+  cacheCodexModels,
+  CodexModelOption,
+  getCachedCodexModels,
+  listCodexModels,
+} from '@/services/codex-models';
+import { CodexModelPicker } from './CodexModelPicker';
 
 export interface NewSessionConfig {
   workingDirectory: string;
@@ -30,6 +38,7 @@ export interface NewSessionConfig {
 }
 
 interface NewSessionSheetProps {
+  spriteName: string;
   title?: string;
   confirmLabel?: string;
   defaultDirectory: string;
@@ -50,9 +59,10 @@ interface NewSessionSheetProps {
 const PROVIDERS: AgentProvider[] = ['claude', 'codexAppServer', 'codex'];
 const CLAUDE_MODELS = ['sonnet', 'opus', 'haiku'] as const;
 const CLAUDE_EFFORTS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const CODEX_EFFORTS: AgentEffort[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+const CODEX_EFFORTS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
 
 export function NewSessionSheet({
+  spriteName,
   title = 'New Session',
   confirmLabel = 'Start Session',
   defaultDirectory,
@@ -72,8 +82,37 @@ export function NewSessionSheet({
   const [directory, setDirectory] = useState(defaultDirectory);
   const [provider, setProvider] = useState<AgentProvider>(defaultProvider);
   const [model, setModel] = useState(defaultModel);
-  const [effort, setEffort] = useState<AgentEffort>(defaultEffort);
+  const [effort, setEffort] = useState<AgentEffort>(
+    normalizeAgentEffortForProvider(defaultProvider, defaultEffort) ?? 'high'
+  );
   const [rememberDirectory, setRememberDirectory] = useState(false);
+  const [codexModels, setCodexModels] = useState<CodexModelOption[]>([]);
+  const [loadingCodexModels, setLoadingCodexModels] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    void getCachedCodexModels().then((cached) => {
+      if (active && cached.length > 0) setCodexModels(cached);
+    });
+    setLoadingCodexModels(true);
+    void listCodexModels(spriteName, controller.signal)
+      .then((models) => {
+        if (!active || models.length === 0) return;
+        setCodexModels(models);
+        return cacheCodexModels(models);
+      })
+      .catch(() => {
+        // The default/custom choices remain usable when a sprite is offline.
+      })
+      .finally(() => {
+        if (active) setLoadingCodexModels(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [spriteName]);
 
   const handleCreate = async () => {
     if (locked) {
@@ -91,14 +130,30 @@ export function NewSessionSheet({
     setProvider(nextProvider);
     if (isCodexProvider(nextProvider)) {
       setModel(defaultCodexModel);
-      setEffort(defaultCodexEffort);
+      setEffort(normalizeAgentEffortForProvider(nextProvider, defaultCodexEffort) ?? 'high');
     } else {
       setModel(defaultClaudeModel);
-      setEffort(defaultClaudeEffort);
+      setEffort(normalizeAgentEffortForProvider(nextProvider, defaultClaudeEffort) ?? 'high');
     }
   };
 
   const effortOptions = isCodexProvider(provider) ? CODEX_EFFORTS : CLAUDE_EFFORTS;
+  const selectedCodexModel = codexModels.find((option) => option.model === model);
+  const visibleEffortOptions =
+    isCodexProvider(provider) && selectedCodexModel?.supportedReasoningEfforts.length
+      ? selectedCodexModel.supportedReasoningEfforts
+      : effortOptions;
+
+  const handleCodexModelChange = (nextModel: string) => {
+    setModel(nextModel);
+    const option = codexModels.find((candidate) => candidate.model === nextModel);
+    if (
+      option?.supportedReasoningEfforts.length &&
+      !option.supportedReasoningEfforts.includes(effort)
+    ) {
+      setEffort(option.defaultReasoningEffort ?? option.supportedReasoningEfforts[0]);
+    }
+  };
 
   return (
     <KeyboardAvoidingView
@@ -185,22 +240,12 @@ export function NewSessionSheet({
 
           <Text style={[styles.label, { color: colors.textSecondary }]}>Model</Text>
           {isCodexProvider(provider) ? (
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  color: colors.text,
-                  backgroundColor: colors.inputBackground,
-                  borderColor: colors.border,
-                },
-              ]}
+            <CodexModelPicker
+              models={codexModels}
               value={model}
-              onChangeText={setModel}
-              editable={!locked}
-              placeholder="Codex default"
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
+              onChange={handleCodexModelChange}
+              loading={loadingCodexModels}
+              disabled={locked}
             />
           ) : (
             <View style={[styles.segmented, { backgroundColor: colors.backgroundElement }]}>
@@ -229,7 +274,7 @@ export function NewSessionSheet({
 
           <Text style={[styles.label, { color: colors.textSecondary }]}>Effort</Text>
           <View style={styles.effortGrid}>
-            {effortOptions.map((option) => (
+            {visibleEffortOptions.map((option) => (
               <Pressable
                 key={option}
                 style={[

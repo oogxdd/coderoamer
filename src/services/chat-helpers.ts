@@ -300,6 +300,7 @@ export function codexEventDebugLabel(event: CodexStreamEvent): string {
     case 'unknown':
       return [
         'unknown',
+        event.rpcMethod ? `rpc=${event.rpcMethod}` : undefined,
         event.rawType ? `raw=${event.rawType}` : undefined,
         event.itemType ? `item=${event.itemType}` : undefined,
         event.keys?.length ? `keys=${event.keys.join('|')}` : undefined,
@@ -308,10 +309,16 @@ export function codexEventDebugLabel(event: CodexStreamEvent): string {
       return `assistantDelta chars=${event.text.length}`;
     case 'reasoning':
       return `reasoning chars=${event.text.length}`;
+    case 'reasoningBoundary':
+      return 'reasoningBoundary';
     case 'commandBegin':
       return `commandBegin id=${event.commandId}`;
+    case 'commandOutput':
+      return `commandOutput id=${event.commandId} chars=${event.delta.length}`;
     case 'commandEnd':
       return `commandEnd id=${event.commandId} exit=${event.exitCode ?? '?'}`;
+    case 'fileChangeBegin':
+      return `fileChangeBegin files=${event.files.length}`;
     case 'fileChange':
       return `fileChange files=${event.files.length}`;
     case 'mcpToolBegin':
@@ -320,6 +327,10 @@ export function codexEventDebugLabel(event: CodexStreamEvent): string {
       return `mcpToolEnd tool=${event.server ? `${event.server}.` : ''}${event.tool} error=${event.isError}`;
     case 'todoList':
       return `todoList items=${event.items.length}`;
+    case 'activity':
+      return `activity name=${event.name} completed=${event.completed}`;
+    case 'turnCompleted':
+      return `turnCompleted status=${event.status}`;
     default:
       return event.type;
   }

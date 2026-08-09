@@ -3,6 +3,9 @@ const path = require('path');
 
 const config = getDefaultConfig(__dirname);
 
+// expo-sqlite's web worker imports its SQLite runtime as a WebAssembly asset.
+config.resolver.assetExts.push('wasm');
+
 config.resolver.extraNodeModules = {
   ...(config.resolver.extraNodeModules || {}),
   punycode: require.resolve('punycode/'),
