@@ -76,6 +76,11 @@ jobs:
       - name: Build and submit with EAS
         run: |
           set -euo pipefail
+          # No --what-to-test: EAS forwards it as the submission's `changelog`
+          # field, and Apple/Expo reject that on anything but an Enterprise
+          # plan ("Changelog submission is currently available for Enterprise
+          # plan only"). The commit and run are recorded in the GitHub Release
+          # notes instead; testers can read those.
           npx eas-cli@latest build \
             --platform ios \
             --profile production \
@@ -84,7 +89,6 @@ jobs:
             --non-interactive \
             --json \
             --message "$GITHUB_REF_NAME ($GITHUB_SHA)" \
-            --what-to-test "Built from commit ${GITHUB_SHA:0:7} — ${{ github.server_url }}/${{ github.repository }}/commit/$GITHUB_SHA" \
             > eas-build.json
 
       - name: Read build metadata
