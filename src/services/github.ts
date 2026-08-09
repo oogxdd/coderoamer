@@ -1,6 +1,5 @@
 import { loadToken } from './auth';
-
-const GITHUB_CLIENT_ID = 'Ov23liGMdVFTOcT0FSXY';
+import { GITHUB_CLIENT_ID, GITHUB_DEVICE_SCOPE } from '@/constants/github';
 
 // Device Flow
 
@@ -19,10 +18,7 @@ export async function requestDeviceCode(): Promise<DeviceCodeResponse> {
       Accept: 'application/json',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      scope: 'repo user:email read:org',
-    }),
+    body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: GITHUB_DEVICE_SCOPE }),
   });
 
   if (!response.ok) {
