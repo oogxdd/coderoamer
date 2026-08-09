@@ -20,6 +20,7 @@ import * as github from '@/services/github';
 import { setSetting } from '@/services/storage';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
+import { ENABLE_GLOBAL_PROVIDER_AUTH } from '@/constants/features';
 
 type AuthStep = 'sprites' | 'claude' | 'github';
 
@@ -56,7 +57,11 @@ export default function AuthScreen() {
     try {
       await auth.saveSpritesToken(trimmed);
       await api.validateToken();
-      setStep('claude');
+      if (ENABLE_GLOBAL_PROVIDER_AUTH) {
+        setStep('claude');
+      } else {
+        router.replace('/(app)');
+      }
     } catch (err: any) {
       if (err?.code === 'unauthorized') {
         setError('Invalid Sprites token. Please check and try again.');
@@ -149,11 +154,13 @@ export default function AuthScreen() {
 
   const stepNumber = step === 'sprites' ? 1 : step === 'claude' ? 2 : 3;
 
-  const steps = [
-    { num: 1, label: 'Sprites' },
-    { num: 2, label: 'Claude' },
-    { num: 3, label: 'GitHub' },
-  ];
+  const steps = ENABLE_GLOBAL_PROVIDER_AUTH
+    ? [
+        { num: 1, label: 'Sprites' },
+        { num: 2, label: 'Claude' },
+        { num: 3, label: 'GitHub' },
+      ]
+    : [{ num: 1, label: 'Sprites' }];
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.backgroundSecondary }]}>
@@ -241,7 +248,7 @@ export default function AuthScreen() {
                 </>
               )}
 
-              {step === 'claude' && (
+              {ENABLE_GLOBAL_PROVIDER_AUTH && step === 'claude' && (
                 <>
                   <Text style={[styles.sectionTitle, { color: colors.text }]}>
                     Claude Code OAuth Token
@@ -281,7 +288,7 @@ export default function AuthScreen() {
                 </>
               )}
 
-              {step === 'github' && (
+              {ENABLE_GLOBAL_PROVIDER_AUTH && step === 'github' && (
                 <>
                   <Text style={[styles.sectionTitle, { color: colors.text }]}>
                     GitHub (Optional)

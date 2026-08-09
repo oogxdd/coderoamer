@@ -256,7 +256,8 @@ export default function SpriteDetailScreen() {
   });
   const isProviderLocked = chat.messages.some((message) => message.role === 'user');
 
-  // Initialize chat list and current chat on mount
+  // Load existing chats and current defaults on mount. An empty Sprite stays
+  // empty until the user explicitly starts or resumes a conversation.
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -319,28 +320,12 @@ export default function SpriteDetailScreen() {
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
         const defaultProvider = defaults.provider;
-        // Create the first chat
-        const firstChat: PersistedChat = {
-          id: `${spriteName}-chat-1`,
-          spriteName,
-          chatNumber: 1,
-          provider: defaultProvider,
-          model: defaultModelFor(defaultProvider, defaults),
-          effort: defaultEffortFor(defaultProvider, defaults),
-          workingDirectory: fallbackDir,
-          createdAt: Date.now(),
-          lastUsed: Date.now(),
-          isClosed: false,
-          lastSessionComplete: true,
-          processedEventUUIDs: [],
-        };
-        commitChatList([firstChat]);
-        await chatRepository.upsert(firstChat);
-        setChatId(firstChat.id);
+        commitChatList([]);
+        setChatId('');
         setChatName('Session 1');
         setChatProvider(defaultProvider);
-        setChatModel(firstChat.model ?? 'sonnet');
-        setChatEffort(firstChat.effort ?? 'high');
+        setChatModel(defaultModelFor(defaultProvider, defaults));
+        setChatEffort(defaultEffortFor(defaultProvider, defaults));
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
         setActiveRun(undefined);
@@ -740,6 +725,16 @@ export default function SpriteDetailScreen() {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
   }, [chat.setInputText]);
 
+  const handleBack = useCallback(() => {
+    if (chatOpen) {
+      setChatOpen(false);
+      return;
+    }
+    // A directly opened web route can have no Expo Router history, making
+    // router.back() a no-op. A sprite's parent screen is always Dashboard.
+    router.replace('/(app)');
+  }, [chatOpen]);
+
   // Active tool label for the chat view
   const activeToolLabel = chat.isStreaming
     ? getActiveToolLabel(chat.messages, workingDirectory)
@@ -756,7 +751,7 @@ export default function SpriteDetailScreen() {
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
-        <Pressable onPress={() => (chatOpen ? setChatOpen(false) : router.back())} hitSlop={12}>
+        <Pressable onPress={handleBack} hitSlop={12}>
           <Text style={[styles.backButton, { color: colors.tint }]}>
             &#x2039; {chatOpen ? 'Chats' : 'Back'}
           </Text>

@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { GITHUB_CLIENT_ID, GITHUB_DEVICE_SCOPE } from '@/constants/github';
 import { loadToken } from './auth';
 import { runExec } from './api';
 
@@ -144,6 +145,30 @@ export function stripAnsi(input: string): string {
   return input.replace(ANSI_RE, '');
 }
 
+const CLAUDE_OAUTH_TOKEN_RE = /sk-ant-oat01-[A-Za-z0-9_-]+/;
+
+export function containsClaudeOAuthToken(input: string): boolean {
+  return CLAUDE_OAUTH_TOKEN_RE.test(stripAnsi(input));
+}
+
+export function sanitizedLoginOutput(input: string, secrets: string[] = []): string {
+  let text = stripAnsi(input);
+  for (const secret of secrets) {
+    if (secret) text = text.split(secret).join('[submitted code]');
+  }
+  const lines = text
+    .replace(/sk-ant-[A-Za-z0-9_-]+/gi, '[redacted token]')
+    .replace(/https?:\/\/[^\s\x00-\x1f"'<>]+/gi, '[authorization URL]')
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted value]')
+    .replace(/\r(?!\n)/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line, index, all) => index === 0 || line !== all[index - 1]);
+  return lines.slice(-16).join('\n');
+}
+
 export interface LoginPrompt {
   /** URL the user should open to authorize. */
   url?: string;
@@ -151,7 +176,8 @@ export interface LoginPrompt {
   code?: string;
 }
 
-const CODE_RE = /\b[A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7}\b/i;
+const CODE_RE =
+  /\b([A-Z0-9](?:\s*[A-Z0-9]){3})\s*-\s*([A-Z0-9](?:\s*[A-Z0-9]){3,6})\b/i;
 // Base64url + URL-safe characters, so the trailing spinner glyph Claude glues on
 // (e.g. `…state=abc\✢`) is excluded from the captured URL.
 const CLAUDE_URL_RE =
@@ -164,10 +190,11 @@ function trimUrl(url: string | undefined): string | undefined {
 
 function deviceCode(text: string): string | undefined {
   const labelled =
-    /(?:one-time|device)\s+code(?:\s+\([^)]*\))?\s*:?\s*([A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7})/i.exec(
+    /(?:one-time|device)\s+code(?:\s+\([^)]*\))?\s*:?\s*([A-Z0-9](?:\s*[A-Z0-9]){3}\s*-\s*[A-Z0-9](?:\s*[A-Z0-9]){3,6})/i.exec(
       text
     )?.[1];
-  const raw = labelled ?? CODE_RE.exec(text)?.[0];
+  const match = CODE_RE.exec(text);
+  const raw = labelled ?? (match ? `${match[1]}-${match[2]}` : undefined);
   return raw?.replace(/\s/g, '').toUpperCase();
 }
 
@@ -189,10 +216,12 @@ export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
 
   if (id === 'github') {
     const code =
-      /one-time code:\s*([A-Z0-9]{4}\s*-\s*[A-Z0-9]{4,7})/i.exec(text)?.[1]
+      /one-time code:\s*([A-Z0-9](?:\s*[A-Z0-9]){3}\s*-\s*[A-Z0-9](?:\s*[A-Z0-9]){3,6})/i
+        .exec(text)?.[1]
         ?.replace(/\s/g, '')
         .toUpperCase() ?? deviceCode(text);
-    return { url: 'https://github.com/login/device', code };
+    // Do not advance to the browser step until the code is actually visible.
+    return { url: code ? 'https://github.com/login/device' : undefined, code };
   }
 
   if (id === 'vercel') {
@@ -225,6 +254,96 @@ interface ProviderLoginSpec {
   cols: number;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildGithubDeviceScript(): string {
+  return [
+    `const fs = require("fs")`,
+    `const os = require("os")`,
+    `const path = require("path")`,
+    `const { spawnSync } = require("child_process")`,
+    `const clientId = ${JSON.stringify(GITHUB_CLIENT_ID)}`,
+    `const scope = ${JSON.stringify(GITHUB_DEVICE_SCOPE)}`,
+    `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))`,
+    `async function post(url, body) {`,
+    `  const response = await fetch(url, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) })`,
+    `  const data = await response.json()`,
+    `  if (!response.ok) throw new Error(data.error_description || data.error || "GitHub request failed")`,
+    `  return data`,
+    `}`,
+    `function read(file) { try { return fs.readFileSync(file, "utf8") } catch { return "" } }`,
+    `function writePrivate(file, contents) {`,
+    `  fs.mkdirSync(path.dirname(file), { recursive: true })`,
+    `  const temp = file + ".coderoamer-" + process.pid`,
+    `  fs.writeFileSync(temp, contents, { mode: 0o600 })`,
+    `  fs.renameSync(temp, file)`,
+    `}`,
+    `async function main() {`,
+    `  const device = await post("https://github.com/login/device/code", { client_id: clientId, scope })`,
+    `  console.log("First copy your one-time code: " + device.user_code)`,
+    `  console.log("Open " + device.verification_uri + " in your browser")`,
+    `  let interval = Number(device.interval || 5)`,
+    `  const deadline = Date.now() + Number(device.expires_in || 900) * 1000`,
+    `  while (Date.now() < deadline) {`,
+    `    await sleep(interval * 1000)`,
+    `    const result = await post("https://github.com/login/oauth/access_token", { client_id: clientId, device_code: device.device_code, grant_type: "urn:ietf:params:oauth:grant-type:device_code" })`,
+    `    if (result.access_token) {`,
+    `      const token = String(result.access_token)`,
+    `      if (!/^(?:gho_|ghu_|ghp_|github_pat_)[A-Za-z0-9_]+$/.test(token)) throw new Error("GitHub returned an unsupported token")`,
+    `      const home = os.homedir()`,
+    `      const envFile = path.join(home, ".sprite_env")`,
+    `      const envLines = read(envFile).split("\\n").filter((line) => line && !line.startsWith("export GH_TOKEN="))`,
+    `      envLines.push("export GH_TOKEN='" + token + "'")`,
+    `      writePrivate(envFile, envLines.join("\\n") + "\\n")`,
+    `      const credsFile = path.join(home, ".git-credentials")`,
+    `      const credLines = read(credsFile).split("\\n").filter((line) => line && !/^https:\\/\\/[^@]*@github\\.com\\/?$/.test(line))`,
+    `      credLines.push("https://x-access-token:" + token + "@github.com")`,
+    `      writePrivate(credsFile, credLines.join("\\n") + "\\n")`,
+    `      const git = spawnSync("git", ["config", "--global", "credential.helper", "store"], { stdio: "ignore" })`,
+    `      if (git.status !== 0) throw new Error("Could not configure Git credentials")`,
+    `      const modeFile = path.join(home, ".config", "coderoamer", "github-auth-mode")`,
+    `      writePrivate(modeFile, "oauth\\n")`,
+    `      console.log("@@WISP_GITHUB_CONNECTED@@")`,
+    `      return`,
+    `    }`,
+    `    if (result.error === "authorization_pending") continue`,
+    `    if (result.error === "slow_down") { interval = Number(result.interval || interval) + 1; continue }`,
+    `    if (result.error === "expired_token") throw new Error("GitHub device code expired")`,
+    `    if (result.error === "access_denied") throw new Error("GitHub access was denied")`,
+    `    if (result.error) throw new Error(result.error_description || result.error)`,
+    `  }`,
+    `  throw new Error("GitHub device code expired")`,
+    `}`,
+    `main().catch((error) => { console.error("@@WISP_GITHUB_ERROR@@" + String(error && error.message || error)); process.exit(1) })`,
+  ].join('\n');
+}
+
+export function buildGithubDeviceCommand(): string {
+  return `node -e ${shellQuote(buildGithubDeviceScript())}`;
+}
+
+export function buildVercelLoginCommand(): string {
+  return [
+    `if command -v vercel >/dev/null; then BROWSER=true vercel login --no-color`,
+    `else runner=''`,
+    `if command -v pnpm >/dev/null && { echo 'Starting Vercel CLI with pnpm…'; BROWSER=true pnpm dlx vercel@latest login --no-color; }; then runner='pnpm dlx vercel@latest'`,
+    `elif command -v bunx >/dev/null && { echo 'Starting Vercel CLI with bunx…'; BROWSER=true bunx vercel@latest login --no-color; }; then runner='bunx vercel@latest'`,
+    `elif command -v npx >/dev/null && { echo 'Starting Vercel CLI with npx…'; BROWSER=true npx --yes vercel@latest login --no-color; }; then runner='npx --yes vercel@latest'`,
+    `else echo 'All available Vercel CLI launch methods failed.' >&2; exit 1`,
+    `fi`,
+    `[ -n "$runner" ] || exit 1`,
+    `mkdir -p "$HOME/.local/bin"`,
+    `printf '#!/bin/sh\nexec %s "$@"\n' "$runner" > "$HOME/.local/bin/vercel"`,
+    `chmod 700 "$HOME/.local/bin/vercel"`,
+    `env_file="$HOME/.sprite_env"`,
+    `touch "$env_file"`,
+    `grep -qs 'HOME/.local/bin' "$env_file" || printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$env_file"`,
+    `fi`,
+  ].join('; ');
+}
+
 function loginSpec(id: ProviderId): ProviderLoginSpec {
   switch (id) {
     case 'codex':
@@ -237,12 +356,8 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
       };
     case 'github':
       return {
-        command:
-          `command -v gh >/dev/null || { echo 'GitHub CLI is not installed on this sprite.' >&2; exit 127; }; ` +
-          'BROWSER=true gh auth login --hostname github.com --git-protocol https --web ' +
-          '--scopes "repo,read:org,gist" --insecure-storage && gh auth setup-git && ' +
-          'mkdir -p "$HOME/.config/coderoamer" && printf "cli\\n" > "$HOME/.config/coderoamer/github-auth-mode"',
-        tty: true,
+        command: buildGithubDeviceCommand(),
+        tty: false,
         cols: 120,
       };
     case 'claude':
@@ -272,10 +387,7 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
       };
     case 'vercel':
       return {
-        command:
-          `command -v vercel >/dev/null || { command -v npm >/dev/null || { echo 'Vercel CLI is missing and npm is unavailable.' >&2; exit 127; }; ` +
-          `echo 'Installing Vercel CLI on this sprite…'; npm install -g vercel@latest || exit 1; }; ` +
-          'BROWSER=true vercel login --no-color',
+        command: buildVercelLoginCommand(),
         tty: false,
         cols: 120,
       };
@@ -410,6 +522,7 @@ async function runGithubTokenCommand(
     try {
       stream = await startCommandStream(
         spriteName,
+        install ? 'github-pat-install' : 'github-pat-inspect',
         { command: githubPatCommand(install), tty: false, cols: 120 },
         {
           onData: (chunk) => {
@@ -504,6 +617,68 @@ function toArrayBuffer(text: string): ArrayBuffer {
   return Uint8Array.from(Array.from(text, (ch) => ch.charCodeAt(0) & 0xff)).buffer;
 }
 
+export function makeLoginStdinFrame(text: string): Uint8Array {
+  const payload = new Uint8Array(toArrayBuffer(text));
+  const frame = new Uint8Array(payload.length + 1);
+  frame[0] = 0;
+  frame.set(payload, 1);
+  return frame;
+}
+
+export function makeLoginStdinPayload(text: string, tty: boolean): Uint8Array {
+  return tty ? new Uint8Array(toArrayBuffer(text)) : makeLoginStdinFrame(text);
+}
+
+export interface ExecControlEvent {
+  type: 'session_info' | 'exit';
+  exitCode?: number;
+  sessionId?: string;
+  cols?: number;
+  rows?: number;
+}
+
+export interface LoginOutputFrame {
+  streamId: 1 | 2 | 3;
+  payload: Uint8Array;
+  rawTty: boolean;
+}
+
+export function decodeLoginOutputFrame(
+  bytes: Uint8Array,
+  tty: boolean
+): LoginOutputFrame | undefined {
+  if (bytes.length === 0) return undefined;
+  const streamId = bytes[0];
+  if (streamId === 1 || streamId === 2 || streamId === 3) {
+    return { streamId, payload: bytes.subarray(1), rawTty: false };
+  }
+  // Sprites sends PTY output as raw terminal bytes rather than multiplexing it
+  // behind a stream-id byte. A leading 13 here is simply a carriage return.
+  if (tty) return { streamId: 1, payload: bytes, rawTty: true };
+  return undefined;
+}
+
+export function parseExecControlEvent(text: string): ExecControlEvent | undefined {
+  try {
+    const value = JSON.parse(text) as Record<string, unknown>;
+    if (value.type === 'session_info') {
+      return {
+        type: 'session_info',
+        sessionId: typeof value.session_id === 'string' ? value.session_id : undefined,
+        cols: typeof value.cols === 'number' ? value.cols : undefined,
+        rows: typeof value.rows === 'number' ? value.rows : undefined,
+      };
+    }
+    if (value.type === 'exit') {
+      const rawCode = value.exit_code ?? value.exitCode;
+      return { type: 'exit', exitCode: typeof rawCode === 'number' ? rawCode : 0 };
+    }
+  } catch {
+    // Provider output is normally not JSON.
+  }
+  return undefined;
+}
+
 async function messageToBytes(data: unknown): Promise<Uint8Array | undefined> {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -517,6 +692,7 @@ async function messageToBytes(data: unknown): Promise<Uint8Array | undefined> {
  */
 async function startCommandStream(
   spriteName: string,
+  flow: string,
   spec: ProviderLoginSpec,
   handlers: LoginStreamHandlers
 ): Promise<LoginStream> {
@@ -533,11 +709,27 @@ async function startCommandStream(
   params.set('cols', String(cols));
   params.set('rows', String(rows));
   // Keep the login alive briefly if the socket blips while the user is in the browser.
-  params.set('max_run_after_disconnect', '600s');
+  params.set('max_run_after_disconnect', '900s');
   if (Platform.OS === 'web') params.set('token', token);
 
   const url = `${WS_BASE}/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
-  const pendingWrites: ArrayBuffer[] = [];
+  const pendingWrites: Uint8Array[] = [];
+  let sawExit = false;
+  let failureReported = false;
+
+  const debug = (event: string, details?: Record<string, unknown>) => {
+    if (!__DEV__) return;
+    // Never include the command, URL query, provider output, or credential values.
+    console.info(`[integration:${flow}] ${event}`, details ?? '');
+  };
+
+  debug('socket.create', {
+    spriteName,
+    platform: Platform.OS,
+    tty: spec.tty,
+    cols,
+    rows,
+  });
 
   let socket: WebSocket;
   if (Platform.OS === 'web') {
@@ -548,13 +740,33 @@ async function startCommandStream(
   }
   socket.binaryType = 'arraybuffer';
 
+  const sendResize = () => {
+    if (spec.tty && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+      debug('resize.send', { cols, rows });
+    }
+  };
+
+  const reportError = (message: string) => {
+    if (failureReported) return;
+    failureReported = true;
+    debug('socket.failure', { message });
+    handlers.onError?.(message);
+  };
+
+  const openTimer = setTimeout(() => {
+    debug('socket.open-timeout');
+    reportError('Timed out connecting to the sprite login session.');
+    socket.close();
+  }, 15_000);
+
   // Explicitly resize once open: Claude's TUI wraps the authorize URL at the
   // terminal width, so we must guarantee a wide PTY even if the exec endpoint
   // ignores the cols/rows query params.
   socket.onopen = () => {
-    if (spec.tty && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'resize', cols, rows }));
-    }
+    clearTimeout(openTimer);
+    debug('socket.open', { queuedWrites: pendingWrites.length });
+    sendResize();
     for (const payload of pendingWrites.splice(0)) socket.send(payload);
   };
 
@@ -562,9 +774,16 @@ async function startCommandStream(
   const stderrDecoder = new TextDecoder();
 
   const handleBytes = (bytes: Uint8Array) => {
-    if (bytes.length === 0) return;
-    const streamId = bytes[0];
-    const payload = bytes.subarray(1);
+    const frame = decodeLoginOutputFrame(bytes, spec.tty);
+    if (!frame) {
+      debug('frame.binary-unknown', { firstByte: bytes[0], bytes: bytes.byteLength });
+      return;
+    }
+    const { streamId, payload, rawTty } = frame;
+    debug(rawTty ? 'frame.raw-tty' : 'frame.binary', {
+      streamId,
+      payloadBytes: payload.byteLength,
+    });
     if (streamId === 1) {
       const text = stdoutDecoder.decode(payload, { stream: true });
       if (text) handlers.onData(text);
@@ -573,6 +792,7 @@ async function startCommandStream(
       if (text) handlers.onData(text);
     } else if (streamId === 3) {
       const code = payload.length ? Number(new TextDecoder().decode(payload).trim()) || 0 : 0;
+      sawExit = true;
       handlers.onExit?.(code);
       socket.close();
     }
@@ -581,11 +801,31 @@ async function startCommandStream(
   socket.onmessage = async (event) => {
     try {
       if (typeof event.data === 'string') {
+        const control = parseExecControlEvent(event.data);
+        if (control?.type === 'session_info') {
+          debug('control.session_info', {
+            sessionId: control.sessionId,
+            reportedCols: control.cols,
+            reportedRows: control.rows,
+          });
+          // On web, the browser-facing proxy socket can open before its upstream
+          // connection. Resize again only after Sprites confirms the exec session.
+          sendResize();
+          return;
+        }
+        if (control?.type === 'exit') {
+          debug('control.exit', { exitCode: control.exitCode ?? 0 });
+          sawExit = true;
+          handlers.onExit?.(control.exitCode ?? 0);
+          socket.close();
+          return;
+        }
         // Some runtimes deliver binary frames as latin1 strings.
         const first = event.data.charCodeAt(0);
         if (first >= 0 && first <= 3) {
           handleBytes(Uint8Array.from(Array.from(event.data, (ch) => ch.charCodeAt(0) & 0xff)));
         } else {
+          debug('frame.text-output', { bytes: event.data.length });
           handlers.onData(event.data);
         }
         return;
@@ -593,23 +833,37 @@ async function startCommandStream(
       const bytes = await messageToBytes(event.data);
       if (bytes) handleBytes(bytes);
     } catch (err) {
-      handlers.onError?.((err as Error).message);
+      reportError((err as Error).message);
     }
   };
 
-  socket.onerror = () => handlers.onError?.('Connection error');
-  socket.onclose = () => handlers.onClose?.();
+  socket.onerror = () => reportError('Could not connect to the sprite login session.');
+  socket.onclose = () => {
+    clearTimeout(openTimer);
+    debug('socket.close', { sawExit, failureReported });
+    if (!sawExit) reportError('The sprite login connection closed unexpectedly.');
+    handlers.onClose?.();
+  };
 
   return {
     send: (text: string) => {
-      const payload = toArrayBuffer(text);
+      const payload = makeLoginStdinPayload(text, spec.tty);
+      debug('stdin.write', {
+        payloadBytes: payload.byteLength - (spec.tty ? 0 : 1),
+        framed: !spec.tty,
+        readyState: socket.readyState,
+      });
       if (socket.readyState === WebSocket.OPEN) socket.send(payload);
       else if (socket.readyState === WebSocket.CONNECTING) pendingWrites.push(payload);
     },
     cancel: () => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(toArrayBuffer('\u0003'));
+      debug('stdin.cancel', { readyState: socket.readyState });
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(makeLoginStdinPayload('\u0003', spec.tty));
+      }
     },
     close: () => {
+      debug('socket.close-request', { readyState: socket.readyState });
       socket.onmessage = null;
       socket.onerror = null;
       socket.onclose = null;
@@ -625,5 +879,5 @@ export async function startLogin(
   id: ProviderId,
   handlers: LoginStreamHandlers
 ): Promise<LoginStream> {
-  return startCommandStream(spriteName, loginSpec(id), handlers);
+  return startCommandStream(spriteName, id, loginSpec(id), handlers);
 }

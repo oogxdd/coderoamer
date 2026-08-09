@@ -25,6 +25,8 @@ import {
   GithubAccessSummary,
   inspectGithubPat,
   connectGithubWithPat,
+  containsClaudeOAuthToken,
+  sanitizedLoginOutput,
 } from '@/services/account-auth';
 
 type Phase = 'starting' | 'awaiting' | 'submitting' | 'success' | 'error';
@@ -95,7 +97,8 @@ export function ConnectAccountSheet({
   const bufferRef = useRef('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const settledRef = useRef(false);
-  const continuedGithubRef = useRef(false);
+  const confirmedClaudeTokenRef = useRef(false);
+  const submittedCodeRef = useRef('');
   // Credential signature (mtime:size) captured before login begins. Success is a
   // *change* from this baseline, so pre-existing creds (Reconnect) don't count
   // and Codex — which clears its auth file at login start — can't false-succeed.
@@ -147,6 +150,10 @@ export function ConnectAccountSheet({
             bufferRef.current += chunk;
             if (provider === 'codex') {
               setOutputPreview(codexOutputPreview(bufferRef.current));
+            } else if (provider === 'claude' || provider === 'github') {
+              setOutputPreview(
+                sanitizedLoginOutput(bufferRef.current, [submittedCodeRef.current])
+              );
             }
             const next = parseLoginPrompt(provider, bufferRef.current);
             setPrompt((prev) => ({
@@ -156,11 +163,16 @@ export function ConnectAccountSheet({
             if (next.url || next.code) {
               setPhase((p) => (p === 'starting' ? 'awaiting' : p));
             }
-            // Recent gh versions wait for Enter before polling the device flow.
-            // The phone opens the URL, so suppress the sprite browser and
-            // continue the CLI automatically as soon as its code is available.
-            if (provider === 'github' && next.code && !continuedGithubRef.current) {
-              continuedGithubRef.current = true;
+            // `claude setup-token` displays the generated token in its TTY and
+            // waits for a final Enter before exiting. The shell wrapper can only
+            // persist that token after the CLI exits, so confirm automatically.
+            if (
+              provider === 'claude' &&
+              !confirmedClaudeTokenRef.current &&
+              containsClaudeOAuthToken(bufferRef.current)
+            ) {
+              confirmedClaudeTokenRef.current = true;
+              if (__DEV__) console.info('[integration:claude] token.detected');
               streamRef.current?.send('\r');
             }
           },
@@ -186,8 +198,11 @@ export function ConnectAccountSheet({
                 }, 1500);
               });
           },
-          onError: () => {
-            /* transient; the signature poll is the source of truth */
+          onError: (message) => {
+            if (cancelled || settledRef.current) return;
+            stopPolling();
+            setError(message);
+            setPhase('error');
           },
         });
         if (cancelled) {
@@ -230,7 +245,12 @@ export function ConnectAccountSheet({
   const submitCode = useCallback(() => {
     const value = codeInput.trim();
     if (!value || !streamRef.current) return;
-    streamRef.current.send(`${value}\r`);
+    submittedCodeRef.current = value;
+    // Match a real terminal paste followed by a distinct Enter keypress. Claude
+    // Code treats a combined `code + \r` chunk as pasted text and masks it, but
+    // does not submit the prompt.
+    streamRef.current.send(value);
+    setTimeout(() => streamRef.current?.send('\r'), 50);
     setCodeInput('');
     setPhase('submitting');
     // Check right after submitting so success shows promptly.
@@ -323,7 +343,8 @@ export function ConnectAccountSheet({
               <Text style={[styles.muted, { color: colors.textSecondary }]}>
                 Starting sign-in on {spriteName}…
               </Text>
-              {provider === 'codex' && outputPreview && (
+              {(provider === 'codex' || provider === 'claude' || provider === 'github') &&
+                Boolean(outputPreview) && (
                 <View
                   style={[
                     styles.outputBox,
@@ -331,7 +352,7 @@ export function ConnectAccountSheet({
                   ]}
                 >
                   <Text style={[styles.outputLabel, { color: colors.textSecondary }]}>
-                    CODEX CLI OUTPUT
+                    {provider.toUpperCase()} CLI OUTPUT
                   </Text>
                   <Text style={[styles.outputText, { color: colors.text }]} selectable>
                     {outputPreview}
@@ -581,7 +602,9 @@ export function ConnectAccountSheet({
                 </View>
               )}
 
-              {provider === 'codex' && !prompt.code && outputPreview && (
+              {(provider === 'codex' || provider === 'claude' || provider === 'github') &&
+                !prompt.code &&
+                Boolean(outputPreview) && (
                 <View
                   style={[
                     styles.outputBox,
@@ -589,7 +612,7 @@ export function ConnectAccountSheet({
                   ]}
                 >
                   <Text style={[styles.outputLabel, { color: colors.textSecondary }]}>
-                    CODEX CLI OUTPUT
+                    {provider.toUpperCase()} CLI OUTPUT
                   </Text>
                   <Text style={[styles.outputText, { color: colors.text }]} selectable>
                     {outputPreview}

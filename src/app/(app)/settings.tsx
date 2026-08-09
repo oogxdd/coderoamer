@@ -27,6 +27,7 @@ import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 import { CodexModelPicker } from '@/components/chat/CodexModelPicker';
 import { CodexModelOption, getCachedCodexModels } from '@/services/codex-models';
+import { ENABLE_GLOBAL_PROVIDER_AUTH } from '@/constants/features';
 
 type ClaudeModel = 'sonnet' | 'opus' | 'haiku';
 type MaxTurns = 0 | 5 | 10 | 25 | 50;
@@ -395,82 +396,92 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Claude Auth</Text>
-          <View style={styles.statusContainer}>
-            <View
-              style={[
-                styles.statusDot,
-                {
-                  backgroundColor:
-                    auth.hasClaudeCreds || auth.hasClaudeToken ? colors.success : colors.warning,
-                },
-              ]}
-            />
-            <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-              {auth.hasClaudeCreds
-                ? 'Browser login'
-                : auth.hasClaudeToken
-                  ? 'Pasted token'
-                  : 'Not Set'}
-            </Text>
-          </View>
-        </View>
+        {ENABLE_GLOBAL_PROVIDER_AUTH && (
+          <>
+            <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>Claude Auth</Text>
+              <View style={styles.statusContainer}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    {
+                      backgroundColor:
+                        auth.hasClaudeCreds || auth.hasClaudeToken ? colors.success : colors.warning,
+                    },
+                  ]}
+                />
+                <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+                  {auth.hasClaudeCreds
+                    ? 'Browser login'
+                    : auth.hasClaudeToken
+                      ? 'Pasted token'
+                      : 'Not Set'}
+                </Text>
+              </View>
+            </View>
 
-        <Pressable
-          style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
-          onPress={() => router.push('/(app)/claude-login')}
-        >
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Log in with browser</Text>
-          <Text style={[styles.statusText, { color: colors.tint }]}>Capture →</Text>
-        </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
+              onPress={() => router.push('/(app)/claude-login')}
+            >
+              <Text style={[styles.rowLabel, { color: colors.text }]}>Log in with browser</Text>
+              <Text style={[styles.statusText, { color: colors.tint }]}>Capture →</Text>
+            </Pressable>
+          </>
+        )}
       </View>
 
-      {/* GitHub Section */}
-      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>GITHUB</Text>
-      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
-        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.rowLabel, { color: colors.text }]}>Token</Text>
-          <View style={styles.statusContainer}>
+      {ENABLE_GLOBAL_PROVIDER_AUTH && (
+        <>
+          {/* GitHub Section */}
+          <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>GITHUB</Text>
+          <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+            <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>Token</Text>
+              <View style={styles.statusContainer}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    { backgroundColor: auth.hasGitHubToken ? colors.success : colors.warning },
+                  ]}
+                />
+                <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+                  {auth.hasGitHubToken ? 'Saved' : 'Not Set'}
+                </Text>
+              </View>
+            </View>
             <View
-              style={[
-                styles.statusDot,
-                { backgroundColor: auth.hasGitHubToken ? colors.success : colors.warning },
-              ]}
-            />
-            <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-              {auth.hasGitHubToken ? 'Saved' : 'Not Set'}
-            </Text>
+              style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}
+            >
+              <Text style={[styles.inputLabel, { color: colors.text }]}>Paste</Text>
+              <TextInput
+                style={[styles.textInput, { color: colors.text }]}
+                value={githubTokenInput}
+                onChangeText={setGithubTokenInput}
+                placeholder="ghp_… or github_pat_…"
+                placeholderTextColor={colors.textSecondary}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+              />
+            </View>
+            <Pressable
+              style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
+              disabled={savingGitHub || !githubTokenInput.trim()}
+              onPress={handleSaveGitHubToken}
+            >
+              <Text
+                style={[
+                  styles.rowLabel,
+                  { color: githubTokenInput.trim() ? colors.tint : colors.textSecondary },
+                ]}
+              >
+                {savingGitHub ? 'Saving…' : 'Save Token'}
+              </Text>
+            </Pressable>
           </View>
-        </View>
-        <View style={[styles.inputRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.inputLabel, { color: colors.text }]}>Paste</Text>
-          <TextInput
-            style={[styles.textInput, { color: colors.text }]}
-            value={githubTokenInput}
-            onChangeText={setGithubTokenInput}
-            placeholder="ghp_… or github_pat_…"
-            placeholderTextColor={colors.textSecondary}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-          />
-        </View>
-        <Pressable
-          style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}
-          disabled={savingGitHub || !githubTokenInput.trim()}
-          onPress={handleSaveGitHubToken}
-        >
-          <Text
-            style={[
-              styles.rowLabel,
-              { color: githubTokenInput.trim() ? colors.tint : colors.textSecondary },
-            ]}
-          >
-            {savingGitHub ? 'Saving…' : 'Save Token'}
-          </Text>
-        </Pressable>
-      </View>
+        </>
+      )}
 
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>TRANSCRIPTION</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
