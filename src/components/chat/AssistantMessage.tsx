@@ -1,40 +1,15 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing, Fonts } from '@/constants/theme';
+import { parseMessageSegments } from '@/services/message-text';
 
 interface AssistantMessageProps {
   text: string;
-}
-
-type MessageSegment =
-  | { type: 'text'; value: string }
-  | { type: 'code'; value: string };
-
-function parseMessageSegments(input: string): MessageSegment[] {
-  const segments: MessageSegment[] = [];
-  const fenceRegex = /```[^\n]*\n?([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = fenceRegex.exec(input)) !== null) {
-    const [fullMatch, codeContent] = match;
-    const matchStart = match.index;
-
-    if (matchStart > lastIndex) {
-      segments.push({ type: 'text', value: input.slice(lastIndex, matchStart) });
-    }
-
-    const normalizedCode = codeContent.replace(/\n$/, '');
-    segments.push({ type: 'code', value: normalizedCode });
-    lastIndex = matchStart + fullMatch.length;
-  }
-
-  if (lastIndex < input.length) {
-    segments.push({ type: 'text', value: input.slice(lastIndex) });
-  }
-
-  return segments;
+  /** Long-press anywhere in the bubble to open the message actions sheet. */
+  onLongPress?: () => void;
+  /** Tapping a code block's Copy button. */
+  onCopyCode?: (code: string) => void;
 }
 
 function renderInlineCode(text: string, colorText: string, colorBg: string, colorCode: string) {
@@ -84,7 +59,7 @@ function renderInlineCode(text: string, colorText: string, colorBg: string, colo
   return nodes;
 }
 
-export function AssistantMessage({ text }: AssistantMessageProps) {
+export function AssistantMessage({ text, onLongPress, onCopyCode }: AssistantMessageProps) {
   const colors = useTheme();
 
   if (!text.trim()) return null;
@@ -92,7 +67,13 @@ export function AssistantMessage({ text }: AssistantMessageProps) {
 
   return (
     <View style={styles.container}>
-      <View style={[styles.bubble, { backgroundColor: colors.assistantBubble }]}>
+      <Pressable
+        style={[styles.bubble, { backgroundColor: colors.assistantBubble }]}
+        onLongPress={onLongPress}
+        delayLongPress={350}
+        accessibilityRole={onLongPress ? 'button' : undefined}
+        accessibilityHint={onLongPress ? 'Long press for copy and quote actions' : undefined}
+      >
         {segments.map((segment, segmentIndex) => {
           if (segment.type === 'code') {
             return (
@@ -105,9 +86,22 @@ export function AssistantMessage({ text }: AssistantMessageProps) {
                   },
                 ]}
               >
-                <Text style={[styles.codeText, { color: colors.text }]}>
-                  {segment.value}
-                </Text>
+                <View style={styles.codeHeader}>
+                  <Text style={[styles.codeLanguage, { color: colors.textSecondary }]}>
+                    {segment.language ?? 'code'}
+                  </Text>
+                  {onCopyCode && (
+                    <Pressable
+                      onPress={() => onCopyCode(segment.value)}
+                      hitSlop={10}
+                      accessibilityRole="button"
+                      accessibilityLabel="Copy code block"
+                    >
+                      <Text style={[styles.codeCopy, { color: colors.tint }]}>Copy</Text>
+                    </Pressable>
+                  )}
+                </View>
+                <Text style={[styles.codeText, { color: colors.text }]}>{segment.value}</Text>
               </View>
             );
           }
@@ -131,7 +125,7 @@ export function AssistantMessage({ text }: AssistantMessageProps) {
             </Text>
           ));
         })}
-      </View>
+      </Pressable>
     </View>
   );
 }
@@ -165,6 +159,22 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginVertical: 8,
+  },
+  codeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    gap: Spacing.md,
+  },
+  codeLanguage: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+    textTransform: 'lowercase',
+  },
+  codeCopy: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
   },
   codeText: {
     fontFamily: Fonts?.mono ?? 'monospace',

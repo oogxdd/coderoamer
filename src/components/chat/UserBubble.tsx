@@ -1,20 +1,28 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Spacing } from '@/constants/theme';
 
 interface UserBubbleProps {
   text: string;
+  /** Long-press to open the message actions sheet (copy, quote, resend). */
+  onLongPress?: () => void;
 }
 
-export function UserBubble({ text }: UserBubbleProps) {
+export function UserBubble({ text, onLongPress }: UserBubbleProps) {
   const colors = useTheme();
 
   return (
     <View style={styles.container}>
-      <View style={[styles.bubble, { backgroundColor: colors.userBubble }]}>
+      <Pressable
+        style={[styles.bubble, { backgroundColor: colors.userBubble }]}
+        onLongPress={onLongPress}
+        delayLongPress={350}
+        accessibilityRole={onLongPress ? 'button' : undefined}
+        accessibilityHint={onLongPress ? 'Long press for copy and quote actions' : undefined}
+      >
         <Text style={[styles.text, { color: colors.userBubbleText }]}>{text}</Text>
-      </View>
+      </Pressable>
     </View>
   );
 }

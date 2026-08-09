@@ -22,6 +22,10 @@ interface ChatMessageViewProps {
   /** Show turn actions (e.g. Continue after max-turns) — last message only. */
   showTurnActions?: boolean;
   onContinueTurn?: () => void;
+  /** Long-press on a bubble: open copy/quote actions for this message. */
+  onMessageActions?: (message: ChatMessage) => void;
+  /** Copy button on a fenced code block inside an assistant message. */
+  onCopyCode?: (code: string) => void;
 }
 
 function getActiveToolLabel(
@@ -97,15 +101,18 @@ export function ChatMessageView({
   isCurrentlyStreaming,
   showTurnActions,
   onContinueTurn,
+  onMessageActions,
+  onCopyCode,
 }: ChatMessageViewProps) {
   const colors = useTheme();
+  const handleLongPress = onMessageActions ? () => onMessageActions(message) : undefined;
 
   if (message.role === 'user') {
     const text = message.content
       .filter((c): c is Extract<ChatContent, { type: 'text' }> => c.type === 'text')
       .map((c) => c.text)
       .join('\n\n');
-    return <UserBubble text={text} />;
+    return <UserBubble text={text} onLongPress={handleLongPress} />;
   }
 
   if (message.role === 'system') {
@@ -126,7 +133,14 @@ export function ChatMessageView({
       {message.content.map((item, index) => {
         switch (item.type) {
           case 'text':
-            return <AssistantMessage key={`text-${index}`} text={item.text} />;
+            return (
+              <AssistantMessage
+                key={`text-${index}`}
+                text={item.text}
+                onLongPress={handleLongPress}
+                onCopyCode={onCopyCode}
+              />
+            );
           case 'reasoning':
             return (
               <ReasoningBlock

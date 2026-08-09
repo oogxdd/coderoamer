@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as Clipboard from 'expo-clipboard';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
 import {
   AgentEffort,
@@ -33,6 +34,15 @@ import { ChatMessageView } from '@/components/chat/ChatMessageView';
 import { ChatInputBar } from '@/components/chat/ChatInputBar';
 import { ChatList } from '@/components/chat/ChatList';
 import { ChatListSheet } from '@/components/chat/ChatListSheet';
+import { MessageAction, MessageActionsSheet } from '@/components/chat/MessageActionsSheet';
+import { SelectPartsSheet } from '@/components/chat/SelectPartsSheet';
+import { useToast } from '@/components/ui/Toast';
+import {
+  formatQuote,
+  messageCodeBlocks,
+  messageText,
+  quotableParts,
+} from '@/services/message-text';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
@@ -109,6 +119,7 @@ function getActiveToolLabel(
 export default function SpriteDetailScreen() {
   const { name } = useLocalSearchParams<{ name: string }>();
   const colors = useTheme();
+  const { showToast } = useToast();
   const [tab, setTab] = useState<Tab>('chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
   const [chatOpen, setChatOpen] = useState(false);
@@ -138,6 +149,10 @@ export default function SpriteDetailScreen() {
   const [reloadNonce, setReloadNonce] = useState(0);
   // null = closed. Chat settings become read-only after the first user message.
   const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'settings' | null>(null);
+  // Message whose copy/quote actions sheet is open, and (separately) the one
+  // being picked apart in the partial select sheet.
+  const [actionsMessage, setActionsMessage] = useState<ChatMessage | null>(null);
+  const [selectPartsMessage, setSelectPartsMessage] = useState<ChatMessage | null>(null);
   // Reactive mirror of chatListRef so the inline Chats tab re-renders on change.
   const [chatList, setChatList] = useState<PersistedChat[]>([]);
   const chatListRef = useRef<PersistedChat[]>([]);
@@ -741,6 +756,87 @@ export default function SpriteDetailScreen() {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
   }, [chat.setInputText]);
 
+  const copyText = useCallback(
+    (text: string, confirmation = 'Copied') => {
+      if (!text.trim()) {
+        showToast('Nothing to copy');
+        return;
+      }
+      Clipboard.setStringAsync(text)
+        .then(() => showToast(confirmation))
+        .catch(() => showToast('Copy failed'));
+    },
+    [showToast]
+  );
+
+  // Quoting drops a markdown blockquote into the composer and leaves the cursor
+  // after it, so the reply reads as a response to that specific passage.
+  const quoteText = useCallback(
+    (text: string) => {
+      const quote = formatQuote(text);
+      if (!quote) return;
+      chat.setInputText((prev: string) => (prev.trim() ? `${prev.trimEnd()}\n\n${quote}` : quote));
+      showToast('Quoted in composer');
+    },
+    [chat.setInputText, showToast]
+  );
+
+  // Built per message: which actions make sense depends on what the message
+  // actually contains (code blocks, more than one quotable part).
+  const messageActions = useMemo((): MessageAction[] => {
+    const message = actionsMessage;
+    if (!message) return [];
+    const text = messageText(message);
+    const codeBlocks = messageCodeBlocks(message);
+    const parts = quotableParts(text);
+    const actions: MessageAction[] = [];
+
+    if (text) {
+      actions.push({
+        key: 'copy',
+        label: 'Copy message',
+        detail: 'The whole message as plain text',
+        onPress: () => copyText(text),
+      });
+    }
+    if (codeBlocks.length > 0) {
+      actions.push({
+        key: 'copy-code',
+        label: codeBlocks.length === 1 ? 'Copy code block' : `Copy ${codeBlocks.length} code blocks`,
+        detail: 'Code only, without the surrounding prose',
+        onPress: () => copyText(codeBlocks.join('\n\n'), 'Code copied'),
+      });
+    }
+    if (text) {
+      actions.push({
+        key: 'quote',
+        label: 'Quote message',
+        detail: 'Add it to the composer as a blockquote',
+        onPress: () => quoteText(text),
+      });
+    }
+    if (parts.length > 1) {
+      actions.push({
+        key: 'select',
+        label: 'Select part…',
+        detail: `Pick from ${parts.length} paragraphs to copy or quote`,
+        onPress: () => setSelectPartsMessage(message),
+      });
+    }
+    if (message.role === 'user' && text) {
+      actions.push({
+        key: 'reuse',
+        label: 'Edit as new message',
+        detail: 'Put this prompt back in the composer',
+        onPress: () => {
+          chat.setInputText(text);
+          showToast('Copied to composer');
+        },
+      });
+    }
+    return actions;
+  }, [actionsMessage, chat.setInputText, copyText, quoteText, showToast]);
+
   // Active tool label for the chat view
   const activeToolLabel = chat.isStreaming
     ? getActiveToolLabel(chat.messages, workingDirectory)
@@ -866,6 +962,8 @@ export default function SpriteDetailScreen() {
                 }
                 showTurnActions={index === chat.messages.length - 1 && !chat.isStreaming}
                 onContinueTurn={handleContinueTurn}
+                onMessageActions={setActionsMessage}
+                onCopyCode={(code) => copyText(code, 'Code copied')}
               />
             )}
             keyExtractor={(item) => item.id}
@@ -1090,6 +1188,32 @@ export default function SpriteDetailScreen() {
           spriteName={spriteName}
           onResume={handleResumeSession}
           onClose={() => setSessionBrowserVisible(false)}
+        />
+      )}
+
+      {/* Long-press a message: copy / quote / pick a part */}
+      {actionsMessage && messageActions.length > 0 && (
+        <MessageActionsSheet
+          title={actionsMessage.role === 'user' ? 'Your message' : providerDisplayName(chatProvider)}
+          preview={messageText(actionsMessage)}
+          actions={messageActions}
+          onClose={() => setActionsMessage(null)}
+        />
+      )}
+
+      {selectPartsMessage && (
+        <SelectPartsSheet
+          title="Select part"
+          parts={quotableParts(messageText(selectPartsMessage))}
+          onCopy={(text) => {
+            setSelectPartsMessage(null);
+            copyText(text);
+          }}
+          onQuote={(text) => {
+            setSelectPartsMessage(null);
+            quoteText(text);
+          }}
+          onClose={() => setSelectPartsMessage(null)}
         />
       )}
     </SafeAreaView>
