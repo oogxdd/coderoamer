@@ -89,15 +89,31 @@ jobs:
             --non-interactive \
             --json \
             --message "$GITHUB_REF_NAME ($GITHUB_SHA)" \
-            > eas-build.json
+            > eas-build-scheduled.json
 
       - name: Read build metadata
         run: |
           set -euo pipefail
-          BUILD_ID="$(jq -r '.[0].id' eas-build.json)"
-          BUILD_NUMBER="$(jq -r '.[0].appBuildVersion' eas-build.json)"
-          BUILD_COMMIT="$(jq -r '.[0].gitCommitHash' eas-build.json)"
-          BUILD_STATUS="$(jq -r '.[0].status' eas-build.json)"
+          BUILD_ID="$(jq -r '.[0].id // empty' eas-build-scheduled.json)"
+          [ -n "$BUILD_ID" ] || {
+            echo "EAS returned no build id." >&2
+            exit 1
+          }
+
+          # `--json` writes the build record as it was *scheduled*: status NEW,
+          # and no artifact URL yet. `--wait` then blocks until the build and
+          # the submission finish, but never rewrites that file — so reading it
+          # reported a long-finished build as still queued, and every release
+          # since v1.3.0 failed here after building and shipping successfully.
+          # Re-read the build to get its terminal state. `build:view` returns a
+          # bare object; older versions returned a one-element array, so take
+          # either shape.
+          npx eas-cli@latest build:view "$BUILD_ID" --json --non-interactive \
+            | jq 'if type == "array" then .[0] else . end' > eas-build.json
+
+          BUILD_NUMBER="$(jq -r '.appBuildVersion' eas-build.json)"
+          BUILD_COMMIT="$(jq -r '.gitCommitHash' eas-build.json)"
+          BUILD_STATUS="$(jq -r '.status' eas-build.json)"
 
           [ "$BUILD_STATUS" = "FINISHED" ] || {
             echo "EAS build finished with status $BUILD_STATUS." >&2
@@ -112,7 +128,7 @@ jobs:
             exit 1
           }
 
-          ARCHIVE_URL="$(jq -r '.[0].artifacts.applicationArchiveUrl // empty' eas-build.json)"
+          ARCHIVE_URL="$(jq -r '.artifacts.applicationArchiveUrl // empty' eas-build.json)"
           [ -n "$ARCHIVE_URL" ] || {
             echo "EAS build JSON carries no application archive URL." >&2
             exit 1
