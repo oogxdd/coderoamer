@@ -165,10 +165,11 @@ export default function SpriteDetailScreen() {
   const [reloadNonce, setReloadNonce] = useState(0);
   // null = closed. Chat settings become read-only after the first user message.
   const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'settings' | null>(null);
-  // Message whose copy/quote actions sheet is open, and (separately) the one
-  // being picked apart in the partial select sheet.
+  // Message whose copy/quote actions sheet is open. The partial select sheet
+  // holds a *snapshot* of the parts rather than the message: it selects by
+  // index, and a message still streaming would shift them underneath.
   const [actionsMessage, setActionsMessage] = useState<ChatMessage | null>(null);
-  const [selectPartsMessage, setSelectPartsMessage] = useState<ChatMessage | null>(null);
+  const [selectParts, setSelectParts] = useState<string[] | null>(null);
   // Reactive mirror of chatListRef so the inline Chats tab re-renders on change.
   const [chatList, setChatList] = useState<PersistedChat[]>([]);
   const chatListRef = useRef<PersistedChat[]>([]);
@@ -877,7 +878,7 @@ export default function SpriteDetailScreen() {
         key: 'select',
         label: 'Select part…',
         detail: `Pick from ${parts.length} paragraphs to copy or quote`,
-        onPress: () => setSelectPartsMessage(message),
+        onPress: () => setSelectParts(parts),
       });
     }
     if (message.role === 'user' && text) {
@@ -1340,19 +1341,19 @@ export default function SpriteDetailScreen() {
           />
         )}
 
-        {selectPartsMessage && (
+        {selectParts && (
           <SelectPartsSheet
             title="Select part"
-            parts={quotableParts(messageText(selectPartsMessage))}
+            parts={selectParts}
             onCopy={(text) => {
-              setSelectPartsMessage(null);
+              setSelectParts(null);
               copyText(text);
             }}
             onQuote={(text) => {
-              setSelectPartsMessage(null);
+              setSelectParts(null);
               quoteText(text);
             }}
-            onClose={() => setSelectPartsMessage(null)}
+            onClose={() => setSelectParts(null)}
           />
         )}
       </SafeAreaView>
