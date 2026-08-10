@@ -11,8 +11,9 @@ import {
   Alert,
   ScrollView,
   AppState,
+  BackHandler,
 } from 'react-native';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
@@ -37,6 +38,7 @@ import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { MessageAction, MessageActionsSheet } from '@/components/chat/MessageActionsSheet';
 import { SelectPartsSheet } from '@/components/chat/SelectPartsSheet';
 import { useToast } from '@/components/ui/Toast';
+import { SwipeBackView } from '@/components/ui/SwipeBackView';
 import {
   formatQuote,
   messageCodeBlocks,
@@ -123,6 +125,9 @@ export default function SpriteDetailScreen() {
   const [tab, setTab] = useState<Tab>('chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
   const [chatOpen, setChatOpen] = useState(false);
+  // Settings sub-view lives here, not in SettingsTab, so the back gesture and
+  // the Android back button can step out of it.
+  const [settingsView, setSettingsView] = useState<SettingsView>('menu');
   const [sprite, setSprite] = useState<Sprite | null>(null);
   const [isLoadingSprite, setIsLoadingSprite] = useState(true);
   // A cold sprite is woken by this screen, not by the list that linked here.
@@ -867,387 +872,433 @@ export default function SpriteDetailScreen() {
     { key: 'settings', label: 'Settings' },
   ];
 
+  // This screen has levels the navigator can't see — an open conversation, a
+  // settings sub-view. They form one ladder that the header button, the edge
+  // swipe and Android's back button all descend together. Kept as a plain
+  // value (not a closure) so the effects below don't re-run every render.
+  const inScreenLevel: 'chat' | 'settings' | null = chatOpen
+    ? 'chat'
+    : tab === 'settings' && settingsView !== 'menu'
+      ? 'settings'
+      : null;
+
+  const popInScreen = useCallback(() => {
+    if (chatOpen) setChatOpen(false);
+    else setSettingsView('menu');
+  }, [chatOpen]);
+
+  const goBack = useCallback(() => {
+    if (inScreenLevel) popInScreen();
+    else router.back();
+  }, [inScreenLevel, popInScreen]);
+
+  // While an in-screen level is open, the native stack gesture would skip past
+  // it and pop the whole sprite. Turn it off and let SwipeBackView handle the
+  // edge swipe; restore it once we're back at the top level.
+  const navigation = useNavigation();
+  useEffect(() => {
+    navigation.setOptions({ gestureEnabled: !inScreenLevel });
+  }, [navigation, inScreenLevel]);
+
+  useEffect(() => {
+    if (!inScreenLevel) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      popInScreen();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [inScreenLevel, popInScreen]);
+
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
-      {/* Header */}
-      <View style={[styles.header, { borderBottomColor: colors.border }]}>
-        <Pressable onPress={() => (chatOpen ? setChatOpen(false) : router.back())} hitSlop={12}>
-          <Text style={[styles.backButton, { color: colors.tint }]}>
-            &#x2039; {chatOpen ? 'Chats' : 'Back'}
-          </Text>
-        </Pressable>
-        <View style={styles.headerCenter}>
-          {chatOpen ? (
-            <>
-              <Pressable onPress={() => setChatListVisible(true)} hitSlop={6}>
-                <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
-                  {chatName} ▾
-                </Text>
-              </Pressable>
-              <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {providerDisplayName(chatProvider)} · {chatModel || 'Default'} ·{' '}
-                {effortDisplayName(chatEffort)}
-              </Text>
-            </>
-          ) : (
-            <>
-              <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
-                {spriteName}
-              </Text>
-              {(sprite || isLoadingSprite) && (
-                <View style={styles.statusRow}>
-                  {isWaking || isLoadingSprite ? (
-                    <ActivityIndicator
-                      size="small"
-                      color={colors.textSecondary}
-                      style={styles.statusSpinner}
-                    />
-                  ) : (
-                    <View
-                      style={[styles.statusDot, { backgroundColor: statusColor(sprite!.status) }]}
-                    />
-                  )}
-                  <Text style={[styles.statusText, { color: colors.textSecondary }]}>
-                    {isWaking
-                      ? 'Waking…'
-                      : isLoadingSprite
-                        ? 'Loading…'
-                        : statusDisplayName(sprite!.status)}
-                  </Text>
-                </View>
-              )}
-            </>
-          )}
-        </View>
-        <View style={styles.headerRight}>
-          {chatOpen ? (
-            <Pressable
-              onPress={() => setSessionSheetMode('settings')}
-              hitSlop={10}
-              accessibilityRole="button"
-              accessibilityLabel="Chat settings"
-            >
-              <Text style={[styles.headerActionMore, { color: colors.tint }]}>•••</Text>
-            </Pressable>
-          ) : (
-            <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
-              <Text style={[styles.headerActionAdd, { color: colors.tint }]}>＋</Text>
-            </Pressable>
-          )}
-        </View>
-      </View>
-
-      {/* Tab Bar (hub only) */}
-      {!chatOpen && (
-        <View style={[styles.tabBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
-          {tabItems.map((t) => (
-            <Pressable
-              key={t.key}
-              style={[
-                styles.tab,
-                tab === t.key && { borderBottomColor: colors.tint, borderBottomWidth: 2 },
-              ]}
-              onPress={() => setTab(t.key)}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  { color: tab === t.key ? colors.tint : colors.textSecondary },
-                ]}
-              >
-                {t.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-
-      {/* Active tool label below header (chat view only) */}
-      {chatOpen && activeToolLabel && (
-        <View style={[styles.activeToolBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
-          <ActivityIndicator size="small" color={colors.tint} />
-          <Text style={[styles.activeToolText, { color: colors.textSecondary }]} numberOfLines={1}>
-            {activeToolLabel}
-          </Text>
-        </View>
-      )}
-
-      {/* Content */}
-      {chatOpen ? (
-        <KeyboardAvoidingView
-          style={styles.flex}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          keyboardVerticalOffset={0}
-        >
-          <FlatList
-            ref={flatListRef}
-            data={chat.messages}
-            renderItem={({ item, index }) => (
-              <ChatMessageView
-                message={item}
-                workingDirectory={workingDirectory}
-                isCurrentlyStreaming={
-                  chat.isStreaming &&
-                  index === chat.messages.length - 1 &&
-                  item.role === 'assistant'
-                }
-                showTurnActions={index === chat.messages.length - 1 && !chat.isStreaming}
-                onContinueTurn={handleContinueTurn}
-                onMessageActions={setActionsMessage}
-                onCopyCode={(code) => copyText(code, 'Code copied')}
-              />
-            )}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.chatContent}
-            ListEmptyComponent={
-              chat.sessionId && chat.messages.length === 0 ? (
-                <View style={styles.emptyChatView}>
-                  <ActivityIndicator size="small" color={colors.tint} style={{ marginBottom: Spacing.sm }} />
-                  <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
-                    Resuming previous session...
-                  </Text>
-                </View>
-              ) : (
-                <View style={styles.emptyChatView}>
-                  <Text style={[styles.emptyChatTitle, { color: colors.text }]}>
-                    Chat with {providerDisplayName(chatProvider)}
-                  </Text>
-                  <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
-                    Send a message to start this coding session on the sprite.
-                  </Text>
-                  <Pressable
-                    style={[
-                      styles.cwdChip,
-                      { borderColor: colors.border, backgroundColor: colors.backgroundElement },
-                    ]}
-                    onPress={() => setSessionSheetMode('settings')}
-                  >
-                    <Text
-                      style={[styles.cwdChipText, { color: colors.textSecondary }]}
-                      numberOfLines={1}
-                    >
-                      📁 {workingDirectory}  ✎
-                    </Text>
-                  </Pressable>
-                </View>
-              )
-            }
-          />
-          {chat.isStreaming && (chat.status === 'connecting' || chat.status === 'reconnecting') && (
-            <View style={styles.connectingBar}>
-              <ActivityIndicator size="small" color={colors.tint} />
-              <Text style={[styles.connectingText, { color: colors.textSecondary }]}>
-                {chat.status === 'reconnecting' ? 'Reconnecting to' : 'Connecting to'} {providerDisplayName(chatProvider)}...
-              </Text>
-            </View>
-          )}
-          {chat.queuedPrompts.length > 0 && (
-            <View style={styles.queuedBar}>
-              <Text style={[styles.queuedHeader, { color: colors.textSecondary }]}>
-                {chat.queuedPrompts.length} queued ·{' '}
-                {chat.isStreaming ? 'sends when this turn ends' : 'tap to send now'}
-              </Text>
-              {chat.queuedPrompts.map((q, index) => (
-                <View
-                  key={q.id}
-                  style={[
-                    styles.queuedChip,
-                    { borderColor: colors.border, backgroundColor: colors.backgroundElement },
-                  ]}
-                >
-                  <Text style={[styles.queuedIndex, { color: colors.tint }]}>{index + 1}</Text>
-                  <Pressable
-                    style={styles.queuedChipBody}
-                    // Not `disabled` while streaming: that would also swallow the
-                    // long-press, which is the one action that matters mid-turn.
-                    onPress={() => {
-                      if (!chat.isStreaming) chat.sendQueuedNow(q.id);
-                    }}
-                    onLongPress={() => handleEditQueued(q.id, q.text)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Queued message: ${q.text}`}
-                    accessibilityHint="Tap to send now, long-press to move back into the composer"
-                  >
-                    <Text
-                      style={[styles.queuedChipText, { color: colors.textSecondary }]}
-                      numberOfLines={1}
-                    >
-                      {q.text}
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    hitSlop={8}
-                    onPress={() => chat.removeQueuedPrompt(q.id)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Remove queued message"
-                  >
-                    <Text style={[styles.queuedChipRemove, { color: colors.textSecondary }]}>✕</Text>
-                  </Pressable>
-                </View>
-              ))}
-            </View>
-          )}
-          {chat.errorMessage && (
-            <View style={[styles.errorBar, { backgroundColor: colors.destructive + '15' }]}>
-              <Text style={[styles.errorBarText, { color: colors.destructive }]}>
-                {chat.errorMessage}
-              </Text>
-              {chat.failedSend && (
-                <Pressable
-                  style={[styles.retryButton, { borderColor: colors.destructive }]}
-                  onPress={chat.retryFailedSend}
-                  hitSlop={8}
-                >
-                  <Text style={[styles.retryButtonText, { color: colors.destructive }]}>
-                    Retry send
+    <SwipeBackView onSwipeBack={popInScreen} enabled={!!inScreenLevel}>
+      <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
+        {/* Header */}
+        <View style={[styles.header, { borderBottomColor: colors.border }]}>
+          <Pressable
+            onPress={goBack}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+          >
+            <Text style={[styles.backButton, { color: colors.tint }]}>
+              &#x2039; {inScreenLevel === 'chat' ? 'Chats' : inScreenLevel ? 'Settings' : 'Back'}
+            </Text>
+          </Pressable>
+          <View style={styles.headerCenter}>
+            {chatOpen ? (
+              <>
+                <Pressable onPress={() => setChatListVisible(true)} hitSlop={6}>
+                  <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
+                    {chatName} ▾
                   </Text>
                 </Pressable>
+                <Text style={[styles.chatSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
+                  {providerDisplayName(chatProvider)} · {chatModel || 'Default'} ·{' '}
+                  {effortDisplayName(chatEffort)}
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
+                  {spriteName}
+                </Text>
+                {(sprite || isLoadingSprite) && (
+                  <View style={styles.statusRow}>
+                    {isWaking || isLoadingSprite ? (
+                      <ActivityIndicator
+                        size="small"
+                        color={colors.textSecondary}
+                        style={styles.statusSpinner}
+                      />
+                    ) : (
+                      <View
+                        style={[styles.statusDot, { backgroundColor: statusColor(sprite!.status) }]}
+                      />
+                    )}
+                    <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+                      {isWaking
+                        ? 'Waking…'
+                        : isLoadingSprite
+                          ? 'Loading…'
+                          : statusDisplayName(sprite!.status)}
+                    </Text>
+                  </View>
+                )}
+              </>
+            )}
+          </View>
+          <View style={styles.headerRight}>
+            {chatOpen ? (
+              <Pressable
+                onPress={() => setSessionSheetMode('settings')}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Chat settings"
+              >
+                <Text style={[styles.headerActionMore, { color: colors.tint }]}>•••</Text>
+              </Pressable>
+            ) : (
+              <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
+                <Text style={[styles.headerActionAdd, { color: colors.tint }]}>＋</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+
+        {/* Tab Bar (hub only) */}
+        {!chatOpen && (
+          <View style={[styles.tabBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
+            {tabItems.map((t) => (
+              <Pressable
+                key={t.key}
+                style={[
+                  styles.tab,
+                  tab === t.key && { borderBottomColor: colors.tint, borderBottomWidth: 2 },
+                ]}
+                onPress={() => setTab(t.key)}
+              >
+                <Text
+                  style={[
+                    styles.tabText,
+                    { color: tab === t.key ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {t.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
+        {/* Active tool label below header (chat view only) */}
+        {chatOpen && activeToolLabel && (
+          <View style={[styles.activeToolBar, { backgroundColor: colors.backgroundSecondary, borderBottomColor: colors.border }]}>
+            <ActivityIndicator size="small" color={colors.tint} />
+            <Text style={[styles.activeToolText, { color: colors.textSecondary }]} numberOfLines={1}>
+              {activeToolLabel}
+            </Text>
+          </View>
+        )}
+
+        {/* Content */}
+        {chatOpen ? (
+          <KeyboardAvoidingView
+            style={styles.flex}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            keyboardVerticalOffset={0}
+          >
+            <FlatList
+              ref={flatListRef}
+              data={chat.messages}
+              renderItem={({ item, index }) => (
+                <ChatMessageView
+                  message={item}
+                  workingDirectory={workingDirectory}
+                  isCurrentlyStreaming={
+                    chat.isStreaming &&
+                    index === chat.messages.length - 1 &&
+                    item.role === 'assistant'
+                  }
+                  showTurnActions={index === chat.messages.length - 1 && !chat.isStreaming}
+                  onContinueTurn={handleContinueTurn}
+                  onMessageActions={setActionsMessage}
+                  onCopyCode={(code) => copyText(code, 'Code copied')}
+                />
               )}
-            </View>
-          )}
-          <ChatInputBar
-            value={chat.inputText}
-            onChangeText={chat.setInputText}
-            onSend={handleSend}
-            onInterrupt={chat.interrupt}
-            isStreaming={chat.isStreaming}
-            disabled={dictation.isTranscribing}
-            provider={chatProvider}
-            onToggleDictation={dictation.toggleSpriteRecording}
-            isDictating={dictation.isSpriteRecording}
-            isTranscribing={dictation.isTranscribing}
-            dictationStatus={dictation.status}
-            dictationError={dictation.error}
-            onClearDictationError={dictation.clearDictationError}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.chatContent}
+              ListEmptyComponent={
+                chat.sessionId && chat.messages.length === 0 ? (
+                  <View style={styles.emptyChatView}>
+                    <ActivityIndicator size="small" color={colors.tint} style={{ marginBottom: Spacing.sm }} />
+                    <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
+                      Resuming previous session...
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.emptyChatView}>
+                    <Text style={[styles.emptyChatTitle, { color: colors.text }]}>
+                      Chat with {providerDisplayName(chatProvider)}
+                    </Text>
+                    <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
+                      Send a message to start this coding session on the sprite.
+                    </Text>
+                    <Pressable
+                      style={[
+                        styles.cwdChip,
+                        { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                      ]}
+                      onPress={() => setSessionSheetMode('settings')}
+                    >
+                      <Text
+                        style={[styles.cwdChipText, { color: colors.textSecondary }]}
+                        numberOfLines={1}
+                      >
+                        📁 {workingDirectory}  ✎
+                      </Text>
+                    </Pressable>
+                  </View>
+                )
+              }
+            />
+            {chat.isStreaming && (chat.status === 'connecting' || chat.status === 'reconnecting') && (
+              <View style={styles.connectingBar}>
+                <ActivityIndicator size="small" color={colors.tint} />
+                <Text style={[styles.connectingText, { color: colors.textSecondary }]}>
+                  {chat.status === 'reconnecting' ? 'Reconnecting to' : 'Connecting to'} {providerDisplayName(chatProvider)}...
+                </Text>
+              </View>
+            )}
+            {chat.queuedPrompts.length > 0 && (
+              <View style={styles.queuedBar}>
+                <Text style={[styles.queuedHeader, { color: colors.textSecondary }]}>
+                  {chat.queuedPrompts.length} queued ·{' '}
+                  {chat.isStreaming ? 'sends when this turn ends' : 'tap to send now'}
+                </Text>
+                {chat.queuedPrompts.map((q, index) => (
+                  <View
+                    key={q.id}
+                    style={[
+                      styles.queuedChip,
+                      { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                    ]}
+                  >
+                    <Text style={[styles.queuedIndex, { color: colors.tint }]}>{index + 1}</Text>
+                    <Pressable
+                      style={styles.queuedChipBody}
+                      // Not `disabled` while streaming: that would also swallow the
+                      // long-press, which is the one action that matters mid-turn.
+                      onPress={() => {
+                        if (!chat.isStreaming) chat.sendQueuedNow(q.id);
+                      }}
+                      onLongPress={() => handleEditQueued(q.id, q.text)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Queued message: ${q.text}`}
+                      accessibilityHint="Tap to send now, long-press to move back into the composer"
+                    >
+                      <Text
+                        style={[styles.queuedChipText, { color: colors.textSecondary }]}
+                        numberOfLines={1}
+                      >
+                        {q.text}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      hitSlop={8}
+                      onPress={() => chat.removeQueuedPrompt(q.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Remove queued message"
+                    >
+                      <Text style={[styles.queuedChipRemove, { color: colors.textSecondary }]}>✕</Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            )}
+            {chat.errorMessage && (
+              <View style={[styles.errorBar, { backgroundColor: colors.destructive + '15' }]}>
+                <Text style={[styles.errorBarText, { color: colors.destructive }]}>
+                  {chat.errorMessage}
+                </Text>
+                {chat.failedSend && (
+                  <Pressable
+                    style={[styles.retryButton, { borderColor: colors.destructive }]}
+                    onPress={chat.retryFailedSend}
+                    hitSlop={8}
+                  >
+                    <Text style={[styles.retryButtonText, { color: colors.destructive }]}>
+                      Retry send
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            )}
+            <ChatInputBar
+              value={chat.inputText}
+              onChangeText={chat.setInputText}
+              onSend={handleSend}
+              onInterrupt={chat.interrupt}
+              isStreaming={chat.isStreaming}
+              disabled={dictation.isTranscribing}
+              provider={chatProvider}
+              onToggleDictation={dictation.toggleSpriteRecording}
+              isDictating={dictation.isSpriteRecording}
+              isTranscribing={dictation.isTranscribing}
+              dictationStatus={dictation.status}
+              dictationError={dictation.error}
+              onClearDictationError={dictation.clearDictationError}
+            />
+          </KeyboardAvoidingView>
+        ) : (
+          <>
+            {tab === 'chats' && (
+              <ChatList
+                chats={chatList}
+                currentChatId={chatId}
+                onSelectChat={handleSelectChat}
+                onDeleteChat={handleDeleteChat}
+                remoteSessions={unlinkedRemoteSessions}
+                onSelectRemote={handleOpenRemoteSession}
+                remoteBusyId={remoteBusyId}
+                onRefresh={handleRefreshRemote}
+                refreshing={remoteRefreshing}
+              />
+            )}
+
+            {tab === 'filesystem' && (
+              <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
+            )}
+
+            {tab === 'settings' && (
+              <SettingsTab
+                sprite={sprite}
+                isLoading={isLoadingSprite}
+                spriteName={spriteName}
+                workingDirectory={workingDirectory}
+                isActive={tab === 'settings'}
+                view={settingsView}
+                onViewChange={setSettingsView}
+                onSpriteUpdated={setSprite}
+                onQuickBash={() => setQuickBashVisible(true)}
+                onBrowseSessions={() => setSessionBrowserVisible(true)}
+              />
+            )}
+          </>
+        )}
+
+        {/* Chat List Sheet (in-chat quick switch) */}
+        {chatListVisible && (
+          <ChatListSheet
+            spriteName={spriteName}
+            currentChatId={chatId}
+            chats={chatList}
+            onSelectChat={handleSelectChat}
+            onNewChat={() => {
+              setChatListVisible(false);
+              setSessionSheetMode('new');
+            }}
+            onClose={() => setChatListVisible(false)}
           />
-        </KeyboardAvoidingView>
-      ) : (
-        <>
-          {tab === 'chats' && (
-            <ChatList
-              chats={chatList}
-              currentChatId={chatId}
-              onSelectChat={handleSelectChat}
-              onDeleteChat={handleDeleteChat}
-              remoteSessions={unlinkedRemoteSessions}
-              onSelectRemote={handleOpenRemoteSession}
-              remoteBusyId={remoteBusyId}
-              onRefresh={handleRefreshRemote}
-              refreshing={remoteRefreshing}
-            />
-          )}
+        )}
 
-          {tab === 'filesystem' && (
-            <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
-          )}
+        {/* New Session / Edit Directory Sheet */}
+        {sessionSheetMode && (
+          <NewSessionSheet
+            spriteName={spriteName}
+            title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
+            confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
+            defaultDirectory={
+              sessionSheetMode === 'settings' ? workingDirectory : defaultDirectory
+            }
+            defaultProvider={
+              sessionSheetMode === 'settings' ? chatProvider : agentDefaults.provider
+            }
+            defaultModel={
+              sessionSheetMode === 'settings'
+                ? chatModel
+                : defaultModelFor(agentDefaults.provider, agentDefaults)
+            }
+            defaultEffort={
+              sessionSheetMode === 'settings'
+                ? chatEffort
+                : defaultEffortFor(agentDefaults.provider, agentDefaults)
+            }
+            defaultClaudeModel={agentDefaults.claudeModel}
+            defaultClaudeEffort={agentDefaults.claudeEffort}
+            defaultCodexModel={agentDefaults.codexModel}
+            defaultCodexEffort={agentDefaults.codexEffort}
+            showProviderPicker
+            locked={sessionSheetMode === 'settings' && isProviderLocked}
+            onClose={() => setSessionSheetMode(null)}
+            onCreate={sessionSheetMode === 'settings' ? updateCurrentSettings : createChat}
+          />
+        )}
 
-          {tab === 'settings' && (
-            <SettingsTab
-              sprite={sprite}
-              isLoading={isLoadingSprite}
-              spriteName={spriteName}
-              workingDirectory={workingDirectory}
-              isActive={tab === 'settings'}
-              onSpriteUpdated={setSprite}
-              onQuickBash={() => setQuickBashVisible(true)}
-              onBrowseSessions={() => setSessionBrowserVisible(true)}
-            />
-          )}
-        </>
-      )}
+        {/* Quick Bash Sheet */}
+        {quickBashVisible && (
+          <QuickBashSheet
+            spriteName={spriteName}
+            onInsertIntoChat={handleInsertBashOutput}
+            onClose={() => setQuickBashVisible(false)}
+          />
+        )}
 
-      {/* Chat List Sheet (in-chat quick switch) */}
-      {chatListVisible && (
-        <ChatListSheet
-          spriteName={spriteName}
-          currentChatId={chatId}
-          chats={chatList}
-          onSelectChat={handleSelectChat}
-          onNewChat={() => {
-            setChatListVisible(false);
-            setSessionSheetMode('new');
-          }}
-          onClose={() => setChatListVisible(false)}
-        />
-      )}
+        {/* Session Browser (resume Claude/Codex sessions from the sprite's transcripts) */}
+        {sessionBrowserVisible && (
+          <SessionBrowserSheet
+            spriteName={spriteName}
+            onResume={handleResumeSession}
+            onClose={() => setSessionBrowserVisible(false)}
+          />
+        )}
 
-      {/* New Session / Edit Directory Sheet */}
-      {sessionSheetMode && (
-        <NewSessionSheet
-          spriteName={spriteName}
-          title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
-          confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
-          defaultDirectory={
-            sessionSheetMode === 'settings' ? workingDirectory : defaultDirectory
-          }
-          defaultProvider={
-            sessionSheetMode === 'settings' ? chatProvider : agentDefaults.provider
-          }
-          defaultModel={
-            sessionSheetMode === 'settings'
-              ? chatModel
-              : defaultModelFor(agentDefaults.provider, agentDefaults)
-          }
-          defaultEffort={
-            sessionSheetMode === 'settings'
-              ? chatEffort
-              : defaultEffortFor(agentDefaults.provider, agentDefaults)
-          }
-          defaultClaudeModel={agentDefaults.claudeModel}
-          defaultClaudeEffort={agentDefaults.claudeEffort}
-          defaultCodexModel={agentDefaults.codexModel}
-          defaultCodexEffort={agentDefaults.codexEffort}
-          showProviderPicker
-          locked={sessionSheetMode === 'settings' && isProviderLocked}
-          onClose={() => setSessionSheetMode(null)}
-          onCreate={sessionSheetMode === 'settings' ? updateCurrentSettings : createChat}
-        />
-      )}
+        {/* Long-press a message: copy / quote / pick a part */}
+        {actionsMessage && messageActions.length > 0 && (
+          <MessageActionsSheet
+            title={actionsMessage.role === 'user' ? 'Your message' : providerDisplayName(chatProvider)}
+            preview={messageText(actionsMessage)}
+            actions={messageActions}
+            onClose={() => setActionsMessage(null)}
+          />
+        )}
 
-      {/* Quick Bash Sheet */}
-      {quickBashVisible && (
-        <QuickBashSheet
-          spriteName={spriteName}
-          onInsertIntoChat={handleInsertBashOutput}
-          onClose={() => setQuickBashVisible(false)}
-        />
-      )}
-
-      {/* Session Browser (resume Claude/Codex sessions from the sprite's transcripts) */}
-      {sessionBrowserVisible && (
-        <SessionBrowserSheet
-          spriteName={spriteName}
-          onResume={handleResumeSession}
-          onClose={() => setSessionBrowserVisible(false)}
-        />
-      )}
-
-      {/* Long-press a message: copy / quote / pick a part */}
-      {actionsMessage && messageActions.length > 0 && (
-        <MessageActionsSheet
-          title={actionsMessage.role === 'user' ? 'Your message' : providerDisplayName(chatProvider)}
-          preview={messageText(actionsMessage)}
-          actions={messageActions}
-          onClose={() => setActionsMessage(null)}
-        />
-      )}
-
-      {selectPartsMessage && (
-        <SelectPartsSheet
-          title="Select part"
-          parts={quotableParts(messageText(selectPartsMessage))}
-          onCopy={(text) => {
-            setSelectPartsMessage(null);
-            copyText(text);
-          }}
-          onQuote={(text) => {
-            setSelectPartsMessage(null);
-            quoteText(text);
-          }}
-          onClose={() => setSelectPartsMessage(null)}
-        />
-      )}
-    </SafeAreaView>
+        {selectPartsMessage && (
+          <SelectPartsSheet
+            title="Select part"
+            parts={quotableParts(messageText(selectPartsMessage))}
+            onCopy={(text) => {
+              setSelectPartsMessage(null);
+              copyText(text);
+            }}
+            onQuote={(text) => {
+              setSelectPartsMessage(null);
+              quoteText(text);
+            }}
+            onClose={() => setSelectPartsMessage(null)}
+          />
+        )}
+      </SafeAreaView>
+    </SwipeBackView>
   );
 }
 
@@ -1287,13 +1338,16 @@ type SettingsView = 'menu' | 'checkpoints' | 'accounts';
 
 // Settings Tab — checkpoints, accounts, sprite info, and delete. A lightweight
 // sub-view switch keeps each nested scroller (CheckpointsList / SpriteAccountsTab)
-// isolated and leaves room for more settings later.
+// isolated and leaves room for more settings later. The sub-view is controlled
+// by the screen so back gestures and the Android back button can step out of it.
 function SettingsTab({
   sprite,
   isLoading,
   spriteName,
   workingDirectory,
   isActive,
+  view,
+  onViewChange,
   onSpriteUpdated,
   onQuickBash,
   onBrowseSessions,
@@ -1303,12 +1357,14 @@ function SettingsTab({
   spriteName: string;
   workingDirectory: string;
   isActive: boolean;
+  view: SettingsView;
+  onViewChange: (view: SettingsView) => void;
   onSpriteUpdated: (sprite: Sprite) => void;
   onQuickBash: () => void;
   onBrowseSessions: () => void;
 }) {
   const colors = useTheme();
-  const [view, setView] = useState<SettingsView>('menu');
+  const setView = onViewChange;
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Poll sprite status every 5 seconds while the Settings menu is showing.
@@ -1349,7 +1405,7 @@ function SettingsTab({
 
   if (view === 'checkpoints') {
     return (
-      <SettingsSubView title="Checkpoints" onBack={() => setView('menu')}>
+      <SettingsSubView title="Checkpoints">
         <CheckpointsList spriteName={spriteName} />
       </SettingsSubView>
     );
@@ -1357,7 +1413,7 @@ function SettingsTab({
 
   if (view === 'accounts') {
     return (
-      <SettingsSubView title="Accounts" onBack={() => setView('menu')}>
+      <SettingsSubView title="Accounts">
         <SpriteAccountsTab spriteName={spriteName} isActive={isActive} />
       </SettingsSubView>
     );
@@ -1474,25 +1530,14 @@ function SettingsTab({
   );
 }
 
-// Full-height settings sub-screen with an in-tab back to the menu.
-function SettingsSubView({
-  title,
-  onBack,
-  children,
-}: {
-  title: string;
-  onBack: () => void;
-  children: React.ReactNode;
-}) {
+// Full-height settings sub-screen. Back is owned by the screen header (and the
+// edge swipe, and Android back) so there is exactly one back control per level.
+function SettingsSubView({ title, children }: { title: string; children: React.ReactNode }) {
   const colors = useTheme();
   return (
     <View style={styles.flex}>
       <View style={[styles.subHeader, { borderBottomColor: colors.border }]}>
-        <Pressable onPress={onBack} hitSlop={12}>
-          <Text style={[styles.subBack, { color: colors.tint }]}>&#x2039; Settings</Text>
-        </Pressable>
         <Text style={[styles.subTitle, { color: colors.text }]}>{title}</Text>
-        <View style={styles.subHeaderSpacer} />
       </View>
       <View style={styles.flex}>{children}</View>
     </View>
@@ -1768,23 +1813,13 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   subHeader: {
-    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  subBack: {
-    fontSize: FontSize.md,
-    fontWeight: '600',
-    width: 90,
-  },
   subTitle: {
     fontSize: FontSize.md,
     fontWeight: '700',
-  },
-  subHeaderSpacer: {
-    width: 90,
   },
 });

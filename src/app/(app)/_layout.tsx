@@ -17,7 +17,10 @@ export default function AppLayout() {
       />
       <Stack.Screen
         name="sprite/[name]"
-        options={{ headerShown: false }}
+        // The screen toggles gestureEnabled off while a conversation or a
+        // settings sub-view is open, so the edge swipe steps back one level
+        // instead of popping straight out to the sprite list.
+        options={{ headerShown: false, gestureEnabled: true }}
       />
       <Stack.Screen
         name="settings"
