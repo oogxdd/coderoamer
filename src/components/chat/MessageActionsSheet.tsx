@@ -69,7 +69,7 @@ export function MessageActionsSheet({
                   // Actions that present another modal ("Select part…") race the
                   // dismissal on iOS and can end up presenting nothing at all;
                   // it also keeps the copy toast from appearing behind the sheet.
-                  setTimeout(action.onPress, DISMISS_MS);
+                  setTimeout(() => action.onPress(), DISMISS_MS);
                 }}
                 accessibilityRole="button"
                 accessibilityLabel={action.label}

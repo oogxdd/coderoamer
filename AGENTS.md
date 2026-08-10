@@ -90,7 +90,8 @@ node scripts/ws-proxy.js         # WS auth proxy for web (browsers can't auth WS
 ### Route layout (Expo Router, file-based, `src/app/`)
 
 ```
-_layout.tsx        Root: ThemeProvider (light/dark) + AuthProvider, Stack
+_layout.tsx        Root: GestureHandlerRootView + ThemeProvider (light/dark)
+                   + AuthProvider + ToastProvider, Stack
 index.tsx          Loading/redirect based on auth state
 auth.tsx           3-step sign-in (Sprites token → Claude token → GitHub)
 api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
@@ -294,6 +295,26 @@ update this doc.**
   `wisp-chat-<provider>-<userMessageId>` (`safeTaskName`). Old builds ran turns
   as supervised services — `cleanupLegacyChatServices` still deletes stale
   `wisp-claude-*`/`wisp-codex-*`/`wisp-exec-*` services on sprite open.
+- **Sending during a turn queues, it does not interrupt.** `sendMessage` appends
+  to `queuedPrompts` whenever a run is in flight and fires it when the turn ends
+  (`maybeSendNextQueued`). The composer's send button therefore stays enabled
+  while streaming; **Stop is a separate button**, never the same control. Don't
+  re-disable send on `isStreaming` — that made queuing unreachable and left
+  killing the agent as the only way to add a follow-up.
+- **The sprite screen has back levels the navigator can't see** — an open
+  conversation (`chatOpen`), a settings sub-view (`settingsView`). They're
+  collapsed into `inScreenLevel`, which drives the header button, the
+  `SwipeBackView` edge gesture, and the Android back button together, and turns
+  the native stack gesture off (`navigation.setOptions({ gestureEnabled })`)
+  while a level is open so the two can't both fire. **Add any new in-screen
+  level to `inScreenLevel`**, or back will skip past it and pop the screen.
+  Keep it a plain value, not a closure — those effects must not re-run per render.
+- **`parseMessageSegments` (`src/services/message-text.ts`) is shared** by
+  `AssistantMessage` and the copy/quote picker on purpose: the picker may only
+  offer pieces the bubble actually drew. Don't fork the fence parser.
+- **Auto-scroll follows the bottom only when already at the bottom**
+  (`isNearBottomRef`); otherwise the "↓ Latest" pill appears. Unconditional
+  `scrollToEnd` on new output makes a streaming answer unreadable.
 - **Path aliases** (`tsconfig.json`): `@/*` → `./src/*`, `@/assets/*` → `./assets/*`.
 - **Theming:** `useTheme()` (`src/hooks/use-theme.ts`) returns the active
   `Colors` palette from `src/constants/theme.ts` (light/dark aware via

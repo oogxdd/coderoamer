@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -56,22 +56,19 @@ export default function DashboardScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    loadSprites().finally(() => setIsFirstLoad(false));
-  }, [loadSprites]);
-
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     await loadSprites();
     setIsRefreshing(false);
   }, [loadSprites]);
 
-  // Coming back from a sprite screen: release the navigation guard and quietly
-  // re-sync status and running-turn badges, which may have changed while away.
+  // Runs on mount and on every return from a sprite screen: release the
+  // navigation guard and quietly re-sync status and running-turn badges, which
+  // may have changed while away.
   useFocusEffect(
     useCallback(() => {
       navigatingRef.current = false;
-      loadSprites();
+      loadSprites().finally(() => setIsFirstLoad(false));
     }, [loadSprites])
   );
 
