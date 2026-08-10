@@ -274,6 +274,14 @@ update this doc.**
 
 ## Non-obvious conventions & invariants
 
+- **Onboarding is Sprites-only for now.** Claude/GitHub device-level onboarding
+  and cross-Sprite provisioning code is intentionally retained but hidden. The
+  supported UI path is to connect providers separately in each Sprite's
+  Integrations tab. See `docs/integration-auth-architecture.md` before
+  re-enabling global provider onboarding.
+- **Do not create an implicit first conversation.** A newly created or empty
+  Sprite must show an empty Chats list. Persist a local chat only after the user
+  explicitly starts one, or when a discovered remote transcript is resumed.
 - **Working directory is locked per chat once a conversation starts.** Claude
   keys resumable history by cwd (`~/.claude/projects/<hashed-cwd>/`), so
   `--resume <id>` only works from the same path. Helpers in

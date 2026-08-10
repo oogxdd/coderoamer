@@ -71,9 +71,16 @@ You do not have to pay separately for model API usage if you already use a suppo
 - GitHub can be connected per environment through device login, or with a pasted OAuth token /
   fine-grained PAT.
 
-Account credentials are stored in the device secure store on native platforms and provisioned
-into the selected remote environment. Provider availability and usage limits still depend on the
-user's Claude or ChatGPT plan.
+Onboarding currently stores only the Sprites token. Provider accounts are connected from each
+Sprite's Integrations tab and their credentials live in that environment. Code for a future
+device-level “sign in once, provision every Sprite” flow is retained but intentionally hidden
+until its refresh, revocation, and conflict semantics are defined. Provider availability and usage
+limits still depend on the user's Claude or ChatGPT plan.
+
+Per-Sprite account connections run their login flow inside the selected environment so the
+credential is created where its CLI will use it. The transport, web/native differences, security
+rules, and extension checklist are documented in
+[`docs/integration-auth-architecture.md`](docs/integration-auth-architecture.md).
 
 ### Planned
 
@@ -106,8 +113,8 @@ You need:
 - optionally, a GitHub OAuth token or fine-grained PAT for cloning and pushing repositories.
 
 On first launch, CodeRoamer asks for the Sprites token and walks through the initial Claude and
-GitHub setup. Claude, Codex, and GitHub accounts can also be connected for an individual Sprite
-from its **Accounts** screen.
+GitHub setup. Claude Code, Codex, GitHub, and Vercel CLI can also be connected for an individual
+Sprite from its **Integrations** tab.
 
 ### 2. Create or open a Sprite
 

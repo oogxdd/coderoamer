@@ -53,7 +53,7 @@ import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/Sess
 import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
 import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
-import { SpriteAccountsTab } from '@/components/sprite/SpriteAccountsTab';
+import { SpriteIntegrationsTab } from '@/components/sprite/SpriteIntegrationsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
 import { reconcileActiveRuns } from '@/services/run-reconcile';
@@ -62,10 +62,19 @@ import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 
-// The sprite screen is a hub with three tabs. "chats" (center) is the default
+// The sprite screen is a hub with four tabs. "chats" is the default
 // and shows the conversation list; opening a conversation switches to a
 // full-screen chat view (tracked by `chatOpen`) that hides the tab bar.
-type Tab = 'chats' | 'filesystem' | 'settings';
+type Tab = 'chats' | 'filesystem' | 'integrations' | 'settings';
+
+function isTab(value: unknown): value is Tab {
+  return (
+    value === 'chats' ||
+    value === 'filesystem' ||
+    value === 'integrations' ||
+    value === 'settings'
+  );
+}
 
 interface AgentDefaults {
   provider: AgentProvider;
@@ -124,10 +133,10 @@ function getActiveToolLabel(
 }
 
 export default function SpriteDetailScreen() {
-  const { name } = useLocalSearchParams<{ name: string }>();
+  const { name, tab: initialTab } = useLocalSearchParams<{ name: string; tab?: string }>();
   const colors = useTheme();
   const { showToast } = useToast();
-  const [tab, setTab] = useState<Tab>('chats');
+  const [tab, setTab] = useState<Tab>(isTab(initialTab) ? initialTab : 'chats');
   // Whether a single conversation is open full-screen (vs. the 3-tab hub).
   const [chatOpen, setChatOpen] = useState(false);
   // Settings sub-view lives here, not in SettingsTab, so the back gesture and
@@ -279,7 +288,8 @@ export default function SpriteDetailScreen() {
   });
   const isProviderLocked = chat.messages.some((message) => message.role === 'user');
 
-  // Initialize chat list and current chat on mount
+  // Load existing chats and current defaults on mount. An empty Sprite stays
+  // empty until the user explicitly starts or resumes a conversation.
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -342,28 +352,12 @@ export default function SpriteDetailScreen() {
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
         const defaultProvider = defaults.provider;
-        // Create the first chat
-        const firstChat: PersistedChat = {
-          id: `${spriteName}-chat-1`,
-          spriteName,
-          chatNumber: 1,
-          provider: defaultProvider,
-          model: defaultModelFor(defaultProvider, defaults),
-          effort: defaultEffortFor(defaultProvider, defaults),
-          workingDirectory: fallbackDir,
-          createdAt: Date.now(),
-          lastUsed: Date.now(),
-          isClosed: false,
-          lastSessionComplete: true,
-          processedEventUUIDs: [],
-        };
-        commitChatList([firstChat]);
-        await chatRepository.upsert(firstChat);
-        setChatId(firstChat.id);
+        commitChatList([]);
+        setChatId('');
         setChatName('Session 1');
         setChatProvider(defaultProvider);
-        setChatModel(firstChat.model ?? 'sonnet');
-        setChatEffort(firstChat.effort ?? 'high');
+        setChatModel(defaultModelFor(defaultProvider, defaults));
+        setChatEffort(defaultEffortFor(defaultProvider, defaults));
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
         setActiveRun(undefined);
@@ -903,6 +897,7 @@ export default function SpriteDetailScreen() {
   const tabItems: { key: Tab; label: string }[] = [
     { key: 'chats', label: 'Chats' },
     { key: 'filesystem', label: 'Files' },
+    { key: 'integrations', label: 'Integrations' },
     { key: 'settings', label: 'Settings' },
   ];
 
@@ -922,8 +917,13 @@ export default function SpriteDetailScreen() {
   }, [chatOpen]);
 
   const goBack = useCallback(() => {
-    if (inScreenLevel) popInScreen();
-    else router.back();
+    if (inScreenLevel) {
+      popInScreen();
+      return;
+    }
+    // A directly opened web route can have no Expo Router history, making
+    // router.back() a no-op. A sprite's parent screen is always Dashboard.
+    router.replace('/(app)');
   }, [inScreenLevel, popInScreen]);
 
   // While an in-screen level is open, the native stack gesture would skip past
@@ -1248,6 +1248,10 @@ export default function SpriteDetailScreen() {
               <FilesystemTab spriteName={spriteName} workingDirectory={workingDirectory} />
             )}
 
+            {tab === 'integrations' && (
+              <SpriteIntegrationsTab spriteName={spriteName} isActive={tab === 'integrations'} />
+            )}
+
             {tab === 'settings' && (
               <SettingsTab
                 sprite={sprite}
@@ -1393,12 +1397,12 @@ function ConnectRow({
   );
 }
 
-type SettingsView = 'menu' | 'checkpoints' | 'accounts';
+type SettingsView = 'menu' | 'checkpoints';
 
-// Settings Tab — checkpoints, accounts, sprite info, and delete. A lightweight
-// sub-view switch keeps each nested scroller (CheckpointsList / SpriteAccountsTab)
-// isolated and leaves room for more settings later. The sub-view is controlled
-// by the screen so back gestures and the Android back button can step out of it.
+// Settings Tab — checkpoints, sprite info, and delete. A lightweight sub-view
+// keeps the checkpoints scroller isolated and leaves room for more settings
+// later. The sub-view is controlled by the screen so back gestures and the
+// Android back button can step out of it.
 function SettingsTab({
   sprite,
   isLoading,
@@ -1470,14 +1474,6 @@ function SettingsTab({
     );
   }
 
-  if (view === 'accounts') {
-    return (
-      <SettingsSubView title="Accounts">
-        <SpriteAccountsTab spriteName={spriteName} isActive={isActive} />
-      </SettingsSubView>
-    );
-  }
-
   if (isLoading) {
     return (
       <View style={styles.centerView}>
@@ -1542,12 +1538,6 @@ function SettingsTab({
         subtitle="Create and restore filesystem checkpoints for this sprite."
         onPress={() => setView('checkpoints')}
       />
-      <ConnectRow
-        title="Accounts"
-        subtitle="Connect Claude, Codex, and GitHub accounts for this sprite."
-        onPress={() => setView('accounts')}
-      />
-
       {!sprite ? (
         <Text style={[styles.errorBarText, { color: colors.destructive, marginTop: Spacing.lg }]}>
           Failed to load sprite info
