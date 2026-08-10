@@ -12,6 +12,8 @@ import {
   ScrollView,
   AppState,
   BackHandler,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
 } from 'react-native';
 import { useLocalSearchParams, router, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -73,6 +75,9 @@ interface AgentDefaults {
   codexEffort: AgentEffort;
 }
 
+/** Distance from the bottom, in points, still counted as "following along". */
+const NEAR_BOTTOM_THRESHOLD = 120;
+
 const INITIAL_AGENT_DEFAULTS: AgentDefaults = {
   provider: 'claude',
   claudeModel: 'sonnet',
@@ -133,6 +138,10 @@ export default function SpriteDetailScreen() {
   // A cold sprite is woken by this screen, not by the list that linked here.
   const [isWaking, setIsWaking] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+  // Whether the transcript is scrolled to the bottom. A ref because the
+  // auto-scroll effect reads it without wanting to re-run when it changes.
+  const isNearBottomRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   // Multi-chat state
   const [chatId, setChatId] = useState<string>('');
@@ -445,14 +454,38 @@ export default function SpriteDetailScreen() {
     return () => subscription.remove();
   }, [chatId, commitChatList, spriteName]);
 
-  // Auto-scroll on new messages
+  // Auto-scroll on new output, but only when the user is already at the bottom.
+  // Scrolling up during a turn means they are reading something; yanking them
+  // back on every token batch made long answers impossible to follow.
   useEffect(() => {
-    if (chat.messages.length > 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
-    }
+    if (chat.messages.length === 0) return;
+    if (!isNearBottomRef.current) return;
+    const timer = setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+    return () => clearTimeout(timer);
   }, [chat.messages.length, chat.messages[chat.messages.length - 1]?.content.length]);
+
+  // Opening a conversation always starts pinned to the newest message.
+  useEffect(() => {
+    if (!chatOpen) return;
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, [chatOpen, chatId]);
+
+  const handleChatScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    const near = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+    isNearBottomRef.current = near;
+    setShowJumpToLatest((prev) => (prev === !near ? prev : !near));
+  }, []);
+
+  const scrollToLatest = useCallback(() => {
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+    flatListRef.current?.scrollToEnd({ animated: true });
+  }, []);
 
   // Update chat list with first message preview when messages change
   useEffect(() => {
@@ -1047,6 +1080,12 @@ export default function SpriteDetailScreen() {
               )}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.chatContent}
+              onScroll={handleChatScroll}
+              scrollEventThrottle={64}
+              // Drag the transcript down to dismiss the keyboard, and let a tap
+              // on a message act without first needing a tap to dismiss it.
+              keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+              keyboardShouldPersistTaps="handled"
               ListEmptyComponent={
                 chat.sessionId && chat.messages.length === 0 ? (
                   <View style={styles.emptyChatView}>
@@ -1077,10 +1116,29 @@ export default function SpriteDetailScreen() {
                         📁 {workingDirectory}  ✎
                       </Text>
                     </Pressable>
+                    <Text style={[styles.emptyChatTip, { color: colors.textSecondary }]}>
+                      Tip: long-press any message to copy or quote it. You can send a
+                      follow-up while a turn is still running — it queues.
+                    </Text>
                   </View>
                 )
               }
             />
+            {showJumpToLatest && chat.messages.length > 0 && (
+              <Pressable
+                style={[
+                  styles.jumpToLatest,
+                  { backgroundColor: colors.card, borderColor: colors.border },
+                ]}
+                onPress={scrollToLatest}
+                accessibilityRole="button"
+                accessibilityLabel="Jump to latest message"
+              >
+                <Text style={[styles.jumpToLatestText, { color: colors.tint }]}>
+                  ↓ Latest{chat.isStreaming ? ' · still working' : ''}
+                </Text>
+              </Pressable>
+            )}
             {chat.isStreaming && (chat.status === 'connecting' || chat.status === 'reconnecting') && (
               <View style={styles.connectingBar}>
                 <ActivityIndicator size="small" color={colors.tint} />
@@ -1655,6 +1713,13 @@ const styles = StyleSheet.create({
   cwdChipText: {
     fontSize: FontSize.sm,
   },
+  emptyChatTip: {
+    fontSize: FontSize.xs,
+    textAlign: 'center',
+    lineHeight: 17,
+    marginTop: Spacing.xl,
+    maxWidth: 300,
+  },
   connectingBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1684,6 +1749,23 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   retryButtonText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  jumpToLatest: {
+    alignSelf: 'center',
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 5,
+    elevation: 4,
+  },
+  jumpToLatestText: {
     fontSize: FontSize.sm,
     fontWeight: '600',
   },

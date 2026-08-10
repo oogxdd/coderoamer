@@ -129,6 +129,9 @@ export function ChatList({
         ]}
         onPress={() => onSelectChat(item)}
         onLongPress={() => confirmDelete(item)}
+        accessibilityRole="button"
+        accessibilityLabel={chatName}
+        accessibilityHint="Long press to delete this conversation"
       >
         <View style={styles.chatRowContent}>
           <View style={styles.chatRowTop}>
@@ -149,11 +152,23 @@ export function ChatList({
           ) : (
             <Text style={[styles.chatPreview, { color: colors.textSecondary }]}>No messages</Text>
           )}
-          <Text style={[styles.chatProvider, { color: colors.textSecondary }]} numberOfLines={1}>
-            {providerDisplayName(item.provider)}
-            {item.workingDirectory ? ` · ${shortWorkingDirectory(item.workingDirectory)}` : ''}
-            {item.activeRun ? ' · Running' : ''}
-          </Text>
+          <View style={styles.chatMetaRow}>
+            {/* A turn in flight is the most important thing a row can say, so it
+                gets the same live badge the computer-started sessions use. */}
+            {item.activeRun && (
+              <View style={styles.liveBadge}>
+                <View style={[styles.liveDot, { backgroundColor: LIVE_COLOR }]} />
+                <Text style={[styles.liveBadgeText, { color: LIVE_COLOR }]}>RUNNING</Text>
+              </View>
+            )}
+            <Text
+              style={[styles.chatProvider, { color: colors.textSecondary }]}
+              numberOfLines={1}
+            >
+              {providerDisplayName(item.provider)}
+              {item.workingDirectory ? ` · ${shortWorkingDirectory(item.workingDirectory)}` : ''}
+            </Text>
+          </View>
         </View>
         {isActive && <View style={[styles.activeDot, { backgroundColor: colors.tint }]} />}
       </Pressable>
@@ -264,6 +279,12 @@ const styles = StyleSheet.create({
   },
   chatProvider: {
     fontSize: FontSize.xs,
+    flexShrink: 1,
+  },
+  chatMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
     marginTop: 4,
   },
   remoteMetaRow: {
