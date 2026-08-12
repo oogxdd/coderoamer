@@ -12,8 +12,8 @@ export default function AppLayout() {
   return (
     <Stack>
       <Stack.Screen
-        name="index"
-        options={{ title: 'Sprites', headerLargeTitle: false }}
+        name="(tabs)"
+        options={{ headerShown: false }}
       />
       <Stack.Screen
         name="sprite/[name]"
@@ -21,10 +21,6 @@ export default function AppLayout() {
         // settings sub-view is open, so the edge swipe steps back one level
         // instead of popping straight out to the sprite list.
         options={{ headerShown: false, gestureEnabled: true }}
-      />
-      <Stack.Screen
-        name="settings"
-        options={{ title: 'Settings' }}
       />
       <Stack.Screen
         name="guide"
