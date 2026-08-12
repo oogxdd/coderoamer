@@ -185,22 +185,6 @@ export default function DashboardScreen() {
         <Text style={styles.fabText}>+</Text>
       </Pressable>
 
-      {/* Bottom bar: Guides + Settings */}
-      <View style={styles.bottomBar}>
-        <Pressable
-          style={[styles.bottomButton, { backgroundColor: colors.card }]}
-          onPress={() => router.push('/(app)/guide')}
-        >
-          <Text style={[styles.settingsButtonText, { color: colors.text }]}>Guides</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.bottomButton, { backgroundColor: colors.card }]}
-          onPress={() => router.push('/(app)/settings')}
-        >
-          <Text style={[styles.settingsButtonText, { color: colors.text }]}>Settings</Text>
-        </Pressable>
-      </View>
-
       <Modal visible={showCreate} animationType="slide" transparent>
         <CreateSpriteSheet
           onClose={() => setShowCreate(false)}
@@ -264,7 +248,7 @@ const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
     right: Spacing.xl,
-    bottom: 100,
+    bottom: Spacing.xl,
     width: 56,
     height: 56,
     borderRadius: 28,
@@ -281,21 +265,5 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '400',
     marginTop: -2,
-  },
-  bottomBar: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-    marginHorizontal: Spacing.xl,
-    marginBottom: Spacing.xxl,
-  },
-  bottomButton: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: Spacing.md,
-    borderRadius: 10,
-  },
-  settingsButtonText: {
-    fontSize: FontSize.md,
-    fontWeight: '500',
   },
 });

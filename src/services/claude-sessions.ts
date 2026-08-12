@@ -128,12 +128,13 @@ function extractSentinel(output: string): string | null {
 }
 
 export async function listClaudeSessions(spriteName: string): Promise<ClaudeSessionSummary[]> {
-  const { output } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+  const { output, success } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+  if (!success) throw new Error(`Could not scan Claude sessions on ${spriteName}`);
   const payload = extractSentinel(output);
-  if (!payload) return [];
+  if (!payload) throw new Error(`Claude session scan returned no data on ${spriteName}`);
   try {
     const parsed = JSON.parse(payload);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) throw new Error('Expected an array');
     return parsed
       .filter((x): x is ClaudeSessionSummary => !!x && typeof x.id === 'string')
       .map((x) => ({
@@ -145,7 +146,7 @@ export async function listClaudeSessions(spriteName: string): Promise<ClaudeSess
         live: !!x.live,
       }));
   } catch {
-    return [];
+    throw new Error(`Claude session scan returned invalid data on ${spriteName}`);
   }
 }
 

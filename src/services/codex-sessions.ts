@@ -219,12 +219,13 @@ function extractSentinel(output: string): string | null {
 }
 
 export async function listCodexSessions(spriteName: string): Promise<CodexSessionSummary[]> {
-  const { output } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+  const { output, success } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+  if (!success) throw new Error(`Could not scan Codex sessions on ${spriteName}`);
   const payload = extractSentinel(output);
-  if (!payload) return [];
+  if (!payload) throw new Error(`Codex session scan returned no data on ${spriteName}`);
   try {
     const parsed = JSON.parse(payload);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) throw new Error('Expected an array');
     return parsed
       .filter((x): x is CodexSessionSummary => !!x && typeof x.id === 'string')
       .map((x) => ({
@@ -236,7 +237,7 @@ export async function listCodexSessions(spriteName: string): Promise<CodexSessio
         live: !!x.live,
       }));
   } catch {
-    return [];
+    throw new Error(`Codex session scan returned invalid data on ${spriteName}`);
   }
 }
 

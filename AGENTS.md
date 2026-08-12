@@ -96,12 +96,13 @@ index.tsx          Loading/redirect based on auth state
 auth.tsx           3-step sign-in (Sprites token → Claude token → GitHub)
 api/[...path]+api.ts   Web-only reverse proxy to api.sprites.dev (see below)
 (app)/             Auth-gated group (redirects to /auth if not signed in)
-  _layout.tsx      Authenticated Stack
-  index.tsx        Dashboard — sprite list, create sprite, links to Guides/Settings
+  _layout.tsx      Authenticated Stack; main tabs are its root screen
+  (tabs)/          Bottom tabs: Sprites / Activity / Settings
+    _layout.tsx    Tab navigator; Guides remains a Sprites header action
+    index.tsx      Dashboard — sprite list and create/delete actions
+    activity.tsx   Cross-Sprite Claude/Codex sessions, running and finished
+    settings.tsx   Device-level defaults, credentials, preferences, provenance
   guide.tsx        In-app setup walkthrough
-  settings.tsx     Defaults: provider, claude model, max turns, instructions,
-                   working directory, git name/email, transcription keys,
-                   auto-checkpoint
   sprite/[name].tsx  The main screen: tabs Overview / Chat / Checkpoints,
                      plus session browser + terminals entry points
   exec-poc.tsx     Stream terminal (WebSocket exec → Skia terminal)
@@ -194,6 +195,13 @@ transcript and emits a compact JSON summary wrapped in `@@WISP@@…@@WISP@@`
 sentinel markers (extracted by `extractSentinel` to tolerate shell noise).
 `transcriptToMessages` converts a raw transcript into the app's `ChatMessage[]`
 so the existing chat UI renders it natively.
+
+The top-level Activity tab reuses the Claude and Codex metadata scanners through
+`src/services/activity.ts`. It scans at most three Sprites concurrently, runs the
+two independent agent scans for each Sprite in parallel, reports results as each
+Sprite completes, and preserves one provider's results if the other provider's
+store cannot be read. Activity refreshes on focus; it does not add a hosted
+backend or copy full transcripts off a Sprite.
 
 ### Dictation and audio transcription
 

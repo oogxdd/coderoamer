@@ -92,6 +92,7 @@ rules, and extension checklist are documented in
 
 | Surface | What it is |
 |---|---|
+| **Activity** | Aggregates Claude and Codex transcript metadata across every Sprite, with running/finished status, recency, project path, filtering, and progressive refresh. |
 | **Chat** | A native mobile chat for Claude Code and Codex with streaming text, tool calls, plans, turn outcomes, queued prompts, retry, interrupt, model selection, and reasoning effort. |
 | **Session browser** | Discovers Claude and Codex transcripts stored in the remote environment, renders them natively, and continues existing sessions. History survives reinstalling the phone app because the canonical transcript lives beside the agent. |
 | **Stream terminal** | A real TTY over the Exec WebSocket, rendered with a native Skia terminal. Use the interactive agent TUI or run ordinary shell commands. |
