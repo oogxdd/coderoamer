@@ -19,7 +19,7 @@ export default function Index() {
     return <Redirect href="/auth" />;
   }
 
-  return <Redirect href="/(app)" />;
+  return <Redirect href="/(app)/(tabs)" />;
 }
 
 const styles = StyleSheet.create({

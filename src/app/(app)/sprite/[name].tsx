@@ -923,7 +923,7 @@ export default function SpriteDetailScreen() {
     }
     // A directly opened web route can have no Expo Router history, making
     // router.back() a no-op. A sprite's parent screen is always Dashboard.
-    router.replace('/(app)');
+    router.replace('/(app)/(tabs)');
   }, [inScreenLevel, popInScreen]);
 
   // While an in-screen level is open, the native stack gesture would skip past

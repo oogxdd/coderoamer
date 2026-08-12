@@ -67,7 +67,7 @@ export default function AuthScreen() {
       if (ENABLE_GLOBAL_PROVIDER_AUTH) {
         setStep('claude');
       } else {
-        router.replace('/(app)');
+        router.replace('/(app)/(tabs)');
       }
     } catch (err: any) {
       if (err?.code === 'unauthorized') {
@@ -143,7 +143,7 @@ export default function AuthScreen() {
       }
 
       await auth.refreshAuth();
-      router.replace('/(app)');
+      router.replace('/(app)/(tabs)');
     } catch (err: any) {
       setIsPollingGitHub(false);
       if (err.message !== 'Cancelled') {
@@ -164,7 +164,7 @@ export default function AuthScreen() {
     pollingAbortRef.current = null;
     setIsPollingGitHub(false);
     auth.refreshAuth();
-    router.replace('/(app)');
+    router.replace('/(app)/(tabs)');
   };
 
   const stepNumber = step === 'sprites' ? 1 : step === 'claude' ? 2 : 3;
