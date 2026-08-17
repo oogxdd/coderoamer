@@ -19,6 +19,24 @@ export async function readAsStringAsync(): Promise<string> {
   return '';
 }
 
+export const FileSystemUploadType = {
+  BINARY_CONTENT: 0,
+  MULTIPART: 1,
+} as const;
+
+export const FileSystemSessionType = {
+  BACKGROUND: 0,
+  FOREGROUND: 1,
+} as const;
+
+export async function uploadAsync(): Promise<{
+  status: number;
+  body: string;
+  headers: Record<string, string>;
+}> {
+  return { status: 0, body: '', headers: {} };
+}
+
 export async function writeAsStringAsync(): Promise<void> {}
 
 export const documentDirectory: string | null = null;

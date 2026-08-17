@@ -230,6 +230,13 @@ auto-send the chat message. AssemblyAI and OpenAI keys are stored via
 `src/services/auth.ts` (`assemblyAiToken`, `openAiToken`) and configured in
 Settings → Transcription.
 
+**Never build a `Blob` out of bytes for a native upload.** React Native's `Blob`
+is a handle into a native blob store, and its constructor rejects binary parts
+outright — `new Blob([bytes])` throws "Creating blobs from 'ArrayBuffer' and
+'ArrayBufferView' are not supported". Raw-body uploads on device go through
+`FileSystem.uploadAsync(..., { uploadType: BINARY_CONTENT })`, which streams
+from disk and never materialises the clip in JS. Blobs are web-only here.
+
 ### Terminal (`src/components/terminal/`)
 
 A from-scratch Skia terminal (not xterm.js): `AnsiParser` → `TerminalBuffer`

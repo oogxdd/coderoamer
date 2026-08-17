@@ -2,7 +2,6 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { loadToken } from '@/services/auth';
 import { LocalAudioFile } from '@/services/audio-transcription';
-import { base64ToBytes } from '@/services/base64';
 
 /** Providers that transcribe a finished recording by uploading it. */
 export type CloudTranscriptionProvider = 'assemblyai' | 'openai';
@@ -30,6 +29,7 @@ export function batchProviderFor(
 }
 
 const ASSEMBLYAI_BASE_URL = 'https://api.assemblyai.com/v2';
+const ASSEMBLYAI_UPLOAD_URL = `${ASSEMBLYAI_BASE_URL}/upload`;
 const OPENAI_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const MAX_AUDIO_UPLOAD_BYTES = 50 * 1024 * 1024;
 
@@ -39,32 +39,97 @@ function safeFileName(value: string | null | undefined, fallbackExt = 'm4a'): st
   return name.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120) || fallback;
 }
 
-async function readLocalAudioBytes(audio: LocalAudioFile): Promise<Uint8Array> {
-  if (audio.size && audio.size > MAX_AUDIO_UPLOAD_BYTES) {
+/**
+ * Web only — native never reads the clip into JS (see `uploadAudioToAssemblyAI`).
+ * A picked file carries its own bytes; a recording is a `blob:` URL.
+ */
+async function readWebAudioBlob(audio: LocalAudioFile, type: string): Promise<Blob> {
+  if (audio.file?.arrayBuffer) {
+    return new Blob([await audio.file.arrayBuffer()], { type });
+  }
+  const response = await fetch(audio.uri);
+  return response.blob();
+}
+
+function parseUploadUrl(body: string): string {
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    throw new Error('AssemblyAI upload returned a response that was not JSON.');
+  }
+  const uploadUrl = (json as { upload_url?: unknown } | null)?.upload_url;
+  if (typeof uploadUrl !== 'string') {
+    throw new Error('AssemblyAI upload did not return an audio URL.');
+  }
+  return uploadUrl;
+}
+
+/**
+ * POSTs the raw audio to `/v2/upload` and returns the URL AssemblyAI hands back.
+ *
+ * Nothing here may build a `Blob` out of bytes: React Native's Blob is backed by
+ * a native blob store and its constructor rejects binary parts outright
+ * ("Creating blobs from 'ArrayBuffer' and 'ArrayBufferView' are not supported"),
+ * which is what used to kill every AssemblyAI recording on device — including
+ * the streaming provider, whose finished recordings come back through this same
+ * batch path via `batchProviderFor`.
+ *
+ * So native uploads straight from disk with `FileSystem.uploadAsync`. That is
+ * not just Blob-avoidance: reading the file into JS first would materialise a
+ * 50 MB clip four times over (base64 string → bytes → RN's copy → base64 again
+ * for the bridge) before a single byte left the phone. The foreground session
+ * type keeps the upload tied to this dictation rather than to iOS's discretionary
+ * background queue.
+ *
+ * Web has no `uploadAsync`, so it reads the clip and posts it — and there a
+ * `Blob` really is the right body, because a browser Blob is just bytes.
+ */
+async function uploadAudioToAssemblyAI(
+  apiKey: string,
+  audio: LocalAudioFile
+): Promise<string> {
+  const headers = {
+    authorization: apiKey,
+    'content-type': audio.mimeType ?? 'application/octet-stream',
+  };
+
+  if (Platform.OS !== 'web') {
+    const info = await FileSystem.getInfoAsync(audio.uri, { size: true });
+    if (!info?.exists) {
+      throw new Error('The recording is no longer available on disk.');
+    }
+    if ((info.size ?? 0) > MAX_AUDIO_UPLOAD_BYTES) {
+      throw new Error('Audio file is too large to upload for transcription.');
+    }
+
+    const result = await FileSystem.uploadAsync(ASSEMBLYAI_UPLOAD_URL, audio.uri, {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      sessionType: FileSystem.FileSystemSessionType.FOREGROUND,
+      headers,
+    });
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(result.body || `AssemblyAI upload failed (${result.status}).`);
+    }
+    return parseUploadUrl(result.body ?? '');
+  }
+
+  const blob = await readWebAudioBlob(audio, headers['content-type']);
+  if (blob.size > MAX_AUDIO_UPLOAD_BYTES) {
     throw new Error('Audio file is too large to upload for transcription.');
   }
 
-  if (audio.file?.arrayBuffer) {
-    const buffer = await audio.file.arrayBuffer();
-    return new Uint8Array(buffer);
-  }
-
-  if (Platform.OS === 'web') {
-    const response = await fetch(audio.uri);
-    const buffer = await response.arrayBuffer();
-    return new Uint8Array(buffer);
-  }
-
-  const base64 = await FileSystem.readAsStringAsync(audio.uri, {
-    encoding: FileSystem.EncodingType.Base64,
+  const response = await fetch(ASSEMBLYAI_UPLOAD_URL, {
+    method: 'POST',
+    headers,
+    body: blob,
   });
-  return base64ToBytes(base64);
-}
-
-function makeAudioBlob(bytes: Uint8Array, mimeType?: string | null): Blob {
-  return new Blob([bytes.buffer as ArrayBuffer], {
-    type: mimeType ?? 'application/octet-stream',
-  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(text || `AssemblyAI upload failed (${response.status}).`);
+  }
+  return parseUploadUrl(await response.text());
 }
 
 async function wait(ms: number): Promise<void> {
@@ -77,30 +142,11 @@ async function transcribeWithAssemblyAI(audio: LocalAudioFile): Promise<string> 
     throw new Error('AssemblyAI API key is not saved. Add it in Settings.');
   }
 
-  const bytes = await readLocalAudioBytes(audio);
-  if (bytes.byteLength > MAX_AUDIO_UPLOAD_BYTES) {
+  if (audio.size && audio.size > MAX_AUDIO_UPLOAD_BYTES) {
     throw new Error('Audio file is too large to upload for transcription.');
   }
 
-  const uploadResponse = await fetch(`${ASSEMBLYAI_BASE_URL}/upload`, {
-    method: 'POST',
-    headers: {
-      authorization: apiKey,
-      'content-type': audio.mimeType ?? 'application/octet-stream',
-    },
-    body: makeAudioBlob(bytes, audio.mimeType),
-  });
-
-  if (!uploadResponse.ok) {
-    const text = await uploadResponse.text().catch(() => '');
-    throw new Error(text || `AssemblyAI upload failed (${uploadResponse.status}).`);
-  }
-
-  const uploadJson = await uploadResponse.json();
-  const uploadUrl = uploadJson.upload_url;
-  if (typeof uploadUrl !== 'string') {
-    throw new Error('AssemblyAI upload did not return an audio URL.');
-  }
+  const uploadUrl = await uploadAudioToAssemblyAI(apiKey, audio);
 
   const transcriptResponse = await fetch(`${ASSEMBLYAI_BASE_URL}/transcript`, {
     method: 'POST',
