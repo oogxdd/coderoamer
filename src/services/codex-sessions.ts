@@ -1,6 +1,13 @@
 import { ChatContent, ChatMessage, ToolResultCard, ToolUseCard, makeId } from '@/models/chat';
 import { JSONValue } from '@/models/claude-events';
 import { runExec } from './api';
+import {
+  SessionScanResult,
+  extractSentinel,
+  heredoc,
+  parseScanPayload,
+  scannedSessionsWithDetail,
+} from './session-scan';
 
 /**
  * Reads Codex CLI's own on-disk "rollout" transcripts from a sprite — the same
@@ -51,8 +58,16 @@ const KEPT = `new Set([
   'response_item:web_search_call',
 ])`;
 
-const LIST_SCRIPT = String.raw`
+/**
+ * `SINCE` is the caller's scan cursor (see `session-scan.ts`): a rollout whose
+ * mtime is at or below it is emitted as `{id, modified, live, stale:1}` without
+ * being read, because its preview and line count cannot have changed.
+ */
+function listScript(since: number): string {
+  return String.raw`
 const fs = require('fs'), os = require('os'), path = require('path');
+const SINCE = ${Math.max(0, Math.floor(since))};
+const SCAN_START = Date.now();
 const root = path.join(os.homedir(), '.codex', 'sessions');
 const out = [];
 const UUID_RE = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
@@ -125,11 +140,23 @@ function fileId(name) {
   return name.replace(/^rollout-/, '').replace(/\.jsonl$/, '').split('-').pop();
 }
 function readRollout(fp, name) {
-  let stat, content;
-  try { stat = fs.statSync(fp); content = fs.readFileSync(fp, 'utf8'); } catch { return; }
+  let stat;
+  try { stat = fs.statSync(fp); } catch { return; }
+  const modified = Math.floor(stat.mtimeMs);
+  const live = openNames.has(name) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS);
+  const nameId = fileId(name);
+  // Unchanged since the caller's cursor: report liveness only, don't read. The
+  // thread id has to come from the filename here — recovering it from the body
+  // would mean reading the file we are trying to skip.
+  if (SINCE > 0 && modified <= SINCE && nameId) {
+    out.push({ id: nameId, modified, live, stale: 1 });
+    return;
+  }
+  let content;
+  try { content = fs.readFileSync(fp, 'utf8'); } catch { return; }
   const lines = content.split('\n').filter((l) => l.trim());
   if (lines.length === 0) return;
-  let id = fileId(name);
+  let id = nameId;
   let cwd = null;
   let preview = '';
   for (const line of lines) {
@@ -146,14 +173,15 @@ function readRollout(fp, name) {
     cwd,
     preview: (preview || '').slice(0, 240),
     messageCount: lines.length,
-    modified: Math.floor(stat.mtimeMs),
-    live: openNames.has(name) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS),
+    modified,
+    live,
   });
 }
 try { walk(root); } catch (e) {}
 out.sort((a, b) => b.modified - a.modified);
-process.stdout.write('@@WISP@@' + JSON.stringify(out) + '@@WISP@@');
+process.stdout.write('@@WISP@@' + JSON.stringify({ cursor: SCAN_START, sessions: out }) + '@@WISP@@');
 `;
+}
 
 /**
  * Node script (run on the sprite) that locates the rollout for a thread id and
@@ -205,40 +233,28 @@ process.stdout.write('@@WISP@@' + out.join('\n') + '@@WISP@@');
 `;
 }
 
-function heredoc(script: string): string {
-  return `node <<'WISP_NODE_EOF'\n${script}\nWISP_NODE_EOF\n`;
-}
-
-/** Pull the payload out of the sentinel markers, tolerating shell noise. */
-function extractSentinel(output: string): string | null {
-  const start = output.indexOf('@@WISP@@');
-  if (start === -1) return null;
-  const end = output.indexOf('@@WISP@@', start + 8);
-  if (end === -1) return null;
-  return output.slice(start + 8, end);
-}
-
-export async function listCodexSessions(spriteName: string): Promise<CodexSessionSummary[]> {
-  const { output, success } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+/**
+ * Scan the sprite's Codex rollout store. Pass the `cursor` from the previous
+ * scan to skip re-reading rollouts that haven't changed since; `0` forces a
+ * full scan.
+ */
+export async function scanCodexSessions(
+  spriteName: string,
+  since = 0
+): Promise<SessionScanResult> {
+  const { output, success } = await runExec(spriteName, heredoc(listScript(since)), 25);
   if (!success) throw new Error(`Could not scan Codex sessions on ${spriteName}`);
   const payload = extractSentinel(output);
   if (!payload) throw new Error(`Codex session scan returned no data on ${spriteName}`);
   try {
-    const parsed = JSON.parse(payload);
-    if (!Array.isArray(parsed)) throw new Error('Expected an array');
-    return parsed
-      .filter((x): x is CodexSessionSummary => !!x && typeof x.id === 'string')
-      .map((x) => ({
-        id: x.id,
-        cwd: typeof x.cwd === 'string' ? x.cwd : undefined,
-        preview: typeof x.preview === 'string' ? x.preview.trim() : '',
-        messageCount: Number(x.messageCount) || 0,
-        modified: Number(x.modified) || 0,
-        live: !!x.live,
-      }));
+    return parseScanPayload(payload);
   } catch {
     throw new Error(`Codex session scan returned invalid data on ${spriteName}`);
   }
+}
+
+export async function listCodexSessions(spriteName: string): Promise<CodexSessionSummary[]> {
+  return scannedSessionsWithDetail(await scanCodexSessions(spriteName, 0));
 }
 
 async function readSessionRaw(spriteName: string, sessionId: string): Promise<string> {

@@ -17,9 +17,11 @@ import { Sprite } from '@/models/sprite';
 import {
   ActivityScanError,
   GlobalAgentSession,
+  SpriteScanInput,
   scanAllSpriteActivity,
   sortActivitySessions,
 } from '@/services/activity';
+import { activityRepository } from '@/services/activity-repository';
 import * as api from '@/services/api';
 
 type ActivityFilter = 'all' | 'running' | 'finished';
@@ -65,75 +67,157 @@ function summarizeErrors(statuses: Record<string, SpriteScanStatus>): {
   return { affectedSprites, failedProviders };
 }
 
+/**
+ * Cross-Sprite agent activity.
+ *
+ * The list is device-resident (`activity_sessions` in SQLite) and paints the
+ * instant the tab opens; the network pass that follows is a *revalidation*, not
+ * a rebuild. It only re-reads transcripts modified since each store's cursor,
+ * so the usual visit ships a few hundred bytes per Sprite instead of walking
+ * every transcript again. Pull-to-refresh forces the full re-read.
+ */
 export default function ActivityScreen() {
   const colors = useTheme();
   const [sessions, setSessions] = useState<GlobalAgentSession[]>([]);
   const [scanStatuses, setScanStatuses] = useState<Record<string, SpriteScanStatus>>({});
   const [sprites, setSprites] = useState<Sprite[]>([]);
   const [filter, setFilter] = useState<ActivityFilter>('all');
-  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [isHydrating, setIsHydrating] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [completedScans, setCompletedScans] = useState(0);
   const [totalScans, setTotalScans] = useState(0);
+  const [lastScanAt, setLastScanAt] = useState<number | undefined>();
   const [error, setError] = useState<string>();
   const requestRef = useRef(0);
+  // Read inside the scan callbacks: the cached rows a delta scan folds into
+  // must be the current ones, not the ones captured when the pass started.
+  const sessionsRef = useRef<GlobalAgentSession[]>([]);
 
-  const loadActivity = useCallback(async (refreshing = false) => {
-    const request = ++requestRef.current;
-    setError(undefined);
-    setCompletedScans(0);
-    if (refreshing) setIsRefreshing(true);
-
-    let nextSprites: Sprite[];
-    try {
-      nextSprites = await api.listSprites();
-    } catch (loadError) {
-      if (request !== requestRef.current) return;
-      setError(loadError instanceof Error ? loadError.message : 'Could not load Sprites');
-      setIsFirstLoad(false);
-      setIsRefreshing(false);
-      return;
-    }
-
-    if (request !== requestRef.current) return;
-    setSprites(nextSprites);
-    setTotalScans(nextSprites.length);
-    const currentSpriteNames = new Set(nextSprites.map((sprite) => sprite.name));
-    setSessions((current) =>
-      current.filter((session) => currentSpriteNames.has(session.spriteName))
-    );
-    setScanStatuses({});
-
-    await scanAllSpriteActivity(nextSprites, {
-      onResult: (result, completed) => {
-        if (request !== requestRef.current) return;
-        setSessions((current) =>
-          sortActivitySessions([
-            ...current.filter((session) => session.spriteName !== result.sprite.name),
-            ...result.sessions,
-          ])
-        );
-        setScanStatuses((current) => ({
-          ...current,
-          [result.sprite.name]: { errors: result.errors },
-        }));
-        setCompletedScans(completed);
-      },
-    });
-
-    if (request !== requestRef.current) return;
-    setIsFirstLoad(false);
-    setIsRefreshing(false);
+  const commitSessions = useCallback((next: GlobalAgentSession[]) => {
+    const sorted = sortActivitySessions(next);
+    sessionsRef.current = sorted;
+    setSessions(sorted);
   }, []);
+
+  /** Paint whatever the device already knows before touching the network. */
+  const hydrateFromCache = useCallback(async () => {
+    try {
+      const [cached, scannedAt] = await Promise.all([
+        activityRepository.list(),
+        activityRepository.lastScanAt(),
+      ]);
+      commitSessions(cached);
+      setLastScanAt(scannedAt);
+    } catch {
+      // An unreadable cache is not fatal — the scan below refills it.
+    } finally {
+      setIsHydrating(false);
+    }
+  }, [commitSessions]);
+
+  const loadActivity = useCallback(
+    async ({ full = false, refreshing = false }: { full?: boolean; refreshing?: boolean } = {}) => {
+      const request = ++requestRef.current;
+      setError(undefined);
+      setCompletedScans(0);
+      if (refreshing) setIsRefreshing(true);
+
+      let nextSprites: Sprite[];
+      try {
+        nextSprites = await api.listSprites();
+      } catch (loadError) {
+        if (request !== requestRef.current) return;
+        setError(loadError instanceof Error ? loadError.message : 'Could not load Sprites');
+        setIsRefreshing(false);
+        return;
+      }
+
+      if (request !== requestRef.current) return;
+      setSprites(nextSprites);
+      setTotalScans(nextSprites.length);
+
+      // A deleted Sprite takes its rows with it, in the cache and on screen.
+      const currentSpriteNames = new Set(nextSprites.map((sprite) => sprite.name));
+      activityRepository.pruneMissingSprites([...currentSpriteNames]).catch(() => {});
+      commitSessions(
+        sessionsRef.current.filter((session) => currentSpriteNames.has(session.spriteName))
+      );
+      setScanStatuses({});
+
+      const cursors = full ? {} : await activityRepository.cursors();
+      if (request !== requestRef.current) return;
+
+      const inputs: SpriteScanInput[] = nextSprites.map((sprite) => ({
+        sprite,
+        cursors: {
+          claude: cursors[`${sprite.name}:claude`] ?? 0,
+          codex: cursors[`${sprite.name}:codex`] ?? 0,
+        },
+        cached: sessionsRef.current.filter((session) => session.spriteName === sprite.name),
+      }));
+
+      await scanAllSpriteActivity(inputs, {
+        onResult: async (result, completed) => {
+          if (request !== requestRef.current) return;
+          const scannedAt = Date.now();
+          let stored = result.sessions;
+          try {
+            stored = await activityRepository.replaceSprite(
+              result.sprite.name,
+              result.sessions,
+              result.cursors,
+              scannedAt
+            );
+          } catch {
+            // Keep showing the fresh scan even if the cache write failed.
+          }
+          if (request !== requestRef.current) return;
+          commitSessions([
+            ...sessionsRef.current.filter((session) => session.spriteName !== result.sprite.name),
+            ...stored,
+          ]);
+          setScanStatuses((current) => ({
+            ...current,
+            [result.sprite.name]: { errors: result.errors },
+          }));
+          setCompletedScans(completed);
+          if (result.errors.length < 2) setLastScanAt(scannedAt);
+        },
+      });
+
+      if (request !== requestRef.current) return;
+      setIsRefreshing(false);
+    },
+    [commitSessions]
+  );
 
   useFocusEffect(
     useCallback(() => {
-      loadActivity(false);
+      let active = true;
+      (async () => {
+        await hydrateFromCache();
+        if (active) await loadActivity();
+      })();
       return () => {
+        active = false;
         requestRef.current += 1;
       };
-    }, [loadActivity])
+    }, [hydrateFromCache, loadActivity])
   );
+
+  const openSession = useCallback((session: GlobalAgentSession) => {
+    // Straight into the conversation, not just the Sprite: the row *is* a
+    // coding session, so a tap should land on its transcript.
+    router.push({
+      pathname: '/(app)/sprite/[name]',
+      params: {
+        name: session.spriteName,
+        session: session.id,
+        provider: session.provider,
+        cwd: session.cwd ?? '',
+      },
+    });
+  }, []);
 
   const visibleSessions = useMemo(() => {
     if (filter === 'running') return sessions.filter((session) => session.live);
@@ -143,7 +227,7 @@ export default function ActivityScreen() {
 
   const runningCount = sessions.filter((session) => session.live).length;
   const finishedCount = sessions.length - runningCount;
-  const scanInProgress = completedScans < totalScans;
+  const scanInProgress = totalScans > 0 && completedScans < totalScans;
   const scanErrors = summarizeErrors(scanStatuses);
 
   const renderSession = useCallback(
@@ -156,15 +240,10 @@ export default function ActivityScreen() {
             borderBottomColor: colors.border,
           },
         ]}
-        onPress={() =>
-          router.push({
-            pathname: '/(app)/sprite/[name]',
-            params: { name: item.spriteName },
-          })
-        }
+        onPress={() => openSession(item)}
         accessibilityRole="button"
         accessibilityLabel={`${item.live ? 'Running' : 'Finished'} ${activityProviderName(item.provider)} session on ${item.spriteName}`}
-        accessibilityHint="Opens this Sprite's chats"
+        accessibilityHint="Opens this coding session's conversation"
       >
         <View style={styles.sessionContent}>
           <View style={styles.sessionTopLine}>
@@ -214,7 +293,7 @@ export default function ActivityScreen() {
         <Text style={[styles.chevron, { color: colors.textSecondary }]}>›</Text>
       </Pressable>
     ),
-    [colors]
+    [colors, openSession]
   );
 
   const header = (
@@ -265,7 +344,13 @@ export default function ActivityScreen() {
         <View style={styles.scanRow}>
           <ActivityIndicator size="small" color={colors.tint} />
           <Text style={[styles.scanText, { color: colors.textSecondary }]}>
-            Scanning {completedScans} of {totalScans} Sprites…
+            Checking {completedScans} of {totalScans} Sprites for changes…
+          </Text>
+        </View>
+      ) : lastScanAt ? (
+        <View style={styles.scanRow}>
+          <Text style={[styles.scanText, { color: colors.textSecondary }]}>
+            Updated {relativeTime(lastScanAt)} · pull to re-read every transcript
           </Text>
         </View>
       ) : null}
@@ -273,7 +358,11 @@ export default function ActivityScreen() {
       {error ? (
         <View style={[styles.errorBanner, { backgroundColor: colors.destructive + '15' }]}>
           <Text style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>
-          <Pressable onPress={() => loadActivity(true)} hitSlop={8} accessibilityRole="button">
+          <Pressable
+            onPress={() => loadActivity({ refreshing: true })}
+            hitSlop={8}
+            accessibilityRole="button"
+          >
             <Text style={[styles.retryText, { color: colors.destructive }]}>Retry</Text>
           </Pressable>
         </View>
@@ -285,13 +374,14 @@ export default function ActivityScreen() {
             Partial results: {scanErrors.failedProviders} agent{' '}
             {scanErrors.failedProviders === 1 ? 'store' : 'stores'} could not be read on{' '}
             {scanErrors.affectedSprites} {scanErrors.affectedSprites === 1 ? 'Sprite' : 'Sprites'}.
+            Showing what this device already had.
           </Text>
         </View>
       ) : null}
     </View>
   );
 
-  if (isFirstLoad && sessions.length === 0 && !error) {
+  if (isHydrating && sessions.length === 0 && !error) {
     return (
       <View style={[styles.loadingContainer, { backgroundColor: colors.backgroundSecondary }]}>
         <ActivityIndicator size="large" color={colors.tint} />
@@ -317,7 +407,7 @@ export default function ActivityScreen() {
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}
-            onRefresh={() => loadActivity(true)}
+            onRefresh={() => loadActivity({ full: true, refreshing: true })}
             tintColor={colors.tint}
           />
         }

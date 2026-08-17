@@ -30,7 +30,9 @@ import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import { readCodexSessionMessages } from '@/services/codex-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
+import { activityRepository } from '@/services/activity-repository';
 import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
+import { messageText } from '@/services/message-text';
 import { getSetting } from '@/services/storage';
 import {
   buildFallbackPrompt,
@@ -204,13 +206,44 @@ export function useChat(options: UseChatOptions) {
     [options.onActiveRunChange]
   );
 
+  /**
+   * Mirror this turn into the Activity cache. A run started from the phone is
+   * on the Activity tab the moment its session id exists — no transcript scan
+   * needed — and the next scan of that Sprite corrects the row with the
+   * authoritative preview and line count.
+   */
+  const recordActivity = useCallback(
+    (live: boolean) => {
+      const sessionId = isCodexProvider(provider)
+        ? codexSessionIdRef.current
+        : claudeSessionIdRef.current;
+      if (!spriteName || !sessionId) return;
+      const firstUserMessage = messagesRef.current.find((message) => message.role === 'user');
+      activityRepository
+        .recordLocal({
+          spriteName,
+          provider,
+          sessionId,
+          cwd: workingDirectory,
+          preview: firstUserMessage ? messageText(firstUserMessage).slice(0, 240) : '',
+          messageCount: messagesRef.current.length,
+          live,
+        })
+        .catch(() => {
+          // The Activity tab falls back to scanning; a cache miss is harmless.
+        });
+    },
+    [provider, spriteName, workingDirectory]
+  );
+
   const setClaudeSessionId = useCallback(
     (sessionId: string | undefined) => {
       if (claudeSessionIdRef.current === sessionId) return;
       claudeSessionIdRef.current = sessionId;
       emitSessionIds();
+      recordActivity(statusRef.current !== 'idle');
     },
-    [emitSessionIds]
+    [emitSessionIds, recordActivity]
   );
 
   const setCodexSessionId = useCallback(
@@ -218,8 +251,9 @@ export function useChat(options: UseChatOptions) {
       if (codexSessionIdRef.current === sessionId) return;
       codexSessionIdRef.current = sessionId;
       emitSessionIds();
+      recordActivity(statusRef.current !== 'idle');
     },
-    [emitSessionIds]
+    [emitSessionIds, recordActivity]
   );
 
   const isStreaming =
@@ -385,9 +419,10 @@ export function useChat(options: UseChatOptions) {
       await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current);
       await syncCodexTranscript(loadRequest, codexSessionIdRef.current);
       await persistMessages();
+      recordActivity(false);
       if (opts?.autoSendQueued) maybeSendNextQueued();
     },
-    [maybeSendNextQueued, persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
+    [maybeSendNextQueued, persistMessages, recordActivity, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
   );
 
   /**
@@ -1710,6 +1745,9 @@ export function useChat(options: UseChatOptions) {
           };
           streamActiveRunRef.current = nextRun;
           setActiveRun(nextRun);
+          // Resumed sessions already have an agent session id, so the Activity
+          // row goes live here; a brand-new one is recorded when its id arrives.
+          recordActivity(true);
         };
 
         const onDisconnectBeforeExit = () => {
@@ -1995,11 +2033,12 @@ export function useChat(options: UseChatOptions) {
     assistantTextSeenRef.current = false;
     setActiveRun(undefined);
     setStatusTracked('idle');
+    recordActivity(false);
     // Persist after React has flushed the outcome into messagesRef.
     setTimeout(() => {
       persistMessages().catch(() => {});
     }, 0);
-  }, [appendTurnOutcome, clearPersistTimer, clearReconnectTimer, persistMessages, setActiveRun, setStatusTracked, spriteName]);
+  }, [appendTurnOutcome, clearPersistTimer, clearReconnectTimer, persistMessages, recordActivity, setActiveRun, setStatusTracked, spriteName]);
 
   const detachStream = useCallback(() => {
     clearReconnectTimer();

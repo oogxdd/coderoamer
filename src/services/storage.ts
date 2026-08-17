@@ -13,6 +13,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SETTINGS_PREFIX = 'setting_';
 
+/**
+ * Show dotfiles in the sprite file browser. Off by default — a repo root is
+ * mostly `.git`, `.venv` and `.cache`, which buries the files anyone came for.
+ */
+export const SHOW_HIDDEN_FILES_SETTING = 'showHiddenFiles';
+
 export async function getSetting(key: string): Promise<string | null> {
   return AsyncStorage.getItem(SETTINGS_PREFIX + key);
 }

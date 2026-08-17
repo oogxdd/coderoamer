@@ -57,7 +57,7 @@ export async function readLocalFileBytes(file: LocalPickedFile): Promise<Uint8Ar
 }
 
 /** Basename of a picked file, stripped of path separators so it can't escape the dir. */
-function remoteFileName(value: string | null | undefined): string {
+export function remoteFileName(value: string | null | undefined): string {
   const fallback = `upload-${Date.now().toString(36)}`;
   const base = (value || fallback).split(/[\\/]/).pop() || fallback;
   return base.trim() || fallback;

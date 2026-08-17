@@ -200,8 +200,33 @@ The top-level Activity tab reuses the Claude and Codex metadata scanners through
 `src/services/activity.ts`. It scans at most three Sprites concurrently, runs the
 two independent agent scans for each Sprite in parallel, reports results as each
 Sprite completes, and preserves one provider's results if the other provider's
-store cannot be read. Activity refreshes on focus; it does not add a hosted
-backend or copy full transcripts off a Sprite.
+store cannot be read. It does not add a hosted backend or copy full transcripts
+off a Sprite.
+
+### Activity is cached and revalidated, never rebuilt
+
+Activity is **device-resident and incremental** — a full re-scan of every
+transcript on every visit is what made the tab take tens of seconds:
+
+- **Cache** — `activity_sessions` / `activity_cursors` in SQLite, behind
+  `src/services/activity-repository.ts`. The screen paints from it immediately
+  and the network pass that follows is a revalidation.
+- **Delta scans** — both scan scripts take a **cursor** (`src/services/session-scan.ts`).
+  A transcript with `mtime <= cursor` is emitted as a bare `{id, modified, live,
+  stale:1}` heartbeat and never read; the client fills the detail back in from
+  the cache (`mergeProviderScan`). `live`/`modified` always come from the scan,
+  so a cached row can't show a stale running state. The cursor is the **Sprite's**
+  clock at scan start, never the phone's — it is only compared against mtimes
+  made on that same machine. Pull-to-refresh scans with cursor `0` (full re-read).
+- **Locally recorded runs** — `useChat` writes an `origin:'local'` row when a
+  turn it started gets a session id, and again when the turn ends. An agent
+  launched from the phone is in Activity with no scan at all. A later scan of
+  that store is authoritative and supersedes those rows, except one recorded
+  after the scan snapshot (`modified > cursor`), which the scan could not have
+  seen yet.
+- **Tapping a row opens the conversation**, not the Sprite: it pushes
+  `sprite/[name]` with `session`/`provider`/`cwd` params, and the sprite screen
+  binds an existing local chat with that resume id or imports the transcript.
 
 ### Dictation and audio transcription
 
@@ -289,7 +314,29 @@ update this doc.**
   re-enabling global provider onboarding.
 - **Do not create an implicit first conversation.** A newly created or empty
   Sprite must show an empty Chats list. Persist a local chat only after the user
-  explicitly starts one, or when a discovered remote transcript is resumed.
+  explicitly starts one (the ＋ button), or when a discovered remote transcript
+  is resumed. ＋ opens the conversation immediately and its empty state hosts
+  the agent/model/effort/directory controls (`NewChatSetupPanel`, sharing
+  `SessionSettingsForm` with the ••• settings sheet) — but a conversation opened
+  and never used is deleted again on the way back out
+  (`discardEmptyDraftChat`), so backing out still leaves nothing behind.
+- **A cold Sprite blocks its screen.** Nothing on the sprite screen works until
+  the Sprite is up, so the wake is covered by `BlockingOverlay` instead of
+  letting taps queue into errors. `src/services/sprite-wake.ts` bounds each
+  attempt to 10s, kills the stalled exec session, and restarts the wake (3
+  attempts) rather than waiting on a request that has already lost.
+- **Back out of a sprite with `router.back()`**, falling back to `replace` only
+  when there is no history (a directly opened web route). An unconditional
+  `replace` animates as a *push* — the sprite slides left and the dashboard
+  arrives from the right, which reads as going forward, not back.
+- **Chat attachments are files on the Sprite**, not payloads. The picker uploads
+  to `/home/sprite/uploads/<chat-id>/` (outside the working directory, so an
+  attachment never shows up as an untracked file in the user's repo) and the
+  prompt gets a header listing the absolute paths
+  (`src/services/chat-attachments.ts`). The header stays in the visible message:
+  what the agent was told is what the transcript shows.
+- **The file browser hides dotfiles by default** (`showHiddenFiles`, off).
+  Toggle it in the browser toolbar or Settings → Preferences.
 - **Working directory is locked per chat once a conversation starts.** Claude
   keys resumable history by cwd (`~/.claude/projects/<hashed-cwd>/`), so
   `--resume <id>` only works from the same path. Helpers in

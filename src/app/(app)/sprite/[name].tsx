@@ -18,6 +18,7 @@ import {
 import { useLocalSearchParams, router, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
+import * as DocumentPicker from 'expo-document-picker';
 import { Sprite, statusColor, statusDisplayName } from '@/models/sprite';
 import {
   AgentEffort,
@@ -40,6 +41,7 @@ import { ChatListSheet } from '@/components/chat/ChatListSheet';
 import { MessageAction, MessageActionsSheet } from '@/components/chat/MessageActionsSheet';
 import { SelectPartsSheet } from '@/components/chat/SelectPartsSheet';
 import { useToast } from '@/components/ui/Toast';
+import { BlockingOverlay } from '@/components/ui/BlockingOverlay';
 import { SwipeBackView } from '@/components/ui/SwipeBackView';
 import {
   formatQuote,
@@ -48,6 +50,7 @@ import {
   quotableParts,
 } from '@/services/message-text';
 import { NewSessionSheet, NewSessionConfig } from '@/components/chat/NewSessionSheet';
+import { NewChatSetupPanel } from '@/components/chat/NewChatSetupPanel';
 import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
@@ -56,7 +59,13 @@ import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteIntegrationsTab } from '@/components/sprite/SpriteIntegrationsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
 import { ActiveChatRun, PersistedChat, chatRepository } from '@/services/chat-repository';
+import {
+  ChatAttachment,
+  composePromptWithAttachments,
+  uploadChatAttachment,
+} from '@/services/chat-attachments';
 import { reconcileActiveRuns } from '@/services/run-reconcile';
+import { WakeProgress, wakeSprite } from '@/services/sprite-wake';
 import { getSetting } from '@/services/storage';
 import { TranscriptionProvider } from '@/services/client-transcription';
 import { FontSize, Spacing } from '@/constants/theme';
@@ -133,7 +142,21 @@ function getActiveToolLabel(
 }
 
 export default function SpriteDetailScreen() {
-  const { name, tab: initialTab } = useLocalSearchParams<{ name: string; tab?: string }>();
+  // `session`/`provider`/`cwd` come from the Activity tab: a row there is a
+  // coding session, so tapping it opens that conversation, not just the Sprite.
+  const {
+    name,
+    tab: initialTab,
+    session: linkedSessionId,
+    provider: linkedProvider,
+    cwd: linkedCwd,
+  } = useLocalSearchParams<{
+    name: string;
+    tab?: string;
+    session?: string;
+    provider?: string;
+    cwd?: string;
+  }>();
   const colors = useTheme();
   const { showToast } = useToast();
   const [tab, setTab] = useState<Tab>(isTab(initialTab) ? initialTab : 'chats');
@@ -145,7 +168,13 @@ export default function SpriteDetailScreen() {
   const [sprite, setSprite] = useState<Sprite | null>(null);
   const [isLoadingSprite, setIsLoadingSprite] = useState(true);
   // A cold sprite is woken by this screen, not by the list that linked here.
+  // Nothing on the screen works until it's up, so the wake blocks the UI and
+  // restarts itself when an attempt overruns (see `sprite-wake.ts`).
   const [isWaking, setIsWaking] = useState(false);
+  const [wakeProgress, setWakeProgress] = useState<WakeProgress | null>(null);
+  const [wakeFailed, setWakeFailed] = useState(false);
+  // Bumped by "Try again" on the wake overlay to re-run the wake effect.
+  const [wakeAttemptNonce, setWakeAttemptNonce] = useState(0);
   const flatListRef = useRef<FlatList>(null);
   // Whether the transcript is scrolled to the bottom. A ref because the
   // auto-scroll effect reads it without wanting to re-run when it changes.
@@ -172,8 +201,17 @@ export default function SpriteDetailScreen() {
   // Bumped to force the current chat to reload its persisted messages (e.g. after
   // seeding a resumed session's transcript) even when chatId is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
-  // null = closed. Chat settings become read-only after the first user message.
-  const [sessionSheetMode, setSessionSheetMode] = useState<'new' | 'settings' | null>(null);
+  // Files uploaded to the sprite for the next message, and the pick in flight.
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  // True while a deep link from Activity pulls a session's transcript.
+  const [isOpeningLinkedSession, setIsOpeningLinkedSession] = useState(false);
+  // Set once the mount effect has bound chat state, so the deep link doesn't
+  // race it and create a duplicate conversation for a chat we already have.
+  const [chatsLoaded, setChatsLoaded] = useState(false);
+  // The ••• chat-settings sheet. Settings become read-only after the first
+  // user message; a brand-new conversation edits them inline instead.
+  const [settingsSheetVisible, setSettingsSheetVisible] = useState(false);
   // Message whose copy/quote actions sheet is open. The partial select sheet
   // holds a *snapshot* of the parts rather than the message: it selects by
   // index, and a message still streaming would shift them underneath.
@@ -363,6 +401,7 @@ export default function SpriteDetailScreen() {
         setActiveRun(undefined);
         setWorkingDirectory(fallbackDir);
       }
+      setChatsLoaded(true);
     })();
     return () => { mounted = false; };
   }, [spriteName, commitChatList]);
@@ -375,6 +414,7 @@ export default function SpriteDetailScreen() {
   // so taps queued up and routes arrived one after another.
   useEffect(() => {
     let mounted = true;
+    const controller = new AbortController();
     (async () => {
       let current: Sprite | null = null;
       try {
@@ -385,17 +425,26 @@ export default function SpriteDetailScreen() {
 
       if (!mounted || current?.status !== 'cold') return;
       setIsWaking(true);
-      try {
-        await api.runExec(spriteName, 'true', 60);
-        const woken = await api.getSprite(spriteName);
-        if (mounted) setSprite(woken);
-      } catch {
-        // Non-fatal: the first chat turn wakes the sprite anyway.
-      }
-      if (mounted) setIsWaking(false);
+      setWakeFailed(false);
+      const result = await wakeSprite(spriteName, {
+        signal: controller.signal,
+        onProgress: (progress) => {
+          if (mounted) setWakeProgress(progress);
+        },
+      });
+      if (!mounted || result.aborted) return;
+      if (result.sprite) setSprite(result.sprite);
+      // Every attempt overran: the platform isn't bringing this Sprite up right
+      // now, so say so instead of spinning forever.
+      setWakeFailed(!result.sprite);
+      setIsWaking(false);
+      setWakeProgress(null);
     })();
-    return () => { mounted = false; };
-  }, [spriteName]);
+    return () => {
+      mounted = false;
+      controller.abort();
+    };
+  }, [spriteName, wakeAttemptNonce]);
 
   // Old builds ran chat turns as persistent `wisp-*` services. Clean those up
   // when the sprite opens so they cannot restart and replay prompts into Claude.
@@ -507,9 +556,73 @@ export default function SpriteDetailScreen() {
     }
   }, [chat.messages.length, chatId, commitChatList]);
 
+  /** Point every piece of chat state at `target`, or clear it when there is none. */
+  const bindChat = useCallback(
+    (target: PersistedChat | undefined) => {
+      setAttachments([]);
+      if (!target) {
+        setChatId('');
+        return;
+      }
+      const nextProvider = normalizeProvider(target.provider);
+      setChatId(target.id);
+      setChatName(target.customName ?? `Session ${target.chatNumber}`);
+      setChatProvider(nextProvider);
+      setChatModel(target.model ?? defaultModelFor(nextProvider, agentDefaults));
+      setChatEffort(target.effort ?? defaultEffortFor(nextProvider, agentDefaults));
+      setClaudeSessionId(target.claudeSessionId);
+      setCodexSessionId(target.codexSessionId);
+      setActiveRun(target.activeRun);
+      setWorkingDirectory(target.workingDirectory || defaultDirectory);
+      setReloadNonce((n) => n + 1);
+    },
+    [agentDefaults, defaultDirectory]
+  );
+
   const handleSend = () => {
-    chat.sendMessage();
+    if (attachments.length === 0) {
+      chat.sendMessage();
+      return;
+    }
+    // Attachments are already on the sprite; the message carries their paths so
+    // the agent can open them, and the bubble shows exactly what it was told.
+    const prompt = composePromptWithAttachments(chat.inputText, attachments);
+    chat.setInputText('');
+    setAttachments([]);
+    chat.sendMessage(prompt);
   };
+
+  const handleAttachFile = useCallback(async () => {
+    if (!chatId) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.uri) return;
+
+      setIsUploadingAttachment(true);
+      const attachment = await uploadChatAttachment(spriteName, chatId, {
+        uri: asset.uri,
+        name: asset.name,
+        mimeType: asset.mimeType,
+        size: asset.size,
+        file: asset.file,
+      });
+      setAttachments((previous) => [...previous, attachment]);
+      showToast(`Uploaded ${attachment.name}`);
+    } catch (err) {
+      Alert.alert('Upload failed', (err as Error).message || 'Could not upload the file.');
+    } finally {
+      setIsUploadingAttachment(false);
+    }
+  }, [chatId, showToast, spriteName]);
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setAttachments((previous) => previous.filter((attachment) => attachment.id !== id));
+  }, []);
 
   // One-tap recovery when a turn ended on --max-turns.
   const handleContinueTurn = useCallback(() => {
@@ -559,17 +672,33 @@ export default function SpriteDetailScreen() {
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
     setActiveRun(undefined);
+    setAttachments([]);
     setChatListVisible(false);
-    setSessionSheetMode(null);
+    setSettingsSheetVisible(false);
     // Adding a conversation opens it.
     setTab('chats');
     setChatOpen(true);
   }, [chat.detachStream, chat.isStreaming, spriteName, commitChatList]);
 
+  /**
+   * The ＋ button. A conversation now opens straight away with the device
+   * defaults; its empty state hosts the agent/model/effort/directory controls
+   * (see `NewChatSetupPanel`) instead of a modal standing between the tap and
+   * the chat. An untouched one is discarded again on the way back out.
+   */
+  const startNewChat = useCallback(() => {
+    createChat({
+      workingDirectory: defaultDirectory,
+      provider: agentDefaults.provider,
+      model: defaultModelFor(agentDefaults.provider, agentDefaults),
+      effort: defaultEffortFor(agentDefaults.provider, agentDefaults),
+    });
+  }, [agentDefaults, createChat, defaultDirectory]);
+
   // Change the current session configuration before its first message.
   const updateCurrentSettings = useCallback(async (config: NewSessionConfig) => {
     if (isProviderLocked) {
-      setSessionSheetMode(null);
+      setSettingsSheetVisible(false);
       return;
     }
     const dir = normalizeWorkingDirectory(config.workingDirectory);
@@ -595,7 +724,7 @@ export default function SpriteDetailScreen() {
       model: config.model || undefined,
       effort: config.effort,
     });
-    setSessionSheetMode(null);
+    setSettingsSheetVisible(false);
   }, [chatId, commitChatList, isProviderLocked]);
 
   const handleSelectChat = useCallback((selectedChat: PersistedChat) => {
@@ -609,17 +738,7 @@ export default function SpriteDetailScreen() {
     // One useChat instance is shared across sessions, so detach any in-flight stream
     // before switching. The exec stays alive and is reattached when its chat reopens.
     if (chat.isStreaming) chat.detachStream();
-    setChatId(latestChat.id);
-    setChatName(latestChat.customName ?? `Session ${latestChat.chatNumber}`);
-    const nextProvider = normalizeProvider(latestChat.provider);
-    setChatProvider(nextProvider);
-    setChatModel(latestChat.model ?? defaultModelFor(nextProvider, agentDefaults));
-    setChatEffort(latestChat.effort ?? defaultEffortFor(nextProvider, agentDefaults));
-    setClaudeSessionId(latestChat.claudeSessionId);
-    setCodexSessionId(latestChat.codexSessionId);
-    setActiveRun(latestChat.activeRun);
-    setWorkingDirectory(latestChat.workingDirectory || defaultDirectory);
-    setReloadNonce((n) => n + 1);
+    bindChat(latestChat);
     // Update lastUsed
     const updated = chatListRef.current.map((c) =>
       c.id === latestChat.id ? { ...c, lastUsed: Date.now() } : c
@@ -628,7 +747,7 @@ export default function SpriteDetailScreen() {
     chatRepository.patch(latestChat.id, { lastUsed: Date.now() });
     setChatListVisible(false);
     setChatOpen(true);
-  }, [agentDefaults, chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
+  }, [bindChat, chat.detachStream, chat.isStreaming, chatId, commitChatList]);
 
   const handleDeleteChat = useCallback((target: PersistedChat) => {
     const remaining = chatListRef.current.filter((c) => c.id !== target.id);
@@ -638,24 +757,43 @@ export default function SpriteDetailScreen() {
     // The current chat was deleted; detach any live stream and fall back to the
     // most recent remaining conversation (or nothing, which shows the empty list).
     if (chat.isStreaming) chat.detachStream();
-    if (remaining.length > 0) {
-      const next = [...remaining].sort((a, b) => b.lastUsed - a.lastUsed)[0];
-      const nextProvider = normalizeProvider(next.provider);
-      setChatId(next.id);
-      setChatName(next.customName ?? `Session ${next.chatNumber}`);
-      setChatProvider(nextProvider);
-      setChatModel(next.model ?? defaultModelFor(nextProvider, agentDefaults));
-      setChatEffort(next.effort ?? defaultEffortFor(nextProvider, agentDefaults));
-      setClaudeSessionId(next.claudeSessionId);
-      setCodexSessionId(next.codexSessionId);
-      setActiveRun(next.activeRun);
-      setWorkingDirectory(next.workingDirectory || defaultDirectory);
-      setReloadNonce((n) => n + 1);
-    } else {
-      setChatId('');
-    }
+    bindChat(
+      remaining.length > 0
+        ? [...remaining].sort((a, b) => b.lastUsed - a.lastUsed)[0]
+        : undefined
+    );
     setChatOpen(false);
-  }, [agentDefaults, chat.detachStream, chat.isStreaming, chatId, defaultDirectory, commitChatList]);
+  }, [bindChat, chat.detachStream, chat.isStreaming, chatId, commitChatList]);
+
+  /**
+   * A conversation opened by ＋ but never used leaves nothing behind. Without
+   * this, backing out of the new-chat screen would litter the list with empty
+   * "Session N" rows — the invariant is that a conversation exists once the
+   * user actually starts one.
+   */
+  const discardEmptyDraftChat = useCallback(() => {
+    const draftId = chatId;
+    if (!draftId) return;
+    if (chat.isStreaming || chat.messages.length > 0) return;
+    if (claudeSessionId || codexSessionId) return;
+    const remaining = chatListRef.current.filter((c) => c.id !== draftId);
+    if (remaining.length === chatListRef.current.length) return;
+    commitChatList(remaining);
+    chatRepository.remove(draftId);
+    bindChat(
+      remaining.length > 0
+        ? [...remaining].sort((a, b) => b.lastUsed - a.lastUsed)[0]
+        : undefined
+    );
+  }, [
+    bindChat,
+    chat.isStreaming,
+    chat.messages.length,
+    chatId,
+    claudeSessionId,
+    codexSessionId,
+    commitChatList,
+  ]);
 
   // Resume a session discovered on the sprite (its on-disk transcript).
   // Reuses an existing local chat bound to the same session id, or creates one,
@@ -718,6 +856,7 @@ export default function SpriteDetailScreen() {
       setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
       setCodexSessionId(isCodexProvider(session.provider) ? session.id : target.codexSessionId);
       setActiveRun(undefined);
+      setAttachments([]);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
       setChatId(target.id);
@@ -749,6 +888,59 @@ export default function SpriteDetailScreen() {
     },
     [spriteName, handleResumeSession]
   );
+
+  // A deep link from the Activity tab: open that exact coding session. If a
+  // local chat is already bound to it, that chat is the richer representation
+  // and wins; otherwise the sprite's transcript is pulled and resumed. Guarded
+  // by a ref so a re-render can't run the import twice.
+  const linkedSessionHandledRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!linkedSessionId || !chatsLoaded) return;
+    if (linkedSessionHandledRef.current === linkedSessionId) return;
+    linkedSessionHandledRef.current = linkedSessionId;
+
+    const wantsCodex = linkedProvider === 'codex' || linkedProvider === 'codexAppServer';
+    const existing = chatListRef.current.find((c) =>
+      wantsCodex
+        ? isCodexProvider(c.provider) && c.codexSessionId === linkedSessionId
+        : c.provider === 'claude' && c.claudeSessionId === linkedSessionId
+    );
+    if (existing) {
+      handleSelectChat(existing);
+      return;
+    }
+
+    (async () => {
+      setIsOpeningLinkedSession(true);
+      const summary: AgentSessionSummary = {
+        id: linkedSessionId,
+        provider: wantsCodex ? 'codex' : 'claude',
+        cwd: linkedCwd || undefined,
+        preview: '',
+        messageCount: 0,
+        modified: Date.now(),
+        live: false,
+      };
+      try {
+        const messages = wantsCodex
+          ? await readCodexSessionMessages(spriteName, linkedSessionId)
+          : await readClaudeSessionMessages(spriteName, linkedSessionId);
+        await handleResumeSession(summary, messages);
+      } catch (e: any) {
+        Alert.alert('Could not open session', e?.message ?? 'Failed to load transcript.');
+      } finally {
+        setIsOpeningLinkedSession(false);
+      }
+    })();
+  }, [
+    chatsLoaded,
+    handleResumeSession,
+    handleSelectChat,
+    linkedCwd,
+    linkedProvider,
+    linkedSessionId,
+    spriteName,
+  ]);
 
   const handleProviderChange = useCallback((nextProvider: AgentProvider) => {
     if (!chatId || chat.isStreaming || isProviderLocked) return;
@@ -912,17 +1104,28 @@ export default function SpriteDetailScreen() {
       : null;
 
   const popInScreen = useCallback(() => {
-    if (chatOpen) setChatOpen(false);
-    else setSettingsView('menu');
-  }, [chatOpen]);
+    if (chatOpen) {
+      discardEmptyDraftChat();
+      setChatOpen(false);
+    } else {
+      setSettingsView('menu');
+    }
+  }, [chatOpen, discardEmptyDraftChat]);
 
   const goBack = useCallback(() => {
     if (inScreenLevel) {
       popInScreen();
       return;
     }
-    // A directly opened web route can have no Expo Router history, making
-    // router.back() a no-op. A sprite's parent screen is always Dashboard.
+    // Pop the stack so this screen slides out to the right, the way back is
+    // supposed to look. `replace` used to be unconditional here, which animates
+    // as a *push*: the sprite slid left and the dashboard arrived from the
+    // right, exactly backwards. Replace stays as the fallback for a directly
+    // opened web route, which has no history to pop.
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
     router.replace('/(app)/(tabs)');
   }, [inScreenLevel, popInScreen]);
 
@@ -1004,7 +1207,7 @@ export default function SpriteDetailScreen() {
           <View style={styles.headerRight}>
             {chatOpen ? (
               <Pressable
-                onPress={() => setSessionSheetMode('settings')}
+                onPress={() => setSettingsSheetVisible(true)}
                 hitSlop={10}
                 accessibilityRole="button"
                 accessibilityLabel="Chat settings"
@@ -1012,7 +1215,12 @@ export default function SpriteDetailScreen() {
                 <Text style={[styles.headerActionMore, { color: colors.tint }]}>•••</Text>
               </Pressable>
             ) : (
-              <Pressable onPress={() => setSessionSheetMode('new')} hitSlop={8}>
+              <Pressable
+                onPress={startNewChat}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="New conversation"
+              >
                 <Text style={[styles.headerActionAdd, { color: colors.tint }]}>＋</Text>
               </Pressable>
             )}
@@ -1096,32 +1304,22 @@ export default function SpriteDetailScreen() {
                     </Text>
                   </View>
                 ) : (
-                  <View style={styles.emptyChatView}>
-                    <Text style={[styles.emptyChatTitle, { color: colors.text }]}>
-                      Chat with {providerDisplayName(chatProvider)}
-                    </Text>
-                    <Text style={[styles.emptyChatSubtitle, { color: colors.textSecondary }]}>
-                      Send a message to start this coding session on the sprite.
-                    </Text>
-                    <Pressable
-                      style={[
-                        styles.cwdChip,
-                        { borderColor: colors.border, backgroundColor: colors.backgroundElement },
-                      ]}
-                      onPress={() => setSessionSheetMode('settings')}
-                    >
-                      <Text
-                        style={[styles.cwdChipText, { color: colors.textSecondary }]}
-                        numberOfLines={1}
-                      >
-                        📁 {workingDirectory}  ✎
-                      </Text>
-                    </Pressable>
-                    <Text style={[styles.emptyChatTip, { color: colors.textSecondary }]}>
-                      Tip: long-press any message to copy or quote it. You can send a
-                      follow-up while a turn is still running — it queues.
-                    </Text>
-                  </View>
+                  // The empty conversation is where its settings live — no modal
+                  // stands between pressing ＋ and typing the first message.
+                  <NewChatSetupPanel
+                    spriteName={spriteName}
+                    value={{
+                      workingDirectory,
+                      provider: chatProvider,
+                      model: chatModel,
+                      effort: chatEffort,
+                    }}
+                    onChange={updateCurrentSettings}
+                    defaultClaudeModel={agentDefaults.claudeModel}
+                    defaultClaudeEffort={agentDefaults.claudeEffort}
+                    defaultCodexModel={agentDefaults.codexModel}
+                    defaultCodexEffort={agentDefaults.codexEffort}
+                  />
                 )
               }
             />
@@ -1226,6 +1424,10 @@ export default function SpriteDetailScreen() {
               dictationStatus={dictation.status}
               dictationError={dictation.error}
               onClearDictationError={dictation.clearDictationError}
+              attachments={attachments}
+              onAttachFile={handleAttachFile}
+              onRemoveAttachment={handleRemoveAttachment}
+              isUploadingAttachment={isUploadingAttachment}
             />
           </KeyboardAvoidingView>
         ) : (
@@ -1278,42 +1480,32 @@ export default function SpriteDetailScreen() {
             onSelectChat={handleSelectChat}
             onNewChat={() => {
               setChatListVisible(false);
-              setSessionSheetMode('new');
+              startNewChat();
             }}
             onClose={() => setChatListVisible(false)}
           />
         )}
 
-        {/* New Session / Edit Directory Sheet */}
-        {sessionSheetMode && (
+        {/* Chat settings, from the ••• header action. New conversations are set
+            up inline instead (NewChatSetupPanel), so this sheet only edits an
+            existing one — read-only once its first message locks it. */}
+        {settingsSheetVisible && (
           <NewSessionSheet
             spriteName={spriteName}
-            title={sessionSheetMode === 'settings' ? 'Chat Settings' : 'New Session'}
-            confirmLabel={sessionSheetMode === 'settings' ? 'Save Settings' : 'Start Session'}
-            defaultDirectory={
-              sessionSheetMode === 'settings' ? workingDirectory : defaultDirectory
-            }
-            defaultProvider={
-              sessionSheetMode === 'settings' ? chatProvider : agentDefaults.provider
-            }
-            defaultModel={
-              sessionSheetMode === 'settings'
-                ? chatModel
-                : defaultModelFor(agentDefaults.provider, agentDefaults)
-            }
-            defaultEffort={
-              sessionSheetMode === 'settings'
-                ? chatEffort
-                : defaultEffortFor(agentDefaults.provider, agentDefaults)
-            }
+            title="Chat Settings"
+            confirmLabel="Save Settings"
+            defaultDirectory={workingDirectory}
+            defaultProvider={chatProvider}
+            defaultModel={chatModel}
+            defaultEffort={chatEffort}
             defaultClaudeModel={agentDefaults.claudeModel}
             defaultClaudeEffort={agentDefaults.claudeEffort}
             defaultCodexModel={agentDefaults.codexModel}
             defaultCodexEffort={agentDefaults.codexEffort}
             showProviderPicker
-            locked={sessionSheetMode === 'settings' && isProviderLocked}
-            onClose={() => setSessionSheetMode(null)}
-            onCreate={sessionSheetMode === 'settings' ? updateCurrentSettings : createChat}
+            locked={isProviderLocked}
+            onClose={() => setSettingsSheetVisible(false)}
+            onCreate={updateCurrentSettings}
           />
         )}
 
@@ -1342,6 +1534,43 @@ export default function SpriteDetailScreen() {
             preview={messageText(actionsMessage)}
             actions={messageActions}
             onClose={() => setActionsMessage(null)}
+          />
+        )}
+
+        {/* A cold sprite can't run anything — block the screen until it's up. */}
+        {(isWaking || wakeFailed) && (
+          <BlockingOverlay
+            title={wakeFailed ? `${spriteName} is not waking up` : `Waking ${spriteName}…`}
+            busy={!wakeFailed}
+            subtitle={
+              wakeFailed
+                ? 'Every attempt timed out. The sprite may still be starting — try again in a moment.'
+                : wakeProgress?.restarting
+                  ? `Attempt ${wakeProgress.attempt} of ${wakeProgress.attempts} — the previous one stalled, so the wake was restarted.`
+                  : 'Nothing can run on a cold sprite, so the screen waits here.'
+            }
+            actions={[
+              ...(wakeFailed
+                ? [
+                    {
+                      label: 'Try again',
+                      primary: true,
+                      onPress: () => {
+                        setWakeFailed(false);
+                        setWakeAttemptNonce((nonce) => nonce + 1);
+                      },
+                    },
+                  ]
+                : []),
+              { label: 'Back', onPress: goBack },
+            ]}
+          />
+        )}
+
+        {isOpeningLinkedSession && !isWaking && !wakeFailed && (
+          <BlockingOverlay
+            title="Opening session…"
+            subtitle={`Pulling this conversation's transcript from ${spriteName}.`}
           />
         )}
 
@@ -1683,33 +1912,10 @@ const styles = StyleSheet.create({
     paddingVertical: 80,
     paddingHorizontal: Spacing.xxl,
   },
-  emptyChatTitle: {
-    fontSize: FontSize.xl,
-    fontWeight: '600',
-    marginBottom: Spacing.sm,
-  },
   emptyChatSubtitle: {
     fontSize: FontSize.md,
     textAlign: 'center',
     lineHeight: 22,
-  },
-  cwdChip: {
-    marginTop: Spacing.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    maxWidth: '90%',
-  },
-  cwdChipText: {
-    fontSize: FontSize.sm,
-  },
-  emptyChatTip: {
-    fontSize: FontSize.xs,
-    textAlign: 'center',
-    lineHeight: 17,
-    marginTop: Spacing.xl,
-    maxWidth: 300,
   },
   connectingBar: {
     flexDirection: 'row',

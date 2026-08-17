@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -23,6 +23,11 @@ import {
   parentPath,
   uploadFileToSpriteDir,
 } from '@/services/sprite-filesystem';
+import {
+  SHOW_HIDDEN_FILES_SETTING,
+  getSettingBool,
+  setSettingBool,
+} from '@/services/storage';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, Fonts, Spacing } from '@/constants/theme';
 
@@ -56,6 +61,27 @@ export function FilesystemTab({
   const [error, setError] = useState<string | undefined>();
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    getSettingBool(SHOW_HIDDEN_FILES_SETTING)
+      .then((value) => {
+        if (mounted) setShowHidden(value);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const toggleHidden = useCallback(() => {
+    setShowHidden((previous) => {
+      const next = !previous;
+      setSettingBool(SHOW_HIDDEN_FILES_SETTING, next).catch(() => {});
+      return next;
+    });
+  }, []);
 
   const load = useCallback(
     async (path: string) => {
@@ -142,6 +168,12 @@ export function FilesystemTab({
   }, [spriteName, currentPath, load]);
 
   const atRoot = currentPath === '/' || currentPath === '';
+  const allEntries = listing?.entries ?? [];
+  const visibleEntries = useMemo(
+    () => (showHidden ? allEntries : allEntries.filter((entry) => !entry.name.startsWith('.'))),
+    [allEntries, showHidden]
+  );
+  const hiddenCount = allEntries.length - visibleEntries.length;
 
   return (
     <View style={styles.flex}>
@@ -165,6 +197,29 @@ export function FilesystemTab({
             {currentPath}
           </Text>
         </ScrollView>
+        <Pressable
+          onPress={toggleHidden}
+          hitSlop={8}
+          style={[
+            styles.hiddenToggle,
+            {
+              borderColor: showHidden ? colors.tint : colors.border,
+              backgroundColor: showHidden ? colors.tint + '12' : 'transparent',
+            },
+          ]}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: showHidden }}
+          accessibilityLabel="Show hidden files"
+        >
+          <Text
+            style={[
+              styles.hiddenToggleText,
+              { color: showHidden ? colors.tint : colors.textSecondary },
+            ]}
+          >
+            .*
+          </Text>
+        </Pressable>
         <Pressable
           onPress={handleUpload}
           disabled={uploading}
@@ -191,17 +246,30 @@ export function FilesystemTab({
         </View>
       ) : (
         <FlatList
-          data={listing?.entries ?? []}
+          data={visibleEntries}
           keyExtractor={(item) => item.path}
           refreshControl={
             <RefreshControl refreshing={loading} onRefresh={() => load(currentPath)} tintColor={colors.tint} />
           }
           contentContainerStyle={styles.listContent}
+          ListFooterComponent={
+            hiddenCount > 0 ? (
+              <Pressable style={styles.hiddenFooter} onPress={toggleHidden} hitSlop={8}>
+                <Text style={[styles.hiddenFooterText, { color: colors.textSecondary }]}>
+                  {hiddenCount} hidden {hiddenCount === 1 ? 'item' : 'items'} · tap to show
+                </Text>
+              </Pressable>
+            ) : null
+          }
           ListEmptyComponent={
             !loading ? (
               <View style={styles.emptyView}>
                 <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-                  {error ? 'Could not load this directory.' : 'This directory is empty.'}
+                  {error
+                    ? 'Could not load this directory.'
+                    : hiddenCount > 0
+                      ? `Only hidden files here — ${hiddenCount} of them.`
+                      : 'This directory is empty.'}
                 </Text>
               </View>
             ) : null
@@ -347,6 +415,26 @@ const styles = StyleSheet.create({
   uploadButtonText: {
     fontSize: FontSize.sm,
     fontWeight: '700',
+  },
+  hiddenToggle: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.sm,
+    minWidth: 38,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hiddenToggleText: {
+    fontSize: FontSize.sm,
+    fontWeight: '800',
+  },
+  hiddenFooter: {
+    paddingVertical: Spacing.lg,
+    alignItems: 'center',
+  },
+  hiddenFooterText: {
+    fontSize: FontSize.xs,
   },
   errorBar: {
     paddingHorizontal: Spacing.lg,

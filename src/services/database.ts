@@ -60,6 +60,35 @@ CREATE TABLE IF NOT EXISTS migration_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- The Activity tab's local mirror of every agent session found across Sprites.
+-- Rows accumulate: a scan only re-reads transcripts modified after the stored
+-- cursor, and turns this app starts are written straight in (origin='local'),
+-- so the list paints from the device and the network work stays proportional
+-- to what actually changed.
+CREATE TABLE IF NOT EXISTS activity_sessions (
+  sprite_name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  sprite_status TEXT NOT NULL DEFAULT 'unknown',
+  cwd TEXT,
+  preview TEXT NOT NULL DEFAULT '',
+  message_count INTEGER NOT NULL DEFAULT 0,
+  modified INTEGER NOT NULL DEFAULT 0,
+  live INTEGER NOT NULL DEFAULT 0,
+  origin TEXT NOT NULL DEFAULT 'scan',
+  PRIMARY KEY (sprite_name, provider, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_modified ON activity_sessions(modified);
+
+CREATE TABLE IF NOT EXISTS activity_cursors (
+  sprite_name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  cursor INTEGER NOT NULL,
+  scanned_at INTEGER NOT NULL,
+  PRIMARY KEY (sprite_name, provider)
+);
 `;
 
 export type Database = SQLite.SQLiteDatabase;

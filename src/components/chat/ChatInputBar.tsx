@@ -11,6 +11,7 @@ import {
 import { FontSize, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { AgentProvider, providerDisplayName } from '@/models/chat';
+import { ChatAttachment } from '@/services/chat-attachments';
 
 interface ChatInputBarProps {
   value: string;
@@ -26,6 +27,11 @@ interface ChatInputBarProps {
   dictationStatus?: string;
   dictationError?: string;
   onClearDictationError?: () => void;
+  /** Files already uploaded to the sprite, sent with the next message. */
+  attachments?: ChatAttachment[];
+  onAttachFile?: () => void;
+  onRemoveAttachment?: (id: string) => void;
+  isUploadingAttachment?: boolean;
 }
 
 export function ChatInputBar({
@@ -42,13 +48,18 @@ export function ChatInputBar({
   dictationStatus,
   dictationError,
   onClearDictationError,
+  attachments = [],
+  onAttachFile,
+  onRemoveAttachment,
+  isUploadingAttachment,
 }: ChatInputBarProps) {
   const colors = useTheme();
   const hasText = value.trim().length > 0;
   // Sending during a turn is allowed: useChat queues the prompt and fires it
   // when the turn completes, so a follow-up never interrupts the agent. Stopping
   // is a separate button so the two can't be confused for each other.
-  const canSend = hasText && !disabled;
+  // An attachment alone is a valid message — "look at this file" needs no words.
+  const canSend = (hasText || attachments.length > 0) && !disabled;
   const willQueue = isStreaming && canSend;
   const canDictate = Boolean(onToggleDictation && !disabled && !isTranscribing);
   const showStop = isStreaming && !!onInterrupt;
@@ -95,6 +106,37 @@ export function ChatInputBar({
         </Pressable>
       )}
 
+      {attachments.length > 0 && (
+        <View style={styles.attachments}>
+          {attachments.map((attachment) => (
+            <View
+              key={attachment.id}
+              style={[
+                styles.attachmentChip,
+                { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+              ]}
+            >
+              <Text
+                style={[styles.attachmentName, { color: colors.textSecondary }]}
+                numberOfLines={1}
+              >
+                📎 {attachment.name}
+              </Text>
+              {onRemoveAttachment && (
+                <Pressable
+                  hitSlop={8}
+                  onPress={() => onRemoveAttachment(attachment.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove ${attachment.name}`}
+                >
+                  <Text style={[styles.attachmentRemove, { color: colors.textSecondary }]}>✕</Text>
+                </Pressable>
+              )}
+            </View>
+          ))}
+        </View>
+      )}
+
       <View style={styles.row}>
         {showStop && (
           <Pressable
@@ -111,6 +153,29 @@ export function ChatInputBar({
             accessibilityLabel="Stop response"
           >
             <View style={[styles.stopGlyph, { backgroundColor: colors.destructive }]} />
+          </Pressable>
+        )}
+
+        {onAttachFile && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.attachButton,
+              {
+                borderColor: colors.border,
+                backgroundColor: pressed ? colors.backgroundElement : 'transparent',
+              },
+            ]}
+            onPress={onAttachFile}
+            disabled={disabled || isUploadingAttachment}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Attach a file"
+          >
+            {isUploadingAttachment ? (
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+            ) : (
+              <Text style={[styles.attachGlyph, { color: colors.textSecondary }]}>📎</Text>
+            )}
           </Pressable>
         )}
 
@@ -217,6 +282,43 @@ const styles = StyleSheet.create({
     width: 11,
     height: 11,
     borderRadius: 2,
+  },
+  attachments: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.xs,
+    paddingHorizontal: Spacing.xs,
+    paddingBottom: Spacing.xs,
+  },
+  attachmentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    maxWidth: '100%',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+  },
+  attachmentName: {
+    flexShrink: 1,
+    fontSize: FontSize.xs,
+  },
+  attachmentRemove: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+  },
+  attachButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 5,
+  },
+  attachGlyph: {
+    fontSize: FontSize.md,
   },
   composer: {
     flex: 1,

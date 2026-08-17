@@ -1,6 +1,13 @@
 import { ChatContent, ChatMessage, ToolResultCard, ToolUseCard, makeId } from '@/models/chat';
 import { JSONValue } from '@/models/claude-events';
 import { runExec } from './api';
+import {
+  SessionScanResult,
+  extractSentinel,
+  heredoc,
+  parseScanPayload,
+  scannedSessionsWithDetail,
+} from './session-scan';
 
 /**
  * Reads Claude Code's own on-disk session transcripts from a sprite — the same
@@ -39,9 +46,17 @@ const SESSION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,200}$/;
  * compact JSON summary array. Done sprite-side so we transfer a few KB instead
  * of every full transcript. Delimited by a quoted heredoc so quotes inside the
  * script need no escaping.
+ *
+ * `SINCE` is the caller's cursor (see `session-scan.ts`): a transcript whose
+ * mtime is at or below it is emitted as `{id, modified, live, stale:1}` and
+ * never opened — reading and parsing every line of an unchanged transcript is
+ * what made a cold Activity scan take tens of seconds.
  */
-const LIST_SCRIPT = String.raw`
+function listScript(since: number): string {
+  return String.raw`
 const fs = require('fs'), os = require('os'), path = require('path');
+const SINCE = ${Math.max(0, Math.floor(since))};
+const SCAN_START = Date.now();
 const base = path.join(os.homedir(), '.claude', 'projects');
 const out = [];
 function firstUserText(lines) {
@@ -95,59 +110,58 @@ try {
     try { files = fs.readdirSync(full).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
     for (const f of files) {
       const fp = path.join(full, f);
-      let stat, content;
-      try { stat = fs.statSync(fp); content = fs.readFileSync(fp, 'utf8'); } catch { continue; }
+      let stat;
+      try { stat = fs.statSync(fp); } catch { continue; }
+      const modified = Math.floor(stat.mtimeMs);
+      const live = openNames.has(f) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS);
+      const id = f.replace(/\.jsonl$/, '');
+      // Unchanged since the caller's cursor: report liveness only, don't read.
+      if (SINCE > 0 && modified <= SINCE) {
+        out.push({ id, modified, live, stale: 1 });
+        continue;
+      }
+      let content;
+      try { content = fs.readFileSync(fp, 'utf8'); } catch { continue; }
       const lines = content.split('\n').filter((l) => l.trim());
       if (lines.length === 0) continue;
       out.push({
-        id: f.replace(/\.jsonl$/, ''),
+        id,
         cwd: cwdOf(lines),
         preview: firstUserText(lines).slice(0, 240),
         messageCount: lines.length,
-        modified: Math.floor(stat.mtimeMs),
-        live: openNames.has(f) || (Date.now() - stat.mtimeMs < LIVE_WINDOW_MS),
+        modified,
+        live,
       });
     }
   }
 } catch (e) {}
 out.sort((a, b) => b.modified - a.modified);
-process.stdout.write('@@WISP@@' + JSON.stringify(out) + '@@WISP@@');
+process.stdout.write('@@WISP@@' + JSON.stringify({ cursor: SCAN_START, sessions: out }) + '@@WISP@@');
 `;
-
-function heredoc(script: string): string {
-  return `node <<'WISP_NODE_EOF'\n${script}\nWISP_NODE_EOF\n`;
 }
 
-/** Pull the payload out of the sentinel markers, tolerating shell noise. */
-function extractSentinel(output: string): string | null {
-  const start = output.indexOf('@@WISP@@');
-  if (start === -1) return null;
-  const end = output.indexOf('@@WISP@@', start + 8);
-  if (end === -1) return null;
-  return output.slice(start + 8, end);
-}
-
-export async function listClaudeSessions(spriteName: string): Promise<ClaudeSessionSummary[]> {
-  const { output, success } = await runExec(spriteName, heredoc(LIST_SCRIPT), 25);
+/**
+ * Scan the sprite's Claude transcript store. Pass the `cursor` from the previous
+ * scan to skip re-reading transcripts that haven't changed since (see
+ * `session-scan.ts`); `0` forces a full scan.
+ */
+export async function scanClaudeSessions(
+  spriteName: string,
+  since = 0
+): Promise<SessionScanResult> {
+  const { output, success } = await runExec(spriteName, heredoc(listScript(since)), 25);
   if (!success) throw new Error(`Could not scan Claude sessions on ${spriteName}`);
   const payload = extractSentinel(output);
   if (!payload) throw new Error(`Claude session scan returned no data on ${spriteName}`);
   try {
-    const parsed = JSON.parse(payload);
-    if (!Array.isArray(parsed)) throw new Error('Expected an array');
-    return parsed
-      .filter((x): x is ClaudeSessionSummary => !!x && typeof x.id === 'string')
-      .map((x) => ({
-        id: x.id,
-        cwd: typeof x.cwd === 'string' ? x.cwd : undefined,
-        preview: typeof x.preview === 'string' ? x.preview.trim() : '',
-        messageCount: Number(x.messageCount) || 0,
-        modified: Number(x.modified) || 0,
-        live: !!x.live,
-      }));
+    return parseScanPayload(payload);
   } catch {
     throw new Error(`Claude session scan returned invalid data on ${spriteName}`);
   }
+}
+
+export async function listClaudeSessions(spriteName: string): Promise<ClaudeSessionSummary[]> {
+  return scannedSessionsWithDetail(await scanClaudeSessions(spriteName, 0));
 }
 
 /** Raw transcript lines for one session (cat the JSONL via glob across projects). */

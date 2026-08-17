@@ -16,7 +16,13 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Clipboard from 'expo-clipboard';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
-import { getSetting, setSetting, getSettingBool, setSettingBool } from '@/services/storage';
+import {
+  SHOW_HIDDEN_FILES_SETTING,
+  getSetting,
+  setSetting,
+  getSettingBool,
+  setSettingBool,
+} from '@/services/storage';
 import { deleteToken, hasToken, saveToken } from '@/services/auth';
 import { FontSize, Spacing } from '@/constants/theme';
 import {
@@ -101,6 +107,7 @@ export default function SettingsScreen() {
 
   // Preferences
   const [autoCheckpoint, setAutoCheckpoint] = useState(false);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(false);
 
   // Turn-finished push notifications (ntfy.sh or self-hosted ntfy server)
   const [ntfyTopic, setNtfyTopic] = useState('');
@@ -196,6 +203,7 @@ export default function SettingsScreen() {
           savedNtfyServer,
           savedTranscriptionProvider,
           cachedCodexModels,
+          hiddenFiles,
         ] =
           await Promise.all([
             getSetting('defaultProvider'),
@@ -215,6 +223,7 @@ export default function SettingsScreen() {
             getSetting('ntfyServer'),
             getSetting('transcriptionProvider'),
             getCachedCodexModels(),
+            getSettingBool(SHOW_HIDDEN_FILES_SETTING),
           ]);
 
         if (
@@ -248,6 +257,7 @@ export default function SettingsScreen() {
         setHasAssemblyAiToken(assemblyAiSaved);
         setHasOpenAiToken(openAiSaved);
         setAutoCheckpoint(checkpoint);
+        setShowHiddenFiles(hiddenFiles);
         if (savedNtfyTopic !== null) setNtfyTopic(savedNtfyTopic);
         if (savedNtfyServer !== null) setNtfyServer(savedNtfyServer);
         if (
@@ -349,6 +359,11 @@ export default function SettingsScreen() {
   const handleAutoCheckpointChange = useCallback(async (value: boolean) => {
     setAutoCheckpoint(value);
     await setSettingBool('autoCheckpoint', value);
+  }, []);
+
+  const handleShowHiddenFilesChange = useCallback(async (value: boolean) => {
+    setShowHiddenFiles(value);
+    await setSettingBool(SHOW_HIDDEN_FILES_SETTING, value);
   }, []);
 
   const handleNtfyTopicChange = useCallback(async (text: string) => {
@@ -1021,11 +1036,24 @@ export default function SettingsScreen() {
       {/* Preferences Section */}
       <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>PREFERENCES</Text>
       <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
-        <View style={styles.row}>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
           <Text style={[styles.rowLabel, { color: colors.text }]}>Auto-Checkpoint</Text>
           <Switch
             value={autoCheckpoint}
             onValueChange={handleAutoCheckpointChange}
+            trackColor={{ false: colors.backgroundElement, true: colors.success }}
+          />
+        </View>
+        <View style={styles.row}>
+          <View style={styles.rowLabelWrap}>
+            <Text style={[styles.rowLabel, { color: colors.text }]}>Show Hidden Files</Text>
+            <Text style={[styles.rowHint, { color: colors.textSecondary }]}>
+              Dotfiles and dot-directories in the file browser
+            </Text>
+          </View>
+          <Switch
+            value={showHiddenFiles}
+            onValueChange={handleShowHiddenFilesChange}
             trackColor={{ false: colors.backgroundElement, true: colors.success }}
           />
         </View>
@@ -1123,6 +1151,15 @@ const styles = StyleSheet.create({
   rowLabel: {
     fontSize: FontSize.md,
     fontWeight: '400',
+  },
+  rowLabelWrap: {
+    flex: 1,
+    paddingRight: Spacing.md,
+  },
+  rowHint: {
+    fontSize: FontSize.xs,
+    lineHeight: 16,
+    marginTop: 2,
   },
   statusContainer: {
     flexDirection: 'row',
