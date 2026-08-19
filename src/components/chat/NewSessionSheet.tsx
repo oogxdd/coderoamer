@@ -17,6 +17,7 @@ import {
   AgentProvider,
   effortDisplayName,
   isCodexProvider,
+  isPiProvider,
   normalizeAgentEffortForProvider,
   providerDisplayName,
 } from '@/models/chat';
@@ -29,6 +30,13 @@ import {
   listCodexModels,
 } from '@/services/codex-models';
 import { CodexModelPicker } from './CodexModelPicker';
+import {
+  cachePiModels,
+  getCachedPiModels,
+  listPiModels,
+  PiModelOption,
+} from '@/services/pi-models';
+import { PiModelPicker } from './PiModelPicker';
 
 export interface NewSessionConfig {
   workingDirectory: string;
@@ -49,6 +57,8 @@ interface NewSessionSheetProps {
   defaultClaudeEffort?: AgentEffort;
   defaultCodexModel?: string;
   defaultCodexEffort?: AgentEffort;
+  defaultPiModel?: string;
+  defaultPiEffort?: AgentEffort;
   /** Hide the provider picker (e.g. while we only support Claude). */
   showProviderPicker?: boolean;
   locked?: boolean;
@@ -56,10 +66,11 @@ interface NewSessionSheetProps {
   onCreate: (config: NewSessionConfig) => void;
 }
 
-const PROVIDERS: AgentProvider[] = ['claude', 'codexAppServer', 'codex'];
+const PROVIDERS: AgentProvider[] = ['claude', 'codexAppServer', 'codex', 'pi'];
 const CLAUDE_MODELS = ['sonnet', 'opus', 'haiku'] as const;
 const CLAUDE_EFFORTS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CODEX_EFFORTS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
+const PI_EFFORTS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 export function NewSessionSheet({
   spriteName,
@@ -73,6 +84,8 @@ export function NewSessionSheet({
   defaultClaudeEffort = 'high',
   defaultCodexModel = '',
   defaultCodexEffort = 'high',
+  defaultPiModel = '',
+  defaultPiEffort = 'high',
   showProviderPicker = true,
   locked = false,
   onClose,
@@ -88,6 +101,8 @@ export function NewSessionSheet({
   const [rememberDirectory, setRememberDirectory] = useState(false);
   const [codexModels, setCodexModels] = useState<CodexModelOption[]>([]);
   const [loadingCodexModels, setLoadingCodexModels] = useState(false);
+  const [piModels, setPiModels] = useState<PiModelOption[]>([]);
+  const [loadingPiModels, setLoadingPiModels] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -114,6 +129,29 @@ export function NewSessionSheet({
     };
   }, [spriteName]);
 
+  useEffect(() => {
+    let active = true;
+    void getCachedPiModels().then((cached) => {
+      if (active && cached.length > 0) setPiModels(cached);
+    });
+    setLoadingPiModels(true);
+    void listPiModels(spriteName)
+      .then((models) => {
+        if (!active || models.length === 0) return;
+        setPiModels(models);
+        return cachePiModels(models);
+      })
+      .catch(() => {
+        // pi may not be installed / logged in on the sprite yet.
+      })
+      .finally(() => {
+        if (active) setLoadingPiModels(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [spriteName]);
+
   const handleCreate = async () => {
     if (locked) {
       onClose();
@@ -131,13 +169,20 @@ export function NewSessionSheet({
     if (isCodexProvider(nextProvider)) {
       setModel(defaultCodexModel);
       setEffort(normalizeAgentEffortForProvider(nextProvider, defaultCodexEffort) ?? 'high');
+    } else if (isPiProvider(nextProvider)) {
+      setModel(defaultPiModel);
+      setEffort(normalizeAgentEffortForProvider(nextProvider, defaultPiEffort) ?? 'high');
     } else {
       setModel(defaultClaudeModel);
       setEffort(normalizeAgentEffortForProvider(nextProvider, defaultClaudeEffort) ?? 'high');
     }
   };
 
-  const effortOptions = isCodexProvider(provider) ? CODEX_EFFORTS : CLAUDE_EFFORTS;
+  const effortOptions = isCodexProvider(provider)
+    ? CODEX_EFFORTS
+    : isPiProvider(provider)
+      ? PI_EFFORTS
+      : CLAUDE_EFFORTS;
   const selectedCodexModel = codexModels.find((option) => option.model === model);
   const visibleEffortOptions =
     isCodexProvider(provider) && selectedCodexModel?.supportedReasoningEfforts.length
@@ -240,7 +285,15 @@ export function NewSessionSheet({
           )}
 
           <Text style={[styles.label, { color: colors.textSecondary }]}>Model</Text>
-          {isCodexProvider(provider) ? (
+          {isPiProvider(provider) ? (
+            <PiModelPicker
+              models={piModels}
+              value={model}
+              onChange={setModel}
+              loading={loadingPiModels}
+              disabled={locked}
+            />
+          ) : isCodexProvider(provider) ? (
             <CodexModelPicker
               models={codexModels}
               value={model}

@@ -1,4 +1,4 @@
-import { ChatContent, ChatMessage } from '@/models/chat';
+import { AgentEffort, ChatContent, ChatMessage } from '@/models/chat';
 import { CodexStreamEvent } from '@/models/codex-events';
 import { stripLogTimestamps } from '@/services/claude-stream';
 
@@ -164,6 +164,63 @@ export function classifyCodexAuthIssue(raw: string): string | undefined {
   return [
     'Codex is not authenticated in this sprite environment.',
     'Run `codex login status` and then `codex login` inside the sprite shell, or switch this chat to Claude.',
+  ].join(' ');
+}
+
+/** pi's --thinking flag spells the no-reasoning level "off", not "none". */
+export function piThinkingLevel(effort: AgentEffort): string {
+  return effort === 'none' ? 'off' : effort;
+}
+
+/** Shell command for one pi chat turn (`pi --mode json`), streaming JSONL events. */
+export function buildPiTurnCommand(opts: {
+  prompt: string;
+  model?: string;
+  effort: AgentEffort;
+  /** pi session id to resume (`pi --session <id>`). */
+  session?: string;
+  appendSystemPrompt?: string;
+}): string {
+  let cmd = 'pi --mode json';
+  if (opts.model) cmd += ` --model ${shellQuote(opts.model)}`;
+  cmd += ` --thinking ${shellQuote(piThinkingLevel(opts.effort))}`;
+  if (opts.appendSystemPrompt) {
+    cmd += ` --append-system-prompt ${shellQuote(opts.appendSystemPrompt)}`;
+  }
+  if (opts.session) cmd += ` --session ${shellQuote(opts.session)}`;
+  cmd += ` ${shellQuote(opts.prompt)}`;
+  return cmd;
+}
+
+/**
+ * Sniff pi startup/auth failures from stderr. pi has no permission flags; the
+ * two ways a turn dies before any output are a missing install and missing
+ * credentials ("No API key found for …", "Run '/login <provider>'").
+ */
+export function classifyPiIssue(raw: string): string | undefined {
+  const text = raw.toLowerCase();
+  if (/pi: (command not found|not found)/.test(text) || text.includes('pi: commandnotfound')) {
+    return [
+      'The pi coding agent is not installed on this sprite.',
+      'Install it inside the sprite shell: `npm install -g @earendil-works/pi-coding-agent`, then retry.',
+    ].join(' ');
+  }
+  const matchesAuthIssue =
+    text.includes('no api key') ||
+    text.includes('api key found') ||
+    text.includes("run '/login") ||
+    text.includes('run /login') ||
+    text.includes('re-authenticate') ||
+    text.includes('not authenticated') ||
+    text.includes('unauthorized') ||
+    text.includes('status code: 401') ||
+    text.includes('status code: 403');
+
+  if (!matchesAuthIssue) return undefined;
+
+  return [
+    'pi has no model provider credentials in this sprite.',
+    'Connect a provider API key in the Integrations tab, or run `pi` and use /login inside the sprite shell.',
   ].join(' ');
 }
 

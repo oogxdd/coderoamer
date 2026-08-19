@@ -31,6 +31,7 @@ export interface PersistedChat {
   effort?: AgentEffort;
   claudeSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
   currentServiceName?: string;
   workingDirectory: string;
   createdAt: number;
@@ -57,7 +58,9 @@ export interface ActiveChatRun {
 
 function normalizeProvider(value: unknown): AgentProvider {
   if (value === 'codexAppServer') return 'codexAppServer';
-  return value === 'codex' ? 'codex' : 'claude';
+  if (value === 'codex') return 'codex';
+  if (value === 'pi') return 'pi';
+  return 'claude';
 }
 
 export function normalizePersistedChat(value: unknown): PersistedChat {
@@ -73,6 +76,7 @@ export function normalizePersistedChat(value: unknown): PersistedChat {
     effort: normalizeAgentEffortForProvider(provider, raw.effort),
     claudeSessionId: typeof raw.claudeSessionId === 'string' ? raw.claudeSessionId : undefined,
     codexSessionId: typeof raw.codexSessionId === 'string' ? raw.codexSessionId : undefined,
+    piSessionId: typeof raw.piSessionId === 'string' ? raw.piSessionId : undefined,
     currentServiceName:
       typeof raw.currentServiceName === 'string' ? raw.currentServiceName : undefined,
     workingDirectory: String(raw.workingDirectory ?? ''),
@@ -124,6 +128,7 @@ interface ChatRow {
   custom_name: string | null;
   claude_session_id: string | null;
   codex_session_id: string | null;
+  pi_session_id: string | null;
   current_service_name: string | null;
   working_directory: string;
   created_at: number;
@@ -171,6 +176,7 @@ function rowToChat(row: ChatRow, activeRun?: ActiveChatRun): PersistedChat {
     customName: row.custom_name ?? undefined,
     claudeSessionId: row.claude_session_id ?? undefined,
     codexSessionId: row.codex_session_id ?? undefined,
+    piSessionId: row.pi_session_id ?? undefined,
     currentServiceName: row.current_service_name ?? undefined,
     workingDirectory: row.working_directory,
     createdAt: row.created_at,
@@ -197,10 +203,10 @@ function safeParseStringArray(raw: string): string[] {
 const CHAT_UPSERT_SQL = `
 INSERT INTO chats (
   id, sprite_name, chat_number, provider, model, effort, custom_name, claude_session_id,
-  codex_session_id, current_service_name, working_directory, created_at,
+  codex_session_id, pi_session_id, current_service_name, working_directory, created_at,
   last_used, is_closed, first_message_preview, last_session_complete,
   processed_event_uuids
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   sprite_name = excluded.sprite_name,
   chat_number = excluded.chat_number,
@@ -210,6 +216,7 @@ ON CONFLICT(id) DO UPDATE SET
   custom_name = excluded.custom_name,
   claude_session_id = excluded.claude_session_id,
   codex_session_id = excluded.codex_session_id,
+  pi_session_id = excluded.pi_session_id,
   current_service_name = excluded.current_service_name,
   working_directory = excluded.working_directory,
   created_at = excluded.created_at,
@@ -231,6 +238,7 @@ function chatParams(chat: PersistedChat) {
     chat.customName ?? null,
     chat.claudeSessionId ?? null,
     chat.codexSessionId ?? null,
+    chat.piSessionId ?? null,
     chat.currentServiceName ?? null,
     chat.workingDirectory,
     chat.createdAt,
@@ -470,10 +478,10 @@ export const chatRepository = {
     });
   },
 
-  /** Atomically update a chat's provider/claude/codex session ids. */
+  /** Atomically update a chat's provider/claude/codex/pi session ids. */
   async updateSessionIds(
     chatId: string,
-    patch: { claudeSessionId?: string; codexSessionId?: string }
+    patch: { claudeSessionId?: string; codexSessionId?: string; piSessionId?: string }
   ): Promise<void> {
     const db = await getDatabase();
     await ensureMigrated(db);
@@ -482,6 +490,9 @@ export const chatRepository = {
     }
     if (patch.codexSessionId !== undefined) {
       await db.runAsync('UPDATE chats SET codex_session_id = ? WHERE id = ?', patch.codexSessionId, chatId);
+    }
+    if (patch.piSessionId !== undefined) {
+      await db.runAsync('UPDATE chats SET pi_session_id = ? WHERE id = ?', patch.piSessionId, chatId);
     }
   },
 

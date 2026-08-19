@@ -1,4 +1,4 @@
-import { isCodexProvider } from '@/models/chat';
+import { isCodexProvider, isPiProvider } from '@/models/chat';
 import * as api from './api';
 import {
   conversationSignature,
@@ -8,6 +8,7 @@ import {
 import { PersistedChat, chatRepository } from './chat-repository';
 import { readClaudeSessionMessages } from './claude-sessions';
 import { readCodexSessionMessages } from './codex-sessions';
+import { readPiSessionMessages } from './pi-sessions';
 
 /**
  * Reconcile persisted active runs for a sprite against the exec sessions that
@@ -56,12 +57,18 @@ export async function reconcileActiveRuns(spriteName: string): Promise<string[]>
 
 /** Merge the on-disk transcript of a finished run into the persisted chat. */
 async function syncFinishedChat(spriteName: string, chat: PersistedChat): Promise<void> {
-  const resumeId = isCodexProvider(chat.provider) ? chat.codexSessionId : chat.claudeSessionId;
+  const resumeId = isPiProvider(chat.provider)
+    ? chat.piSessionId
+    : isCodexProvider(chat.provider)
+      ? chat.codexSessionId
+      : chat.claudeSessionId;
   if (!resumeId) return;
 
-  const transcript = isCodexProvider(chat.provider)
-    ? await readCodexSessionMessages(spriteName, resumeId)
-    : await readClaudeSessionMessages(spriteName, resumeId);
+  const transcript = isPiProvider(chat.provider)
+    ? await readPiSessionMessages(spriteName, resumeId)
+    : isCodexProvider(chat.provider)
+      ? await readCodexSessionMessages(spriteName, resumeId)
+      : await readClaudeSessionMessages(spriteName, resumeId);
   if (transcript.length === 0) return;
 
   const local = await chatRepository.getMessages(chat.id);

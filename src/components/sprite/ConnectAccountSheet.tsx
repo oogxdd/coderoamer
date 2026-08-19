@@ -25,12 +25,14 @@ import {
   GithubAccessSummary,
   inspectGithubPat,
   connectGithubWithPat,
+  connectPiWithApiKey,
   containsClaudeOAuthToken,
   sanitizedLoginOutput,
+  PI_API_KEY_PROVIDERS,
 } from '@/services/account-auth';
 
 type Phase = 'starting' | 'awaiting' | 'submitting' | 'success' | 'error';
-type Mode = 'method' | 'interactive' | 'pat';
+type Mode = 'method' | 'interactive' | 'pat' | 'apikey';
 
 const GITHUB_TOKEN_URL =
   'https://github.com/settings/personal-access-tokens/new?' +
@@ -81,7 +83,9 @@ export function ConnectAccountSheet({
   const colors = useTheme();
   const meta = providerMeta(provider);
 
-  const [mode, setMode] = useState<Mode>(provider === 'github' ? 'method' : 'interactive');
+  const [mode, setMode] = useState<Mode>(
+    provider === 'github' ? 'method' : provider === 'pi' ? 'apikey' : 'interactive'
+  );
   const [phase, setPhase] = useState<Phase>('starting');
   const [prompt, setPrompt] = useState<LoginPrompt>({});
   const [codeInput, setCodeInput] = useState('');
@@ -92,6 +96,10 @@ export function ConnectAccountSheet({
   const [patSummary, setPatSummary] = useState<GithubAccessSummary>();
   const [patBusy, setPatBusy] = useState<'inspect' | 'connect'>();
   const [patError, setPatError] = useState<string>();
+  const [piEnvVar, setPiEnvVar] = useState(PI_API_KEY_PROVIDERS[0].envVar);
+  const [piApiKey, setPiApiKey] = useState('');
+  const [piBusy, setPiBusy] = useState(false);
+  const [piError, setPiError] = useState<string>();
 
   const streamRef = useRef<LoginStream | null>(null);
   const bufferRef = useRef('');
@@ -302,6 +310,21 @@ export function ConnectAccountSheet({
       setPatBusy(undefined);
     }
   }, [finishSuccess, patSummary, patToken, spriteName]);
+
+  const connectPi = useCallback(async () => {
+    const key = piApiKey.trim();
+    if (!key || piBusy) return;
+    setPiBusy(true);
+    setPiError(undefined);
+    try {
+      await connectPiWithApiKey(spriteName, piEnvVar, key);
+      finishSuccess();
+    } catch (err: any) {
+      setPiError(err?.message ?? 'Could not save the API key on the sprite.');
+    } finally {
+      setPiBusy(false);
+    }
+  }, [finishSuccess, piApiKey, piBusy, piEnvVar, spriteName]);
 
   const handleClose = useCallback(() => {
     if (!settledRef.current) {
@@ -565,6 +588,102 @@ export function ConnectAccountSheet({
             </>
           )}
 
+          {phase !== 'success' && mode === 'apikey' && (
+            <>
+              <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                pi runs with any major model provider. Pick one, paste its API key, and
+                CodeRoamer saves it to the {spriteName} environment — every pi chat turn
+                picks it up automatically.
+              </Text>
+              <View style={styles.section}>
+                <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                  1 · Provider
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.piProviderRow}
+                >
+                  {PI_API_KEY_PROVIDERS.map((option) => (
+                    <Pressable
+                      key={option.envVar}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: piEnvVar === option.envVar }}
+                      style={[
+                        styles.piProviderChip,
+                        { borderColor: colors.border, backgroundColor: colors.backgroundElement },
+                        piEnvVar === option.envVar && {
+                          borderColor: colors.tint,
+                          backgroundColor: `${colors.tint}12`,
+                        },
+                      ]}
+                      onPress={() => setPiEnvVar(option.envVar)}
+                    >
+                      <Text
+                        style={[
+                          styles.piProviderChipText,
+                          { color: piEnvVar === option.envVar ? colors.tint : colors.textSecondary },
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+              <View style={styles.section}>
+                <Text style={[styles.stepLabel, { color: colors.textSecondary }]}>
+                  2 · API key
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      color: colors.text,
+                      backgroundColor: colors.inputBackground,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                  value={piApiKey}
+                  onChangeText={(value) => {
+                    setPiApiKey(value);
+                    setPiError(undefined);
+                  }}
+                  placeholder={`${piEnvVar} value`}
+                  placeholderTextColor={colors.textSecondary}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                  editable={!piBusy}
+                  onSubmitEditing={connectPi}
+                />
+                <Pressable
+                  style={[
+                    styles.primaryButton,
+                    {
+                      backgroundColor: piApiKey.trim() && !piBusy ? colors.tint : colors.backgroundElement,
+                    },
+                  ]}
+                  disabled={!piApiKey.trim() || piBusy}
+                  onPress={connectPi}
+                >
+                  {piBusy ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Connect to {spriteName}</Text>
+                  )}
+                </Pressable>
+                {piError && (
+                  <Text style={[styles.errorText, { color: colors.destructive }]}>{piError}</Text>
+                )}
+                <Text style={[styles.muted, { color: colors.textSecondary }]}>
+                  Prefer a subscription (Claude Pro, ChatGPT…)? Run `pi` in the sprite terminal
+                  and use /login there instead — this sheet only installs API keys.
+                </Text>
+              </View>
+            </>
+          )}
+
           {mode === 'interactive' && phase === 'error' && (
             <View style={styles.centerBlock}>
               <Text style={[styles.errorText, { color: colors.destructive }]}>
@@ -799,6 +918,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  piProviderRow: {
+    gap: Spacing.sm,
+    paddingVertical: 2,
+  },
+  piProviderChip: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  piProviderChipText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
   },
   pasteLink: { fontSize: FontSize.sm, fontWeight: '700' },
   accessReview: {

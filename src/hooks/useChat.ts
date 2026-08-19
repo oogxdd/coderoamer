@@ -9,6 +9,7 @@ import {
   ToolUseCard,
   TurnOutcome,
   isCodexProvider,
+  isPiProvider,
   makeId,
   normalizeAgentEffortForProvider,
   providerDisplayName,
@@ -20,14 +21,18 @@ import {
   ClaudeStreamEvent,
   ClaudeSystemEvent,
   ClaudeToolResultEvent,
+  JSONValue,
 } from '@/models/claude-events';
 import { CodexStreamEvent } from '@/models/codex-events';
+import { PiStreamEvent } from '@/models/pi-events';
 import { ServiceLogEvent } from '@/models/service';
 import { ClaudeStreamParser, stripLogTimestamps } from '@/services/claude-stream';
 import { CodexStreamParser } from '@/services/codex-stream';
+import { PiStreamParser } from '@/services/pi-stream';
 import { streamCodexAppServerTurn } from '@/services/codex-app-server';
 import { readClaudeSessionMessages } from '@/services/claude-sessions';
 import { readCodexSessionMessages } from '@/services/codex-sessions';
+import { readPiSessionMessages } from '@/services/pi-sessions';
 import * as api from '@/services/api';
 import { ensureProvisionedOnce } from '@/services/provision';
 import { ActiveChatRun, chatRepository } from '@/services/chat-repository';
@@ -35,9 +40,11 @@ import { getSetting } from '@/services/storage';
 import {
   buildFallbackPrompt,
   buildCodexAppServerCommand,
+  buildPiTurnCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
   classifyCodexAuthIssue,
+  classifyPiIssue,
   codexEventDebugLabel,
   compactDebugChunk,
   conversationSignature,
@@ -53,12 +60,14 @@ import {
 } from '@/services/chat-helpers';
 
 const CODEX_DEFAULT_MODEL_LABEL = 'Codex default';
+const PI_DEFAULT_MODEL_LABEL = 'Pi default';
 const CHAT_MAX_RUN_AFTER_DISCONNECT = '8h';
 const MAX_LIVE_TOOL_OUTPUT_CHARS = 20_000;
 
 interface SessionIds {
   claudeSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
 }
 
 /** A send that failed before anything launched on the sprite — safe to retry. */
@@ -83,10 +92,12 @@ interface UseChatOptions {
   effort?: AgentEffort;
   initialClaudeSessionId?: string;
   initialCodexSessionId?: string;
+  initialPiSessionId?: string;
   initialActiveRun?: ActiveChatRun;
   onSessionIdsChange?: (sessionIds: SessionIds) => void;
   onActiveRunChange?: (activeRun: ActiveChatRun | undefined) => void;
   onCodexAuthIssue?: (message: string) => void;
+  onPiAuthIssue?: (message: string) => void;
 }
 
 function debugChat(...args: unknown[]) {
@@ -112,17 +123,20 @@ export function useChat(options: UseChatOptions) {
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
   const [inputText, setInputText] = useState('');
   const [codexAuthIssue, setCodexAuthIssue] = useState<string | undefined>();
+  const [piAuthIssue, setPiAuthIssue] = useState<string | undefined>();
   const [failedSend, setFailedSendState] = useState<FailedSend | undefined>();
   // In-memory only, per chat: queued messages don't survive app restarts.
   const [queuedPrompts, setQueuedPromptsState] = useState<QueuedPrompt[]>([]);
 
   const claudeSessionIdRef = useRef<string | undefined>(options.initialClaudeSessionId);
   const codexSessionIdRef = useRef<string | undefined>(options.initialCodexSessionId);
+  const piSessionIdRef = useRef<string | undefined>(options.initialPiSessionId);
   const activeRunRef = useRef<ActiveChatRun | undefined>(options.initialActiveRun);
   const execSessionIdRef = useRef<string | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const claudeParserRef = useRef(new ClaudeStreamParser());
   const codexParserRef = useRef(new CodexStreamParser());
+  const piParserRef = useRef(new PiStreamParser());
   const loadRequestRef = useRef(0);
   const loadedChatIdRef = useRef<string | undefined>(undefined);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -135,6 +149,11 @@ export function useChat(options: UseChatOptions) {
   const serviceEventsSeenRef = useRef(0);
   const codexStderrRef = useRef('');
   const codexSawAssistantRef = useRef(false);
+  const piStderrRef = useRef('');
+  const piSawAssistantRef = useRef(false);
+  // contentIndex of the last applied pi delta — a change means a new content
+  // block started, so the next delta must open a fresh preview item.
+  const piLastContentIndexRef = useRef(-1);
   const agentTurnCompleteRef = useRef(false);
   const turnTimingRef = useRef<ChatTurnTiming>({});
   const detachingControllersRef = useRef<Set<AbortController>>(new Set());
@@ -193,6 +212,7 @@ export function useChat(options: UseChatOptions) {
     options.onSessionIdsChange?.({
       claudeSessionId: claudeSessionIdRef.current,
       codexSessionId: codexSessionIdRef.current,
+      piSessionId: piSessionIdRef.current,
     });
   }, [options.onSessionIdsChange]);
 
@@ -217,6 +237,15 @@ export function useChat(options: UseChatOptions) {
     (sessionId: string | undefined) => {
       if (codexSessionIdRef.current === sessionId) return;
       codexSessionIdRef.current = sessionId;
+      emitSessionIds();
+    },
+    [emitSessionIds]
+  );
+
+  const setPiSessionId = useCallback(
+    (sessionId: string | undefined) => {
+      if (piSessionIdRef.current === sessionId) return;
+      piSessionIdRef.current = sessionId;
       emitSessionIds();
     },
     [emitSessionIds]
@@ -359,6 +388,41 @@ export function useChat(options: UseChatOptions) {
     [persistMessages, provider, spriteName]
   );
 
+  // pi counterpart: pull the on-disk session file so turns that finished while
+  // the app was away (or ran from a terminal) are recovered — the same history
+  // `pi --session <id>` would resume.
+  const syncPiTranscript = useCallback(
+    async (
+      loadRequest: number,
+      resumeId: string | undefined,
+      opts?: { allowReconnecting?: boolean }
+    ) => {
+      if (!isPiProvider(provider) || !resumeId) return;
+
+      try {
+        const transcript = await readPiSessionMessages(spriteName, resumeId);
+        if (loadRequest !== loadRequestRef.current) return;
+        const statusOk =
+          statusRef.current === 'idle' ||
+          (opts?.allowReconnecting === true && statusRef.current === 'reconnecting');
+        if (!statusOk) return;
+        if (transcript.length === 0) return;
+        const local = messagesRef.current;
+        const transcriptTurns = countUserMessages(transcript);
+        const localTurns = countUserMessages(local);
+        if (local.length !== 0 && transcriptTurns < localTurns) return;
+        const merged = mergeTranscript(local, transcript);
+        if (conversationSignature(merged) === conversationSignature(local)) return;
+        messagesRef.current = merged;
+        setMessages(merged);
+        await persistMessages(merged);
+      } catch {
+        // Offline / no session file yet — keep the local copy.
+      }
+    },
+    [persistMessages, provider, spriteName]
+  );
+
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -384,10 +448,19 @@ export function useChat(options: UseChatOptions) {
       if (setIdle) setStatusTracked('idle');
       await syncClaudeTranscript(loadRequest, claudeSessionIdRef.current);
       await syncCodexTranscript(loadRequest, codexSessionIdRef.current);
+      await syncPiTranscript(loadRequest, piSessionIdRef.current);
       await persistMessages();
       if (opts?.autoSendQueued) maybeSendNextQueued();
     },
-    [maybeSendNextQueued, persistMessages, setActiveRun, setStatusTracked, syncClaudeTranscript, syncCodexTranscript]
+    [
+      maybeSendNextQueued,
+      persistMessages,
+      setActiveRun,
+      setStatusTracked,
+      syncClaudeTranscript,
+      syncCodexTranscript,
+      syncPiTranscript,
+    ]
   );
 
   /**
@@ -453,8 +526,12 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      piParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      piStderrRef.current = '';
+      piSawAssistantRef.current = false;
+      piLastContentIndexRef.current = -1;
       agentTurnCompleteRef.current = false;
       partialDeltaCountRef.current = 0;
       partialBlockOpenRef.current = false;
@@ -467,6 +544,9 @@ export function useChat(options: UseChatOptions) {
         allowReconnecting: true,
       });
       await syncCodexTranscript(loadRequest, codexSessionIdRef.current, {
+        allowReconnecting: true,
+      });
+      await syncPiTranscript(loadRequest, piSessionIdRef.current, {
         allowReconnecting: true,
       });
       if (activeRunRef.current?.execSessionId !== activeRun.execSessionId) return;
@@ -536,6 +616,7 @@ export function useChat(options: UseChatOptions) {
       spriteName,
       syncClaudeTranscript,
       syncCodexTranscript,
+      syncPiTranscript,
     ]
   );
   attachToRunRef.current = attachToRun;
@@ -553,20 +634,26 @@ export function useChat(options: UseChatOptions) {
       serviceEventsSeenRef.current = 0;
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      piParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      piStderrRef.current = '';
+      piSawAssistantRef.current = false;
+      piLastContentIndexRef.current = -1;
       partialDeltaCountRef.current = 0;
       partialBlockOpenRef.current = false;
       partialFlagRejectedRef.current = false;
       turnTimingRef.current = {};
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
+      setPiAuthIssue(undefined);
       setFailedSend(undefined);
       setQueuedPrompts([]);
       clearPersistTimer();
       persistedPayloadsRef.current = null;
       claudeSessionIdRef.current = options.initialClaudeSessionId;
       codexSessionIdRef.current = options.initialCodexSessionId;
+      piSessionIdRef.current = options.initialPiSessionId;
       activeRunRef.current = options.initialActiveRun;
       execSessionIdRef.current = undefined;
     }
@@ -600,6 +687,7 @@ export function useChat(options: UseChatOptions) {
 
     setClaudeSessionId(options.initialClaudeSessionId);
     setCodexSessionId(options.initialCodexSessionId);
+    setPiSessionId(options.initialPiSessionId);
 
     const index = new Map<string, { messageIndex: number; toolName: string }>();
     saved.forEach((msg, idx) => {
@@ -615,6 +703,7 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      piParserRef.current.reset();
     }
 
     const activeRun = options.initialActiveRun;
@@ -636,6 +725,7 @@ export function useChat(options: UseChatOptions) {
     // never clobbers a fresh local send.
     syncClaudeTranscript(loadRequest, options.initialClaudeSessionId);
     syncCodexTranscript(loadRequest, options.initialCodexSessionId);
+    syncPiTranscript(loadRequest, options.initialPiSessionId);
   }, [
     attachToRun,
     chatId,
@@ -644,14 +734,17 @@ export function useChat(options: UseChatOptions) {
     options.initialActiveRun,
     options.initialClaudeSessionId,
     options.initialCodexSessionId,
+    options.initialPiSessionId,
     provider,
     setClaudeSessionId,
     setCodexSessionId,
+    setPiSessionId,
     setActiveRun,
     setFailedSend,
     setQueuedPrompts,
     syncClaudeTranscript,
     syncCodexTranscript,
+    syncPiTranscript,
   ]);
 
   const ensureAssistantTarget = useCallback(
@@ -1412,6 +1505,140 @@ export function useChat(options: UseChatOptions) {
     [appendAssistantText, appendTurnOutcome, completeTurnFromEvent, updateActiveAssistant, setCodexSessionId]
   );
 
+  /**
+   * Apply one parsed `pi --mode json` event. Deltas are a live preview
+   * (replaced by each authoritative assistant `message_end`); tool cards and
+   * results mirror the Claude path; `agent_end` is the terminal event.
+   */
+  const handlePiEvent = useCallback(
+    (event: PiStreamEvent) => {
+      switch (event.type) {
+        case 'sessionStarted':
+          debugChat('pi session started', elapsedSince(turnTimingRef.current.startedAt), event.sessionId);
+          setPiSessionId(event.sessionId);
+          break;
+        case 'assistantDelta':
+          piSawAssistantRef.current = true;
+          if (event.contentIndex !== piLastContentIndexRef.current) {
+            piLastContentIndexRef.current = event.contentIndex;
+            partialBlockOpenRef.current = false;
+          }
+          appendPartialDelta('text', event.text);
+          break;
+        case 'reasoningDelta':
+          if (event.contentIndex !== piLastContentIndexRef.current) {
+            piLastContentIndexRef.current = event.contentIndex;
+            partialBlockOpenRef.current = false;
+          }
+          appendPartialDelta('reasoning', event.text);
+          break;
+        case 'assistantMessage': {
+          const msg = event.message;
+          if (msg.provider && msg.model) setModelName(`${msg.provider}/${msg.model}`);
+          updateActiveAssistant((newContent, targetIndex) => {
+            // Swap the delta-built preview of this API message for its
+            // authoritative blocks (same text, plus complete tool calls).
+            if (partialDeltaCountRef.current > 0) {
+              newContent.splice(newContent.length - partialDeltaCountRef.current);
+              partialDeltaCountRef.current = 0;
+              partialBlockOpenRef.current = false;
+            }
+            for (const block of msg.content) {
+              const record = block as Record<string, unknown>;
+              if (block.type === 'text' && typeof record.text === 'string') {
+                const text = record.text as string;
+                if (text) assistantTextSeenRef.current = true;
+                const lastContent = newContent[newContent.length - 1];
+                if (lastContent && lastContent.type === 'text') {
+                  newContent[newContent.length - 1] = {
+                    type: 'text',
+                    text: lastContent.text + text,
+                  };
+                } else {
+                  newContent.push({ type: 'text', text });
+                }
+              } else if (block.type === 'thinking' && typeof record.thinking === 'string') {
+                const thinkingText = record.thinking as string;
+                if (thinkingText) {
+                  const lastContent = newContent[newContent.length - 1];
+                  if (lastContent && lastContent.type === 'reasoning') {
+                    newContent[newContent.length - 1] = {
+                      type: 'reasoning',
+                      text: lastContent.text + thinkingText,
+                    };
+                  } else {
+                    newContent.push({ type: 'reasoning', text: thinkingText });
+                  }
+                }
+              } else if (block.type === 'toolCall' && typeof record.id === 'string') {
+                const card: ToolUseCard = {
+                  toolUseId: record.id as string,
+                  toolName: typeof record.name === 'string' ? record.name : 'Tool',
+                  input: (record.arguments ?? {}) as JSONValue,
+                  startedAt: Date.now(),
+                };
+                newContent.push({ type: 'toolUse', card });
+                toolUseIndexRef.current.set(card.toolUseId, {
+                  messageIndex: targetIndex,
+                  toolName: card.toolName,
+                });
+              }
+            }
+            return newContent;
+          });
+          break;
+        }
+        case 'toolResult': {
+          updateActiveAssistant((newContent) => {
+            const toolName =
+              toolUseIndexRef.current.get(event.toolCallId)?.toolName ?? event.toolName;
+            const resultCard: ToolResultCard = {
+              toolUseId: event.toolCallId,
+              toolName,
+              content:
+                event.isError && event.content == null ? 'Tool error' : event.content,
+              completedAt: Date.now(),
+            };
+            newContent.push({ type: 'toolResult', card: resultCard });
+            for (let i = 0; i < newContent.length; i++) {
+              const item = newContent[i];
+              if (item.type === 'toolUse' && item.card.toolUseId === event.toolCallId) {
+                newContent[i] = {
+                  type: 'toolUse',
+                  card: { ...item.card, result: resultCard },
+                };
+                break;
+              }
+            }
+            return newContent;
+          });
+          break;
+        }
+        case 'turnCompleted': {
+          debugChat(
+            'pi turn completed',
+            elapsedSince(turnTimingRef.current.startedAt),
+            event.status
+          );
+          agentTurnCompleteRef.current = true;
+          if (event.message) setErrorMessage(event.message);
+          appendTurnOutcome({
+            status: event.status,
+            durationMs: turnTimingRef.current.startedAt
+              ? Date.now() - turnTimingRef.current.startedAt
+              : undefined,
+            completedAt: Date.now(),
+          });
+          completeTurnFromEvent({ autoSendQueued: event.status === 'success' });
+          break;
+        }
+        case 'unknown':
+          break;
+      }
+    },
+    [appendPartialDelta, appendTurnOutcome, completeTurnFromEvent, setPiSessionId, updateActiveAssistant]
+  );
+
   const reportCodexAuthIssue = useCallback(
     (raw: string) => {
       const issue = classifyCodexAuthIssue(raw);
@@ -1420,6 +1647,16 @@ export function useChat(options: UseChatOptions) {
       options.onCodexAuthIssue?.(issue);
     },
     [options.onCodexAuthIssue]
+  );
+
+  const reportPiAuthIssue = useCallback(
+    (raw: string) => {
+      const issue = classifyPiIssue(raw);
+      if (!issue) return;
+      setPiAuthIssue(issue);
+      options.onPiAuthIssue?.(issue);
+    },
+    [options.onPiAuthIssue]
   );
 
   const processServiceEvent = useCallback(
@@ -1456,6 +1693,23 @@ export function useChat(options: UseChatOptions) {
               handleClaudeEvent(parsed);
             }
             if (events.length > 0) schedulePersist();
+          } else if (provider === 'pi') {
+            const events = piParserRef.current.parse(dataStr);
+            if (events.length > 0) {
+              if (!turnTimingRef.current.firstParsedAt) {
+                turnTimingRef.current.firstParsedAt = Date.now();
+              }
+              debugChat(
+                'stdout parsed',
+                provider,
+                elapsedSince(turnTimingRef.current.startedAt),
+                events.map((e) => e.type).join(',')
+              );
+            }
+            for (const parsed of events) {
+              handlePiEvent(parsed);
+            }
+            if (events.length > 0) schedulePersist();
           } else {
             const events = codexParserRef.current.parse(dataStr);
             if (events.length > 0) {
@@ -1485,6 +1739,9 @@ export function useChat(options: UseChatOptions) {
           if (isCodexProvider(provider) && event.data) {
             codexStderrRef.current += `\n${event.data}`;
           }
+          if (isPiProvider(provider) && event.data) {
+            piStderrRef.current += `\n${event.data}`;
+          }
           if (
             provider === 'claude' &&
             event.data &&
@@ -1508,19 +1765,19 @@ export function useChat(options: UseChatOptions) {
           break;
         }
         case 'exit': {
-          const remaining =
-            provider === 'claude'
-              ? claudeParserRef.current.flush()
-              : codexParserRef.current.flush();
-
           if (provider === 'claude') {
-            for (const parsed of remaining as ClaudeStreamEvent[]) {
+            const remaining = claudeParserRef.current.flush();
+            for (const parsed of remaining) {
               if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
               if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
               handleClaudeEvent(parsed);
             }
+          } else if (provider === 'pi') {
+            for (const parsed of piParserRef.current.flush()) {
+              handlePiEvent(parsed);
+            }
           } else {
-            for (const parsed of remaining as CodexStreamEvent[]) {
+            for (const parsed of codexParserRef.current.flush()) {
               handleCodexEvent(parsed);
             }
           }
@@ -1536,7 +1793,7 @@ export function useChat(options: UseChatOptions) {
           break;
       }
     },
-    [handleClaudeEvent, handleCodexEvent, provider, schedulePersist, setStatusTracked]
+    [handleClaudeEvent, handleCodexEvent, handlePiEvent, provider, schedulePersist, setStatusTracked]
   );
   processServiceEventRef.current = processServiceEvent;
 
@@ -1620,6 +1877,32 @@ export function useChat(options: UseChatOptions) {
         claudeCmd += ` ${shellQuote(claudePrompt)}`;
 
         commandParts.push(claudeCmd);
+      } else if (provider === 'pi') {
+        const [piModelSetting, piEffortSetting, customInstructions] = await Promise.all([
+          getSetting('piModel'),
+          getSetting('piEffort'),
+          getSetting('customInstructions'),
+        ]);
+        const piModel = model?.trim() || piModelSetting?.trim();
+        const selectedEffort =
+          normalizeAgentEffortForProvider(provider, effort ?? piEffortSetting) ?? 'high';
+        setModelName(piModel || PI_DEFAULT_MODEL_LABEL);
+        const piPrompt = piSessionIdRef.current
+          ? prompt
+          : buildFallbackPrompt(historyForFallback, prompt);
+
+        // Skip the pi.dev version ping so the first stdout line (the session
+        // header) arrives as fast as the provider connection allows.
+        commandParts.push('export PI_SKIP_VERSION_CHECK=1');
+        commandParts.push(
+          buildPiTurnCommand({
+            prompt: piPrompt,
+            model: piModel || undefined,
+            effort: selectedEffort,
+            session: piSessionIdRef.current,
+            appendSystemPrompt: customInstructions?.trim() || undefined,
+          })
+        );
       } else {
         const [codexModelSetting, codexEffortSetting] = await Promise.all([
           getSetting('codexModel'),
@@ -1676,8 +1959,12 @@ export function useChat(options: UseChatOptions) {
       processedUUIDsRef.current = new Set();
       claudeParserRef.current.reset();
       codexParserRef.current.reset();
+      piParserRef.current.reset();
       codexStderrRef.current = '';
       codexSawAssistantRef.current = false;
+      piStderrRef.current = '';
+      piSawAssistantRef.current = false;
+      piLastContentIndexRef.current = -1;
       agentTurnCompleteRef.current = false;
       partialDeltaCountRef.current = 0;
       partialBlockOpenRef.current = false;
@@ -1686,6 +1973,7 @@ export function useChat(options: UseChatOptions) {
       setStatusTracked('connecting');
       setErrorMessage(undefined);
       setCodexAuthIssue(undefined);
+      setPiAuthIssue(undefined);
       serviceEventsSeenRef.current = 0;
 
       const abortController = new AbortController();
@@ -1775,6 +2063,9 @@ export function useChat(options: UseChatOptions) {
           if (isCodexProvider(provider)) {
             reportCodexAuthIssue(`${message}\n${codexStderrRef.current}`);
           }
+          if (isPiProvider(provider)) {
+            reportPiAuthIssue(`${message}\n${piStderrRef.current}`);
+          }
         }
       } finally {
         const wasDetaching = detachingControllersRef.current.delete(abortController);
@@ -1795,13 +2086,21 @@ export function useChat(options: UseChatOptions) {
         }
 
         const remaining =
-          provider === 'claude' ? claudeParserRef.current.flush() : codexParserRef.current.flush();
+          provider === 'claude'
+            ? claudeParserRef.current.flush()
+            : provider === 'pi'
+              ? piParserRef.current.flush()
+              : codexParserRef.current.flush();
 
         if (provider === 'claude') {
           for (const parsed of remaining as ClaudeStreamEvent[]) {
             if (parsed.uuid && processedUUIDsRef.current.has(parsed.uuid)) continue;
             if (parsed.uuid) processedUUIDsRef.current.add(parsed.uuid);
             handleClaudeEvent(parsed);
+          }
+        } else if (provider === 'pi') {
+          for (const parsed of remaining as PiStreamEvent[]) {
+            handlePiEvent(parsed);
           }
         } else {
           for (const parsed of remaining as CodexStreamEvent[]) {
@@ -1811,6 +2110,18 @@ export function useChat(options: UseChatOptions) {
 
         if (isCodexProvider(provider) && !codexSawAssistantRef.current) {
           reportCodexAuthIssue(codexStderrRef.current);
+        }
+        if (isPiProvider(provider) && !piSawAssistantRef.current) {
+          reportPiAuthIssue(piStderrRef.current);
+          // pi exited without its terminal agent_end event and without any
+          // assistant output — a startup failure (missing install, missing
+          // credentials, crash). Surface it instead of a silent empty turn.
+          if (!agentTurnCompleteRef.current && !sendError && !disconnectedBeforeExit) {
+            const detail = compactDebugChunk(piStderrRef.current, 300) || 'pi exited unexpectedly';
+            agentTurnCompleteRef.current = true;
+            setErrorMessage(detail);
+            appendTurnOutcome({ status: 'error', completedAt: Date.now() });
+          }
         }
 
         if (disconnectedBeforeExit && streamActiveRun && !agentTurnCompleteRef.current) {
@@ -1867,6 +2178,7 @@ export function useChat(options: UseChatOptions) {
       processServiceEvent,
       provider,
       reportCodexAuthIssue,
+      reportPiAuthIssue,
       scheduleReconnect,
       setActiveRun,
       setFailedSend,
@@ -1874,6 +2186,7 @@ export function useChat(options: UseChatOptions) {
       spriteName,
       handleClaudeEvent,
       handleCodexEvent,
+      handlePiEvent,
       appendTurnOutcome,
       completeTurnFromEvent,
       effort,
@@ -2017,6 +2330,10 @@ export function useChat(options: UseChatOptions) {
     setCodexAuthIssue(undefined);
   }, []);
 
+  const clearPiAuthIssue = useCallback(() => {
+    setPiAuthIssue(undefined);
+  }, []);
+
   return {
     messages,
     status,
@@ -2029,9 +2346,15 @@ export function useChat(options: UseChatOptions) {
     interrupt,
     detachStream,
     loadSession,
-    sessionId: isCodexProvider(provider) ? codexSessionIdRef.current : claudeSessionIdRef.current,
+    sessionId: isPiProvider(provider)
+      ? piSessionIdRef.current
+      : isCodexProvider(provider)
+        ? codexSessionIdRef.current
+        : claudeSessionIdRef.current,
     codexAuthIssue,
     clearCodexAuthIssue,
+    piAuthIssue,
+    clearPiAuthIssue,
     failedSend,
     retryFailedSend,
     queuedPrompts,

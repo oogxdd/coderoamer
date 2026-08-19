@@ -1,7 +1,7 @@
 import { JSONValue, jsonGet, jsonString, jsonPretty } from './claude-events';
 
 export type ChatRole = 'user' | 'assistant' | 'system';
-export type AgentProvider = 'claude' | 'codex' | 'codexAppServer';
+export type AgentProvider = 'claude' | 'codex' | 'codexAppServer' | 'pi';
 export type AgentEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export type ChatStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'error';
@@ -139,6 +139,22 @@ export function toolUseSummary(card: ToolUseCard): string {
       }
       return 'update plan';
     }
+    // pi built-in tools (lowercase names; args use `path`/`command`/`pattern`).
+    case 'bash':
+      return jsonString(jsonGet(input, 'command')) ?? 'bash command';
+    case 'read':
+    case 'write':
+    case 'edit':
+    case 'ls':
+      return (
+        jsonString(jsonGet(input, 'path')) ??
+        jsonString(jsonGet(input, 'file_path')) ??
+        `${card.toolName} file`
+      );
+    case 'grep':
+      return jsonString(jsonGet(input, 'pattern')) ?? 'grep search';
+    case 'find':
+      return jsonString(jsonGet(input, 'pattern')) ?? 'find files';
     default:
       return card.toolName;
   }
@@ -163,6 +179,13 @@ export function toolUseIcon(toolName: string): string {
     case 'Model': return '↪';
     case 'Warning': return '⚠️';
     case 'TodoWrite': return '📋';
+    case 'bash': return '>';
+    case 'read': return '📄';
+    case 'write': return '📝';
+    case 'edit': return '✏️';
+    case 'grep': return '🔎';
+    case 'find': return '🔍';
+    case 'ls': return '📂';
     default: return '🔧';
   }
 }
@@ -221,6 +244,33 @@ export function toolUseActivityLabel(card: ToolUseCard, cwd?: string): string {
       return 'Reviewing changes...';
     case 'TodoWrite':
       return 'Updating plan...';
+    // pi built-in tools.
+    case 'bash': {
+      const cmd = jsonString(jsonGet(input, 'command')) ?? 'command';
+      return `Running ${cmd.slice(0, 60)}...`;
+    }
+    case 'read': {
+      const fp = jsonString(jsonGet(input, 'path')) ?? jsonString(jsonGet(input, 'file_path')) ?? 'file';
+      return `Reading ${relativize(fp.split('/').pop() ?? fp)}...`;
+    }
+    case 'write': {
+      const fp = jsonString(jsonGet(input, 'path')) ?? jsonString(jsonGet(input, 'file_path')) ?? 'file';
+      return `Writing ${relativize(fp.split('/').pop() ?? fp)}...`;
+    }
+    case 'edit': {
+      const fp = jsonString(jsonGet(input, 'path')) ?? jsonString(jsonGet(input, 'file_path')) ?? 'file';
+      return `Editing ${relativize(fp.split('/').pop() ?? fp)}...`;
+    }
+    case 'grep': {
+      const pattern = jsonString(jsonGet(input, 'pattern')) ?? 'code';
+      return `Searching ${pattern}...`;
+    }
+    case 'find': {
+      const pattern = jsonString(jsonGet(input, 'pattern')) ?? 'files';
+      return `Searching ${pattern}...`;
+    }
+    case 'ls':
+      return 'Listing files...';
     default:
       return `Running ${card.toolName}...`;
   }
@@ -262,6 +312,8 @@ export function providerDisplayName(provider: AgentProvider): string {
       return 'Codex Legacy';
     case 'codexAppServer':
       return 'Codex Live';
+    case 'pi':
+      return 'Pi';
     default:
       return 'Claude';
   }
@@ -269,6 +321,10 @@ export function providerDisplayName(provider: AgentProvider): string {
 
 export function isCodexProvider(provider: AgentProvider): boolean {
   return provider === 'codex' || provider === 'codexAppServer';
+}
+
+export function isPiProvider(provider: AgentProvider): boolean {
+  return provider === 'pi';
 }
 
 export function normalizeAgentEffort(value: unknown): AgentEffort | undefined {
@@ -298,6 +354,12 @@ export function normalizeAgentEffortForProvider(
     // no-reasoning level "none". Also keep cross-provider "max" values valid.
     if (effort === 'minimal') return 'none';
     if (effort === 'max') return 'xhigh';
+    return effort;
+  }
+
+  if (isPiProvider(provider)) {
+    // pi's --thinking accepts off|minimal|low|medium|high|xhigh|max; the app's
+    // shared "none" level stands in for "off" (translated at command build).
     return effort;
   }
 

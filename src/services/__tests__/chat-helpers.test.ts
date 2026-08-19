@@ -3,14 +3,17 @@ import { ChatMessage } from '@/models/chat';
 import {
   buildFallbackPrompt,
   buildCodexAppServerCommand,
+  buildPiTurnCommand,
   buildProcessGroupKillCommand,
   buildTurnNotifySuffix,
   classifyCodexAuthIssue,
+  classifyPiIssue,
   conversationSignature,
   countUserMessages,
   firstDivergentIndex,
   isHeartbeatStderr,
   mergeTranscript,
+  piThinkingLevel,
   safeTaskName,
   shellQuote,
   withSpriteTaskHeartbeat,
@@ -73,6 +76,63 @@ describe('classifyCodexAuthIssue', () => {
 
   it('ignores ordinary errors', () => {
     expect(classifyCodexAuthIssue('command not found: cargo')).toBeUndefined();
+  });
+});
+
+describe('buildPiTurnCommand', () => {
+  it('builds a fresh-session pi turn with model, thinking, and system prompt', () => {
+    const command = buildPiTurnCommand({
+      prompt: 'list files',
+      model: 'zai/glm-5.3',
+      effort: 'high',
+      appendSystemPrompt: 'Be terse.',
+    });
+    expect(command).toBe(
+      "pi --mode json --model 'zai/glm-5.3' --thinking 'high' " +
+        "--append-system-prompt 'Be terse.' 'list files'"
+    );
+  });
+
+  it('resumes a session and translates none to off', () => {
+    const command = buildPiTurnCommand({
+      prompt: 'continue',
+      effort: 'none',
+      session: '01a016be-b7ae',
+    });
+    expect(command).toBe(
+      "pi --mode json --thinking 'off' --session '01a016be-b7ae' 'continue'"
+    );
+  });
+
+  it('shell-quotes prompts with apostrophes', () => {
+    const command = buildPiTurnCommand({ prompt: "don't break", effort: 'medium' });
+    expect(command.endsWith("'don'\\''t break'")).toBe(true);
+  });
+});
+
+describe('piThinkingLevel', () => {
+  it('maps none to off and passes the rest through', () => {
+    expect(piThinkingLevel('none')).toBe('off');
+    expect(piThinkingLevel('minimal')).toBe('minimal');
+    expect(piThinkingLevel('max')).toBe('max');
+  });
+});
+
+describe('classifyPiIssue', () => {
+  it('detects a missing pi install', () => {
+    expect(classifyPiIssue('bash: pi: command not found')).toMatch(/not installed/);
+  });
+
+  it('detects missing credentials', () => {
+    expect(classifyPiIssue('Error: No API key found for "zai"')).toMatch(
+      /no model provider credentials/i
+    );
+    expect(classifyPiIssue("Run '/login zai' to re-authenticate.")).toBeTruthy();
+  });
+
+  it('ignores unrelated errors', () => {
+    expect(classifyPiIssue('some unrelated failure')).toBeUndefined();
+    expect(classifyPiIssue('cargo: command not found')).toBeUndefined();
   });
 });
 

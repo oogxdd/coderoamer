@@ -52,6 +52,7 @@ import { QuickBashSheet } from '@/components/chat/QuickBashSheet';
 import { AgentSessionSummary, SessionBrowserSheet } from '@/components/chat/SessionBrowserSheet';
 import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
 import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
+import { listPiSessions, readPiSessionMessages } from '@/services/pi-sessions';
 import { CheckpointsList } from '@/components/checkpoints/CheckpointsList';
 import { SpriteIntegrationsTab } from '@/components/sprite/SpriteIntegrationsTab';
 import { FilesystemTab } from '@/components/filesystem/FilesystemTab';
@@ -82,6 +83,8 @@ interface AgentDefaults {
   claudeEffort: AgentEffort;
   codexModel: string;
   codexEffort: AgentEffort;
+  piModel: string;
+  piEffort: AgentEffort;
 }
 
 /** Distance from the bottom, in points, still counted as "following along". */
@@ -93,11 +96,15 @@ const INITIAL_AGENT_DEFAULTS: AgentDefaults = {
   claudeEffort: 'high',
   codexModel: '',
   codexEffort: 'high',
+  piModel: '',
+  piEffort: 'high',
 };
 
 function normalizeProvider(provider: unknown): AgentProvider {
   if (provider === 'codexAppServer') return 'codexAppServer';
-  return provider === 'codex' ? 'codex' : 'claude';
+  if (provider === 'codex') return 'codex';
+  if (provider === 'pi') return 'pi';
+  return 'claude';
 }
 
 function normalizeTranscriptionProvider(provider: unknown): TranscriptionProvider {
@@ -106,11 +113,15 @@ function normalizeTranscriptionProvider(provider: unknown): TranscriptionProvide
 }
 
 function defaultModelFor(provider: AgentProvider, defaults: AgentDefaults): string {
-  return isCodexProvider(provider) ? defaults.codexModel : defaults.claudeModel;
+  if (isCodexProvider(provider)) return defaults.codexModel;
+  if (provider === 'pi') return defaults.piModel;
+  return defaults.claudeModel;
 }
 
 function defaultEffortFor(provider: AgentProvider, defaults: AgentDefaults): AgentEffort {
-  return isCodexProvider(provider) ? defaults.codexEffort : defaults.claudeEffort;
+  if (isCodexProvider(provider)) return defaults.codexEffort;
+  if (provider === 'pi') return defaults.piEffort;
+  return defaults.claudeEffort;
 }
 
 /** Find the active tool label from the last assistant message's content */
@@ -160,6 +171,7 @@ export default function SpriteDetailScreen() {
   const [chatEffort, setChatEffort] = useState<AgentEffort>('high');
   const [claudeSessionId, setClaudeSessionId] = useState<string | undefined>();
   const [codexSessionId, setCodexSessionId] = useState<string | undefined>();
+  const [piSessionId, setPiSessionId] = useState<string | undefined>();
   const [activeRun, setActiveRun] = useState<ActiveChatRun | undefined>();
   const [chatListVisible, setChatListVisible] = useState(false);
   const [quickBashVisible, setQuickBashVisible] = useState(false);
@@ -205,13 +217,15 @@ export default function SpriteDetailScreen() {
   const loadRemoteSessions = useCallback(async () => {
     if (!spriteName) return;
     try {
-      const [claudeList, codexList] = await Promise.all([
+      const [claudeList, codexList, piList] = await Promise.all([
         listClaudeSessions(spriteName),
         listCodexSessions(spriteName),
+        listPiSessions(spriteName),
       ]);
       setRemoteSessions([
         ...claudeList.map((s) => ({ ...s, provider: 'claude' as const })),
         ...codexList.map((s) => ({ ...s, provider: 'codex' as const })),
+        ...piList.map((s) => ({ ...s, provider: 'pi' as const })),
       ]);
     } catch {
       // Non-fatal — keep whatever we already have.
@@ -231,6 +245,7 @@ export default function SpriteDetailScreen() {
     for (const c of chatList) {
       if (c.claudeSessionId) linked.add(c.claudeSessionId);
       if (c.codexSessionId) linked.add(c.codexSessionId);
+      if (c.piSessionId) linked.add(c.piSessionId);
     }
     return remoteSessions.filter((s) => !linked.has(s.id));
   }, [chatList, remoteSessions]);
@@ -249,10 +264,12 @@ export default function SpriteDetailScreen() {
     effort: chatEffort,
     initialClaudeSessionId: claudeSessionId,
     initialCodexSessionId: codexSessionId,
+    initialPiSessionId: piSessionId,
     initialActiveRun: activeRun,
     onSessionIdsChange: (sessionIds) => {
       setClaudeSessionId(sessionIds.claudeSessionId);
       setCodexSessionId(sessionIds.codexSessionId);
+      setPiSessionId(sessionIds.piSessionId);
       if (!chatId) return;
       const updated = chatListRef.current.map((chatMeta) =>
         chatMeta.id === chatId
@@ -260,6 +277,7 @@ export default function SpriteDetailScreen() {
               ...chatMeta,
               claudeSessionId: sessionIds.claudeSessionId,
               codexSessionId: sessionIds.codexSessionId,
+              piSessionId: sessionIds.piSessionId,
             }
           : chatMeta
       );
@@ -267,6 +285,7 @@ export default function SpriteDetailScreen() {
       chatRepository.updateSessionIds(chatId, {
         claudeSessionId: sessionIds.claudeSessionId,
         codexSessionId: sessionIds.codexSessionId,
+        piSessionId: sessionIds.piSessionId,
       });
     },
     onActiveRunChange: (nextActiveRun) => {
@@ -306,6 +325,8 @@ export default function SpriteDetailScreen() {
         savedClaudeEffort,
         savedCodexModel,
         savedCodexEffort,
+        savedPiModel,
+        savedPiEffort,
       ] = await Promise.all([
         chatRepository.listBySprite(spriteName),
         getSetting('defaultWorkingDirectory'),
@@ -315,6 +336,8 @@ export default function SpriteDetailScreen() {
         getSetting('claudeEffort'),
         getSetting('codexModel'),
         getSetting('codexEffort'),
+        getSetting('piModel'),
+        getSetting('piEffort'),
       ]);
       if (!mounted) return;
 
@@ -331,6 +354,8 @@ export default function SpriteDetailScreen() {
         codexModel: savedCodexModel?.trim() || '',
         codexEffort:
           normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high',
+        piModel: savedPiModel?.trim() || '',
+        piEffort: normalizeAgentEffortForProvider('pi', savedPiEffort) ?? 'high',
       };
       setAgentDefaults(defaults);
 
@@ -348,6 +373,7 @@ export default function SpriteDetailScreen() {
         setChatEffort(current.effort ?? defaultEffortFor(current.provider, defaults));
         setClaudeSessionId(current.claudeSessionId);
         setCodexSessionId(current.codexSessionId);
+        setPiSessionId(current.piSessionId);
         setActiveRun(current.activeRun);
         setWorkingDirectory(current.workingDirectory || fallbackDir);
       } else {
@@ -360,6 +386,7 @@ export default function SpriteDetailScreen() {
         setChatEffort(defaultEffortFor(defaultProvider, defaults));
         setClaudeSessionId(undefined);
         setCodexSessionId(undefined);
+        setPiSessionId(undefined);
         setActiveRun(undefined);
         setWorkingDirectory(fallbackDir);
       }
@@ -558,6 +585,7 @@ export default function SpriteDetailScreen() {
     setWorkingDirectory(dir);
     setClaudeSessionId(undefined);
     setCodexSessionId(undefined);
+    setPiSessionId(undefined);
     setActiveRun(undefined);
     setChatListVisible(false);
     setSessionSheetMode(null);
@@ -617,6 +645,7 @@ export default function SpriteDetailScreen() {
     setChatEffort(latestChat.effort ?? defaultEffortFor(nextProvider, agentDefaults));
     setClaudeSessionId(latestChat.claudeSessionId);
     setCodexSessionId(latestChat.codexSessionId);
+    setPiSessionId(latestChat.piSessionId);
     setActiveRun(latestChat.activeRun);
     setWorkingDirectory(latestChat.workingDirectory || defaultDirectory);
     setReloadNonce((n) => n + 1);
@@ -648,6 +677,7 @@ export default function SpriteDetailScreen() {
       setChatEffort(next.effort ?? defaultEffortFor(nextProvider, agentDefaults));
       setClaudeSessionId(next.claudeSessionId);
       setCodexSessionId(next.codexSessionId);
+      setPiSessionId(next.piSessionId);
       setActiveRun(next.activeRun);
       setWorkingDirectory(next.workingDirectory || defaultDirectory);
       setReloadNonce((n) => n + 1);
@@ -667,9 +697,11 @@ export default function SpriteDetailScreen() {
       const dir = normalizeWorkingDirectory(session.cwd || defaultDirectory);
       const chats = chatListRef.current;
       const existing = chats.find((c) =>
-        isCodexProvider(session.provider)
-          ? isCodexProvider(c.provider) && c.codexSessionId === session.id
-          : c.provider === 'claude' && c.claudeSessionId === session.id
+        session.provider === 'pi'
+          ? c.provider === 'pi' && c.piSessionId === session.id
+          : isCodexProvider(session.provider)
+            ? isCodexProvider(c.provider) && c.codexSessionId === session.id
+            : c.provider === 'claude' && c.claudeSessionId === session.id
       );
 
       let target: PersistedChat;
@@ -679,13 +711,18 @@ export default function SpriteDetailScreen() {
           provider: existing.provider,
           claudeSessionId: session.provider === 'claude' ? session.id : existing.claudeSessionId,
           codexSessionId: isCodexProvider(session.provider) ? session.id : existing.codexSessionId,
+          piSessionId: session.provider === 'pi' ? session.id : existing.piSessionId,
           workingDirectory: dir,
           lastUsed: Date.now(),
         };
       } else {
         const maxNumber = chats.reduce((max, c) => Math.max(max, c.chatNumber), 0);
         const importedProvider: AgentProvider =
-          session.provider === 'claude' ? 'claude' : 'codexAppServer';
+          session.provider === 'claude'
+            ? 'claude'
+            : session.provider === 'pi'
+              ? 'pi'
+              : 'codexAppServer';
         target = {
           id: `${spriteName}-chat-${maxNumber + 1}`,
           spriteName,
@@ -695,6 +732,7 @@ export default function SpriteDetailScreen() {
           effort: defaultEffortFor(importedProvider, agentDefaults),
           claudeSessionId: session.provider === 'claude' ? session.id : undefined,
           codexSessionId: isCodexProvider(session.provider) ? session.id : undefined,
+          piSessionId: session.provider === 'pi' ? session.id : undefined,
           workingDirectory: dir,
           createdAt: Date.now(),
           lastUsed: Date.now(),
@@ -717,6 +755,7 @@ export default function SpriteDetailScreen() {
       setChatEffort(target.effort ?? defaultEffortFor(target.provider, agentDefaults));
       setClaudeSessionId(session.provider === 'claude' ? session.id : target.claudeSessionId);
       setCodexSessionId(isCodexProvider(session.provider) ? session.id : target.codexSessionId);
+      setPiSessionId(session.provider === 'pi' ? session.id : target.piSessionId);
       setActiveRun(undefined);
       setWorkingDirectory(dir);
       setChatName(target.customName ?? `Session ${target.chatNumber}`);
@@ -737,9 +776,11 @@ export default function SpriteDetailScreen() {
       setRemoteBusyId(session.id);
       try {
         const messages =
-          session.provider === 'codex'
-            ? await readCodexSessionMessages(spriteName, session.id)
-            : await readClaudeSessionMessages(spriteName, session.id);
+          session.provider === 'pi'
+            ? await readPiSessionMessages(spriteName, session.id)
+            : session.provider === 'codex'
+              ? await readCodexSessionMessages(spriteName, session.id)
+              : await readClaudeSessionMessages(spriteName, session.id);
         await handleResumeSession(session, messages);
       } catch (e: any) {
         Alert.alert('Could not open session', e?.message ?? 'Failed to load transcript.');
@@ -803,6 +844,40 @@ export default function SpriteDetailScreen() {
       ]
     );
   }, [agentDefaults, chat.codexAuthIssue, chat.clearCodexAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
+
+  useEffect(() => {
+    if (!chat.piAuthIssue) return;
+    const isLocked = isProviderLocked;
+    Alert.alert(
+      'Pi Setup Required',
+      isLocked
+        ? `${chat.piAuthIssue}\n\nThis session is locked to pi. Start a new Claude session now?`
+        : `${chat.piAuthIssue}\n\nSwitch this session to Claude now?`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => chat.clearPiAuthIssue(),
+        },
+        {
+          text: isLocked ? 'New Claude Session' : 'Switch to Claude',
+          onPress: () => {
+            if (isLocked) {
+              createChat({
+                workingDirectory,
+                provider: 'claude',
+                model: agentDefaults.claudeModel,
+                effort: agentDefaults.claudeEffort,
+              });
+            } else {
+              handleProviderChange('claude');
+            }
+            chat.clearPiAuthIssue();
+          },
+        },
+      ]
+    );
+  }, [agentDefaults, chat.piAuthIssue, chat.clearPiAuthIssue, createChat, handleProviderChange, isProviderLocked, workingDirectory]);
 
   const handleInsertBashOutput = useCallback((text: string) => {
     chat.setInputText((prev: string) => (prev ? prev + '\n' + text : text));
@@ -1310,6 +1385,8 @@ export default function SpriteDetailScreen() {
             defaultClaudeEffort={agentDefaults.claudeEffort}
             defaultCodexModel={agentDefaults.codexModel}
             defaultCodexEffort={agentDefaults.codexEffort}
+            defaultPiModel={agentDefaults.piModel}
+            defaultPiEffort={agentDefaults.piEffort}
             showProviderPicker
             locked={sessionSheetMode === 'settings' && isProviderLocked}
             onClose={() => setSessionSheetMode(null)}

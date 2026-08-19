@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS chats (
   custom_name TEXT,
   claude_session_id TEXT,
   codex_session_id TEXT,
+  pi_session_id TEXT,
   current_service_name TEXT,
   working_directory TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
@@ -71,6 +72,9 @@ async function ensureChatAgentColumns(db: Database): Promise<void> {
   const names = new Set(columns.map((column) => column.name));
   if (!names.has('model')) await db.execAsync('ALTER TABLE chats ADD COLUMN model TEXT;');
   if (!names.has('effort')) await db.execAsync('ALTER TABLE chats ADD COLUMN effort TEXT;');
+  if (!names.has('pi_session_id')) {
+    await db.execAsync('ALTER TABLE chats ADD COLUMN pi_session_id TEXT;');
+  }
 }
 
 /**

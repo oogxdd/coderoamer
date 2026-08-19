@@ -25,6 +25,7 @@ describe('integration provider metadata', () => {
       'github',
       'claude',
       'vercel',
+      'pi',
     ]);
   });
 });

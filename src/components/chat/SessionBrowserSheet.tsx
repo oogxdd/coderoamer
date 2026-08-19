@@ -16,6 +16,7 @@ import { ChatMessage, isCodexProvider, providerDisplayName, RemoteAgentSession }
 import { shortWorkingDirectory } from '@/constants/session';
 import { listClaudeSessions, readClaudeSessionMessages } from '@/services/claude-sessions';
 import { listCodexSessions, readCodexSessionMessages } from '@/services/codex-sessions';
+import { listPiSessions, readPiSessionMessages } from '@/services/pi-sessions';
 import { ExecSession, listExecSessions } from '@/services/api';
 import { ChatMessageView } from './ChatMessageView';
 
@@ -74,14 +75,16 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
     setLoading(true);
     setError(undefined);
     try {
-      const [claudeList, codexList] = await Promise.all([
+      const [claudeList, codexList, piList] = await Promise.all([
         listClaudeSessions(spriteName),
         listCodexSessions(spriteName),
+        listPiSessions(spriteName),
       ]);
       setSessions(
         [
           ...claudeList.map((session) => ({ ...session, provider: 'claude' as const })),
           ...codexList.map((session) => ({ ...session, provider: 'codex' as const })),
+          ...piList.map((session) => ({ ...session, provider: 'pi' as const })),
           // Live (still-running) sessions bubble to the top; ties break by recency.
         ].sort((a, b) => Number(b.live) - Number(a.live) || b.modified - a.modified)
       );
@@ -127,9 +130,11 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
       setDetailLoading(true);
       try {
         const msgs =
-          isCodexProvider(session.provider)
-            ? await readCodexSessionMessages(spriteName, session.id)
-            : await readClaudeSessionMessages(spriteName, session.id);
+          session.provider === 'pi'
+            ? await readPiSessionMessages(spriteName, session.id)
+            : isCodexProvider(session.provider)
+              ? await readCodexSessionMessages(spriteName, session.id)
+              : await readClaudeSessionMessages(spriteName, session.id);
         if (request !== detailRequestRef.current) return;
         setDetailMessages(msgs);
       } catch (e: any) {
@@ -192,7 +197,7 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
         <View style={[styles.sourceHeader, { borderBottomColor: colors.border }]}>
           <Text style={[styles.sourceTitle, { color: colors.text }]}>Sprite Chat History</Text>
           <Text style={[styles.sourceMeta, { color: colors.textSecondary }]} numberOfLines={2}>
-            Pulled from Claude and Codex transcript files on {spriteName}
+            Pulled from Claude, Codex, and pi transcript files on {spriteName}
             {lastLoadedAt ? ` · refreshed ${relativeTime(lastLoadedAt)}` : ''}
           </Text>
         </View>
@@ -210,7 +215,7 @@ export function SessionBrowserSheet({ spriteName, onResume, onClose }: SessionBr
             <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
               {error
                 ? error
-                : 'No Claude or Codex sessions found on this sprite yet.'}
+                : 'No Claude, Codex, or pi sessions found on this sprite yet.'}
             </Text>
           </View>
         )

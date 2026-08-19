@@ -13,10 +13,10 @@ import { runExec } from './api';
  * user, forwards any pasted code back into the TTY (Claude), and watches the
  * sprite's credential files to detect completion.
  *
- * Four providers: Codex (ChatGPT), GitHub, Claude, and Vercel.
+ * Five providers: Codex (ChatGPT), GitHub, Claude, Vercel, and pi (API key).
  */
 
-export type ProviderId = 'codex' | 'github' | 'claude' | 'vercel';
+export type ProviderId = 'codex' | 'github' | 'claude' | 'vercel' | 'pi';
 
 export type AccountStatus = Record<ProviderId, boolean>;
 
@@ -72,6 +72,15 @@ export const PROVIDERS: ProviderMeta[] = [
     needsCodePaste: false,
     waitingHint: 'Approve the device on Vercel, then come back — this updates automatically.',
   },
+  {
+    id: 'pi',
+    label: 'Pi',
+    blurb: 'Connect a model provider API key so the pi coding agent can run in this sprite.',
+    monogram: 'π',
+    accent: '#7C3AED',
+    needsCodePaste: false,
+    waitingHint: '',
+  },
 ];
 
 export function providerMeta(id: ProviderId): ProviderMeta {
@@ -84,7 +93,22 @@ export function providerMeta(id: ProviderId): ProviderMeta {
 
 export type AccountSignatures = Record<ProviderId, string>;
 
-const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '', vercel: '' };
+const EMPTY_SIGS: AccountSignatures = { codex: '', github: '', claude: '', vercel: '', pi: '' };
+
+/** pi provider env vars whose presence in ~/.sprite_env authenticates pi. */
+export const PI_API_KEY_PROVIDERS: { label: string; envVar: string }[] = [
+  { label: 'Anthropic', envVar: 'ANTHROPIC_API_KEY' },
+  { label: 'OpenAI', envVar: 'OPENAI_API_KEY' },
+  { label: 'Google Gemini', envVar: 'GEMINI_API_KEY' },
+  { label: 'DeepSeek', envVar: 'DEEPSEEK_API_KEY' },
+  { label: 'xAI', envVar: 'XAI_API_KEY' },
+  { label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY' },
+  { label: 'Groq', envVar: 'GROQ_API_KEY' },
+  { label: 'Mistral', envVar: 'MISTRAL_API_KEY' },
+  { label: 'Z.AI', envVar: 'ZAI_API_KEY' },
+];
+
+const PI_ENV_VARS_PATTERN = PI_API_KEY_PROVIDERS.map((p) => p.envVar).join('|');
 
 /**
  * Return a per-provider "signature" of the on-sprite credentials — the mtime and
@@ -110,7 +134,10 @@ export async function getAccountSignatures(spriteName: string): Promise<AccountS
     `vc="$(sig "\${XDG_DATA_HOME:-$HOME/.local/share}/com.vercel.cli/auth.json")"`,
     `[ -n "$vc" ] || vc="$(sig "$HOME/.config/com.vercel.cli/auth.json")"`,
     `[ -n "$vc" ] || vc="$(sig "$HOME/.vercel/auth.json")"`,
-    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"; echo "vercel=$vc"`,
+    `pi_auth="$(sig "$HOME/.pi/agent/auth.json")"`,
+    `pi_env=""; grep -qsE '^export (${PI_ENV_VARS_PATTERN})=' "$HOME/.sprite_env" 2>/dev/null && pi_env="$(sig "$HOME/.sprite_env")"`,
+    `pi=""; [ -n "$pi_auth" ] && pi="auth:$pi_auth"; [ -n "$pi_env" ] && pi="\${pi:+$pi|}env:$pi_env"`,
+    `echo "codex=$co"; echo "github=$gh"; echo "claude=$cl"; echo "vercel=$vc"; echo "pi=$pi"`,
   ].join('; ');
 
   const { output, success } = await runExec(spriteName, command, 20);
@@ -123,6 +150,7 @@ export async function getAccountSignatures(spriteName: string): Promise<AccountS
     github: read('github'),
     claude: read('claude'),
     vercel: read('vercel'),
+    pi: read('pi'),
   };
 }
 
@@ -134,6 +162,7 @@ export async function checkAccounts(spriteName: string): Promise<AccountStatus> 
     github: !!sigs.github,
     claude: !!sigs.claude,
     vercel: !!sigs.vercel,
+    pi: !!sigs.pi,
   };
 }
 
@@ -204,6 +233,11 @@ function deviceCode(text: string): string | undefined {
  */
 export function parseLoginPrompt(id: ProviderId, raw: string): LoginPrompt {
   const text = stripAnsi(raw);
+
+  if (id === 'pi') {
+    // pi connects via an API key flow, not an interactive TTY login.
+    return {};
+  }
 
   if (id === 'claude') {
     // Two authorize URLs are printed: a localhost-callback one (for auto-open on
@@ -391,6 +425,10 @@ function loginSpec(id: ProviderId): ProviderLoginSpec {
         tty: false,
         cols: 120,
       };
+    case 'pi':
+      // pi has no headless login CLI; the Connect sheet uses the API-key flow
+      // (connectPiWithApiKey) instead of this interactive spec.
+      throw new Error('pi connects with a provider API key, not an interactive login');
   }
 }
 
@@ -880,4 +918,96 @@ export async function startLogin(
   handlers: LoginStreamHandlers
 ): Promise<LoginStream> {
   return startCommandStream(spriteName, id, loginSpec(id), handlers);
+}
+
+// ── pi API-key connection ─────────────────────────────────────────────────────
+
+const PI_ENV_VAR_RE = /^[A-Z][A-Z0-9_]*_API_KEY$/;
+
+function piApiKeyCommand(envVar: string): string {
+  return [
+    `IFS= read -r key`,
+    `[ -n "$key" ] || { echo '@@WISP_PI_ERROR@@No key received.'; exit 2; }`,
+    `case "$key" in *[!A-Za-z0-9_.:+/=~-]* ) echo '@@WISP_PI_ERROR@@Invalid key format.'; exit 2 ;; esac`,
+    `env_file="$HOME/.sprite_env"`,
+    `next_env="$(mktemp)"`,
+    `{ grep -v "^export ${envVar}=" "$env_file" 2>/dev/null || true; printf "export ${envVar}='%s'\\n" "$key"; } > "$next_env"`,
+    `chmod 600 "$next_env"`,
+    `mv "$next_env" "$env_file"`,
+    `grep -qs '^[.] ~/.sprite_env$' "$HOME/.bashrc" 2>/dev/null || printf '\\n. ~/.sprite_env\\n' >> "$HOME/.bashrc"`,
+    `printf '@@WISP_PI_CONNECTED@@\\n'`,
+  ].join('; ');
+}
+
+function piConnectError(output: string): string {
+  const explicit = /@@WISP_PI_ERROR@@([^\r\n]+)/.exec(output)?.[1]?.trim();
+  if (explicit) return explicit;
+  return 'Could not save the API key on this sprite.';
+}
+
+/**
+ * Install a model-provider API key for pi on a sprite. The key is written to
+ * exec stdin after the WebSocket opens — it never appears in an exec URL,
+ * shell command, app log, or Sprites task metadata. Chat turns already source
+ * ~/.sprite_env, so the next `pi` run picks the key up automatically.
+ */
+export async function connectPiWithApiKey(
+  spriteName: string,
+  envVar: string,
+  apiKey: string
+): Promise<void> {
+  const trimmed = apiKey.trim();
+  if (!PI_ENV_VAR_RE.test(envVar)) {
+    throw new Error('Unsupported provider environment variable.');
+  }
+  if (!trimmed || /[\s'"]/.test(trimmed)) {
+    throw new Error('Paste the API key exactly as your provider shows it.');
+  }
+
+  return new Promise<void>(async (resolve, reject) => {
+    let output = '';
+    let settled = false;
+    let stream: LoginStream | undefined;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream?.close();
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error('Saving the API key timed out.')));
+    }, 30_000);
+
+    try {
+      stream = await startCommandStream(
+        spriteName,
+        'pi-api-key',
+        { command: piApiKeyCommand(envVar), tty: false, cols: 120 },
+        {
+          onData: (chunk) => {
+            output += chunk;
+          },
+          onExit: (code) => {
+            if (code === 0 && output.includes('@@WISP_PI_CONNECTED@@')) {
+              finish(() => resolve());
+            } else {
+              finish(() => reject(new Error(piConnectError(output))));
+            }
+          },
+          onError: (message) => {
+            if (!output) output = message;
+          },
+          onClose: () => {
+            setTimeout(() => {
+              if (!settled) finish(() => reject(new Error(piConnectError(output))));
+            }, 250);
+          },
+        }
+      );
+      stream.send(`${trimmed}\n`);
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
 }

@@ -29,6 +29,8 @@ import { TranscriptionProvider } from '@/services/client-transcription';
 import { DEFAULT_WORKING_DIRECTORY, normalizeWorkingDirectory } from '@/constants/session';
 import { CodexModelPicker } from '@/components/chat/CodexModelPicker';
 import { CodexModelOption, getCachedCodexModels } from '@/services/codex-models';
+import { PiModelPicker } from '@/components/chat/PiModelPicker';
+import { getCachedPiModels, PiModelOption } from '@/services/pi-models';
 import {
   GIT_COMMIT,
   GIT_DIRTY,
@@ -48,6 +50,7 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
   { label: 'Claude', value: 'claude' },
   { label: 'Codex Live', value: 'codexAppServer' },
   { label: 'Legacy', value: 'codex' },
+  { label: 'Pi', value: 'pi' },
 ];
 
 const MODEL_OPTIONS: { label: string; value: ClaudeModel }[] = [
@@ -66,6 +69,7 @@ const MAX_TURNS_OPTIONS: { label: string; value: MaxTurns }[] = [
 
 const CLAUDE_EFFORT_OPTIONS: AgentEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CODEX_EFFORT_OPTIONS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
+const PI_EFFORT_OPTIONS: AgentEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 // "AssemblyAI Live" changes the Mic button rather than the Rec/File buttons:
 // it streams to AssemblyAI while you speak instead of using the OS recognizer.
 // Rec and File still upload to AssemblyAI's batch API under it, so one key
@@ -91,6 +95,9 @@ export default function SettingsScreen() {
   const [codexModel, setCodexModel] = useState('');
   const [codexModels, setCodexModels] = useState<CodexModelOption[]>([]);
   const [codexEffort, setCodexEffort] = useState<AgentEffort>('high');
+  const [piModel, setPiModel] = useState('');
+  const [piModels, setPiModels] = useState<PiModelOption[]>([]);
+  const [piEffort, setPiEffort] = useState<AgentEffort>('high');
   const [maxTurns, setMaxTurns] = useState<MaxTurns>(0);
   const [customInstructions, setCustomInstructions] = useState('');
   const [defaultWorkingDirectory, setDefaultWorkingDirectory] = useState(DEFAULT_WORKING_DIRECTORY);
@@ -196,6 +203,9 @@ export default function SettingsScreen() {
           savedNtfyServer,
           savedTranscriptionProvider,
           cachedCodexModels,
+          savedPiModel,
+          savedPiEffort,
+          cachedPiModels,
         ] =
           await Promise.all([
             getSetting('defaultProvider'),
@@ -215,12 +225,16 @@ export default function SettingsScreen() {
             getSetting('ntfyServer'),
             getSetting('transcriptionProvider'),
             getCachedCodexModels(),
+            getSetting('piModel'),
+            getSetting('piEffort'),
+            getCachedPiModels(),
           ]);
 
         if (
           providerSetting === 'claude' ||
           providerSetting === 'codex' ||
-          providerSetting === 'codexAppServer'
+          providerSetting === 'codexAppServer' ||
+          providerSetting === 'pi'
         ) {
           setDefaultProvider(providerSetting as AgentProvider);
         }
@@ -235,6 +249,9 @@ export default function SettingsScreen() {
           normalizeAgentEffortForProvider('codexAppServer', savedCodexEffort) ?? 'high'
         );
         setCodexModels(cachedCodexModels);
+        if (savedPiModel !== null) setPiModel(savedPiModel);
+        setPiEffort(normalizeAgentEffortForProvider('pi', savedPiEffort) ?? 'high');
+        setPiModels(cachedPiModels);
         if (turns !== null) {
           const parsed = parseInt(turns, 10);
           if ([0, 5, 10, 25, 50].includes(parsed)) {
@@ -297,6 +314,17 @@ export default function SettingsScreen() {
   const handleCodexEffortChange = useCallback(async (nextEffort: AgentEffort) => {
     setCodexEffort(nextEffort);
     await setSetting('codexEffort', nextEffort);
+  }, []);
+
+  const handlePiModelChange = useCallback(async (text: string) => {
+    const normalized = text.trim();
+    setPiModel(text);
+    await setSetting('piModel', normalized);
+  }, []);
+
+  const handlePiEffortChange = useCallback(async (nextEffort: AgentEffort) => {
+    setPiEffort(nextEffort);
+    await setSetting('piEffort', nextEffort);
   }, []);
   const selectedCodexModel = codexModels.find((option) => option.model === codexModel);
   const codexEffortOptions = selectedCodexModel?.supportedReasoningEfforts.length
@@ -946,6 +974,47 @@ export default function SettingsScreen() {
           </View>
           <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
             The model field is optional. Empty uses the model configured inside the sprite.
+          </Text>
+        </View>
+      </View>
+
+      <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>PI CONFIGURATION</Text>
+      <View style={[styles.sectionCard, { backgroundColor: colors.card }]}>
+        <View style={[styles.pickerRow, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Model</Text>
+          <PiModelPicker models={piModels} value={piModel} onChange={handlePiModelChange} />
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            The catalog refreshes when you open session settings on a Sprite. Empty uses the
+            provider default configured inside the sprite&apos;s pi.
+          </Text>
+        </View>
+        <View style={[styles.row, styles.rowWithBorder, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.rowLabel, { color: colors.text }]}>Effort</Text>
+        </View>
+        <View style={styles.pickerRow}>
+          <View style={[styles.segmentedControl, { backgroundColor: colors.backgroundElement }]}>
+            {PI_EFFORT_OPTIONS.map((option) => (
+              <Pressable
+                key={option}
+                style={[
+                  styles.segmentButton,
+                  piEffort === option && { backgroundColor: colors.card },
+                ]}
+                onPress={() => handlePiEffortChange(option)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: piEffort === option ? colors.tint : colors.textSecondary },
+                  ]}
+                >
+                  {effortDisplayName(option)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+            pi&apos;s thinking level (--thinking). None disables reasoning entirely.
           </Text>
         </View>
       </View>
