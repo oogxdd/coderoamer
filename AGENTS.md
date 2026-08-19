@@ -168,7 +168,7 @@ builders) live in `src/services/chat-helpers.ts` and are unit-tested. Flow:
 
 ### Codex provider
 
-`AgentProvider = 'claude' | 'codex' | 'codexAppServer'`. The chat layer is
+`AgentProvider = 'claude' | 'codex' | 'codexAppServer' | 'pi'`. The chat layer is
 provider-abstracted. The two Codex providers intentionally expose the two
 transport paths side-by-side:
 
@@ -176,6 +176,19 @@ transport paths side-by-side:
   <id>`, still parsed by `CodexStreamParser` / `parseCodexEvent`.
 - `codexAppServer`: `codex app-server --stdio`; `useChat` drives the
   JSON-RPC handshake through `streamCodexAppServerTurn`
+
+### pi provider
+
+`pi`: the [pi coding agent](https://pi.dev), run as `pi --mode json` per turn
+over the Exec WebSocket (same heartbeat/ntfy/queue machinery). Events parsed by
+`PiStreamParser` (`src/models/pi-events.ts`): session header → `piSessionId`
+(`pi --session <id>` resumes), `message_update` deltas → live preview,
+`message_end` → authoritative blocks, `tool_execution_end` → tool results,
+`agent_end` → turn outcome. Model catalog from `pi --list-models`
+(`src/services/pi-models.ts`); on-disk sessions under
+`~/.pi/agent/sessions/` via `src/services/pi-sessions.ts` (session browser,
+resume, reconcile). API keys are installed per-sprite from the Integrations tab
+(written to `~/.sprite_env`).
   (`initialize` → `thread/start`/`thread/resume` → `turn/start`), with stdin
   carried over the Exec WebSocket.
 
