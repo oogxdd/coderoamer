@@ -13,7 +13,10 @@ jobs:
   build-and-submit:
     name: Build iOS and submit to TestFlight
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # EAS free-tier builds ran ~65 min and the auto-submit can sit in Apple's
+    # processing queue for another hour. 120 min killed the v1.8.0 run while
+    # the submission was still in flight, after the build had already shipped.
+    timeout-minutes: 240
     permissions:
       # Needed to publish the GitHub Release that records the build provenance.
       contents: write
@@ -107,9 +110,27 @@ jobs:
           # since v1.3.0 failed here after building and shipping successfully.
           # Re-read the build to get its terminal state. `build:view` returns a
           # bare object; older versions returned a one-element array, so take
-          # either shape.
-          npx eas-cli@latest build:view "$BUILD_ID" --json --non-interactive \
-            | jq 'if type == "array" then .[0] else . end' > eas-build.json
+          # either shape. It has also failed intermittently right after the
+          # submit finishes (v1.6.0/v1.7.0, "build:view command failed", exit 5)
+          # — so capture the raw output for diagnosis and retry a few times
+          # before letting a transient EAS API hiccup kill the release.
+          fetch_build_json() {
+            for attempt in 1 2 3 4 5; do
+              if npx eas-cli@latest build:view "$BUILD_ID" --json --non-interactive \
+                  > build-view-raw.json 2> build-view-err.txt; then
+                if jq 'if type == "array" then .[0] else . end' \
+                    build-view-raw.json > eas-build.json 2>/dev/null; then
+                  return 0
+                fi
+              fi
+              echo "build:view attempt $attempt failed; retrying in 30s" >&2
+              cat build-view-err.txt >&2 || true
+              head -c 500 build-view-raw.json >&2 || true
+              sleep 30
+            done
+            return 1
+          }
+          fetch_build_json
 
           BUILD_NUMBER="$(jq -r '.appBuildVersion' eas-build.json)"
           BUILD_COMMIT="$(jq -r '.gitCommitHash' eas-build.json)"
